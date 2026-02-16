@@ -36,7 +36,11 @@ git commit -m $msg --allow-empty 2>$null
 
 Write-Host ""
 Write-Host "Step 4: Pushing to GitHub..." -ForegroundColor Yellow
-git push -u origin main
+
+$currentBranch = git rev-parse --abbrev-ref HEAD
+Write-Host "  Current branch: $currentBranch" -ForegroundColor Gray
+
+git push -u origin $currentBranch
 
 if ($LASTEXITCODE -ne 0) {
     Write-Host ""
@@ -52,5 +56,9 @@ Write-Host ""
 Write-Host "Next: Deploy to VPS" -ForegroundColor Cyan
 Write-Host "SSH into VPS console and run:" -ForegroundColor White
 Write-Host ""
-Write-Host "bash <(curl -sSL https://raw.githubusercontent.com/$GithubUsername/massvision-reap3r/main/install-prod.sh)" -ForegroundColor Cyan
+
+$deployBranch = git rev-parse --abbrev-ref HEAD
+$deployUrl = "https://raw.githubusercontent.com/$GithubUsername/massvision-reap3r/$deployBranch/install-prod.sh"
+
+Write-Host "bash <(curl -sSL $deployUrl)" -ForegroundColor Cyan
 Write-Host ""
