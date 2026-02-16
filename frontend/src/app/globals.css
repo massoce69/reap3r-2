@@ -1,0 +1,63 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap');
+
+:root {
+  --bg: #0a0a0f;
+  --surface: #12121a;
+  --card: #1a1a25;
+  --border: #2a2a3a;
+  --accent: #00d4ff;
+  --accent-dim: #0099bb;
+}
+
+* {
+  scrollbar-width: thin;
+  scrollbar-color: #2a2a3a #12121a;
+}
+
+*::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+*::-webkit-scrollbar-track {
+  background: #12121a;
+}
+*::-webkit-scrollbar-thumb {
+  background: #2a2a3a;
+  border-radius: 3px;
+}
+*::-webkit-scrollbar-thumb:hover {
+  background: #3a3a4a;
+}
+
+body {
+  background-color: var(--bg);
+  color: #e0e0e8;
+}
+
+/* Skeleton loading */
+@keyframes shimmer {
+  0% { background-position: -200% 0; }
+  100% { background-position: 200% 0; }
+}
+.skeleton {
+  background: linear-gradient(90deg, #1a1a25 25%, #22222f 50%, #1a1a25 75%);
+  background-size: 200% 100%;
+  animation: shimmer 1.5s infinite;
+  border-radius: 4px;
+}
+
+/* Status dot */
+.status-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  display: inline-block;
+}
+.status-dot.online { background: #00e676; box-shadow: 0 0 6px #00e676; }
+.status-dot.offline { background: #6b6b80; }
+.status-dot.degraded { background: #ffab00; box-shadow: 0 0 6px #ffab00; }
+.status-dot.pending { background: #00d4ff; animation: pulse 2s infinite; }

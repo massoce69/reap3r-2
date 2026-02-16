@@ -1,0 +1,824 @@
+openapi: 3.1.0
+info:
+  title: MASSVISION Reap3r API
+  version: 1.0.0
+  description: Enterprise Agent-Driven Remote Management Platform
+  contact:
+    name: MASSVISION
+    email: support@massvision.com
+
+servers:
+  - url: https://reap3r.example.com
+    description: Production
+  - url: http://localhost:4000
+    description: Development
+
+security:
+  - bearerAuth: []
+
+tags:
+  - name: Auth
+    description: Authentication & user management
+  - name: Agents
+    description: Agent management & monitoring
+  - name: Jobs
+    description: Job creation & tracking
+  - name: Enrollment
+    description: Agent enrollment & deployment
+  - name: Audit
+    description: Audit log
+  - name: Health
+    description: Health checks
+
+paths:
+  /health:
+    get:
+      tags: [Health]
+      summary: Liveness check
+      security: []
+      responses:
+        '200':
+          description: Server is alive
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    example: ok
+                  version:
+                    type: string
+                    example: 1.0.0
+
+  /ready:
+    get:
+      tags: [Health]
+      summary: Readiness check (includes DB)
+      security: []
+      responses:
+        '200':
+          description: Server is ready
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  status:
+                    type: string
+                    enum: [ok, error]
+                  database:
+                    type: string
+                    enum: [connected, error]
+
+  /api/auth/login:
+    post:
+      tags: [Auth]
+      summary: Authenticate user
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/LoginRequest'
+      responses:
+        '200':
+          description: Login successful
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/LoginResponse'
+        '401':
+          $ref: '#/components/responses/Unauthorized'
+
+  /api/auth/me:
+    get:
+      tags: [Auth]
+      summary: Get current user
+      responses:
+        '200':
+          description: Current user profile
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDTO'
+
+  /api/users:
+    post:
+      tags: [Auth]
+      summary: Create new user
+      description: Requires `users:write` permission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateUser'
+      responses:
+        '201':
+          description: User created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/UserDTO'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    get:
+      tags: [Auth]
+      summary: List users
+      description: Requires `users:read` permission
+      responses:
+        '200':
+          description: List of users
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/UserDTO'
+
+  /api/agents:
+    get:
+      tags: [Agents]
+      summary: List agents
+      description: Requires `agents:read` permission
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+            maximum: 100
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [online, offline, degraded, new]
+        - name: search
+          in: query
+          schema:
+            type: string
+        - name: site_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            enum: [hostname, status, last_seen_at, os, created_at]
+        - name: sort_order
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+      responses:
+        '200':
+          description: Paginated agent list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAgents'
+
+  /api/agents/{id}:
+    get:
+      tags: [Agents]
+      summary: Get agent details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Agent details with capabilities
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/AgentDetail'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    delete:
+      tags: [Agents]
+      summary: Delete agent
+      description: Requires `agents:delete` permission
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '204':
+          description: Agent deleted
+
+  /api/agents/{id}/metrics:
+    get:
+      tags: [Agents]
+      summary: Get agent metrics history
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Metrics time series
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/MetricsSnapshot'
+
+  /api/agents/{id}/inventory:
+    get:
+      tags: [Agents]
+      summary: Get latest agent inventory
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Latest inventory snapshot
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InventorySnapshot'
+
+  /api/jobs:
+    post:
+      tags: [Jobs]
+      summary: Create a new job
+      description: |
+        Creates a job and dispatches it to the target agent.
+        Permission required depends on job type.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateJob'
+      responses:
+        '201':
+          description: Job created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDTO'
+        '400':
+          $ref: '#/components/responses/BadRequest'
+    get:
+      tags: [Jobs]
+      summary: List jobs
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 25
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [queued, assigned, running, success, failed, timeout, cancelled]
+        - name: type
+          in: query
+          schema:
+            type: string
+        - name: agent_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Paginated job list
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedJobs'
+
+  /api/jobs/{id}:
+    get:
+      tags: [Jobs]
+      summary: Get job details
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job with result
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JobDTO'
+
+  /api/jobs/{id}/cancel:
+    post:
+      tags: [Jobs]
+      summary: Cancel a job
+      description: Requires `jobs:cancel` permission
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Job cancelled
+
+  /api/enrollment-tokens:
+    post:
+      tags: [Enrollment]
+      summary: Create enrollment token
+      description: Requires `enrollment:write` permission
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/CreateEnrollmentToken'
+      responses:
+        '201':
+          description: Token created
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/EnrollmentTokenDTO'
+    get:
+      tags: [Enrollment]
+      summary: List enrollment tokens
+      responses:
+        '200':
+          description: List of tokens
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: '#/components/schemas/EnrollmentTokenDTO'
+
+  /api/enrollment-tokens/{id}/revoke:
+    post:
+      tags: [Enrollment]
+      summary: Revoke enrollment token
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        '200':
+          description: Token revoked
+
+  /api/deployment/commands:
+    get:
+      tags: [Enrollment]
+      summary: Get agent deployment commands
+      parameters:
+        - name: token
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        '200':
+          description: Copy-paste deployment commands
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/DeploymentCommands'
+
+  /api/audit-logs:
+    get:
+      tags: [Audit]
+      summary: List audit logs
+      description: Requires `audit:read` permission
+      parameters:
+        - name: page
+          in: query
+          schema:
+            type: integer
+            default: 1
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 50
+        - name: action
+          in: query
+          schema:
+            type: string
+        - name: user_id
+          in: query
+          schema:
+            type: string
+            format: uuid
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+      responses:
+        '200':
+          description: Paginated audit logs
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PaginatedAuditLogs'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  responses:
+    Unauthorized:
+      description: Authentication required
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    Forbidden:
+      description: Insufficient permissions
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+    BadRequest:
+      description: Invalid request
+      content:
+        application/json:
+          schema:
+            $ref: '#/components/schemas/ApiError'
+
+  schemas:
+    ApiError:
+      type: object
+      required: [error, statusCode]
+      properties:
+        statusCode:
+          type: integer
+        error:
+          type: string
+        message:
+          type: string
+
+    LoginRequest:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+
+    LoginResponse:
+      type: object
+      properties:
+        token:
+          type: string
+        user:
+          $ref: '#/components/schemas/UserDTO'
+
+    CreateUser:
+      type: object
+      required: [email, password, full_name, role]
+      properties:
+        email:
+          type: string
+          format: email
+        password:
+          type: string
+          minLength: 8
+        full_name:
+          type: string
+        role:
+          type: string
+          enum: [super_admin, org_admin, technician, viewer]
+
+    UserDTO:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        email:
+          type: string
+        full_name:
+          type: string
+        role:
+          type: string
+        org_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    AgentDTO:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        hostname:
+          type: string
+        os:
+          type: string
+        os_version:
+          type: string
+        arch:
+          type: string
+        agent_version:
+          type: string
+        status:
+          type: string
+          enum: [online, offline, degraded, new]
+        ip_address:
+          type: string
+        last_seen_at:
+          type: string
+          format: date-time
+        org_id:
+          type: string
+          format: uuid
+        site_id:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+
+    AgentDetail:
+      allOf:
+        - $ref: '#/components/schemas/AgentDTO'
+        - type: object
+          properties:
+            capabilities:
+              type: array
+              items:
+                type: string
+
+    PaginatedAgents:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AgentDTO'
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        totalPages:
+          type: integer
+
+    CreateJob:
+      type: object
+      required: [agent_id, type, payload]
+      properties:
+        agent_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+          enum: [run_script, collect_metrics, collect_inventory, service_action, process_action, reboot, shutdown]
+        payload:
+          type: object
+          description: Job-type specific payload
+        timeout_secs:
+          type: integer
+          default: 300
+
+    JobDTO:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        agent_id:
+          type: string
+          format: uuid
+        type:
+          type: string
+        status:
+          type: string
+          enum: [queued, assigned, running, success, failed, timeout, cancelled]
+        payload:
+          type: object
+        result:
+          type: object
+          nullable: true
+        created_by:
+          type: string
+          format: uuid
+        created_at:
+          type: string
+          format: date-time
+        started_at:
+          type: string
+          format: date-time
+          nullable: true
+        completed_at:
+          type: string
+          format: date-time
+          nullable: true
+        timeout_secs:
+          type: integer
+
+    PaginatedJobs:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/JobDTO'
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        totalPages:
+          type: integer
+
+    CreateEnrollmentToken:
+      type: object
+      properties:
+        label:
+          type: string
+        site_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        max_uses:
+          type: integer
+
+    EnrollmentTokenDTO:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        token:
+          type: string
+        label:
+          type: string
+        site_id:
+          type: string
+          format: uuid
+        expires_at:
+          type: string
+          format: date-time
+        max_uses:
+          type: integer
+        use_count:
+          type: integer
+        revoked:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+
+    DeploymentCommands:
+      type: object
+      properties:
+        windows:
+          type: string
+          description: PowerShell one-liner
+        linux:
+          type: string
+          description: Bash one-liner
+
+    MetricsSnapshot:
+      type: object
+      properties:
+        collected_at:
+          type: string
+          format: date-time
+        cpu_percent:
+          type: number
+        memory_used_mb:
+          type: number
+        memory_total_mb:
+          type: number
+        disk_used_gb:
+          type: number
+        disk_total_gb:
+          type: number
+        network_rx_bytes:
+          type: integer
+        network_tx_bytes:
+          type: integer
+
+    InventorySnapshot:
+      type: object
+      properties:
+        collected_at:
+          type: string
+          format: date-time
+        data:
+          type: object
+          description: Full inventory JSON
+
+    AuditLogDTO:
+      type: object
+      properties:
+        id:
+          type: string
+          format: uuid
+        action:
+          type: string
+        entity_type:
+          type: string
+        entity_id:
+          type: string
+        user_id:
+          type: string
+          format: uuid
+        org_id:
+          type: string
+          format: uuid
+        ip_address:
+          type: string
+        details:
+          type: object
+        created_at:
+          type: string
+          format: date-time
+
+    PaginatedAuditLogs:
+      type: object
+      properties:
+        data:
+          type: array
+          items:
+            $ref: '#/components/schemas/AuditLogDTO'
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        totalPages:
+          type: integer

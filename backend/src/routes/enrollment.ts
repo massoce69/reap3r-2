@@ -1,0 +1,96 @@
+// ─────────────────────────────────────────────
+// MASSVISION Reap3r — Enrollment Routes
+// ─────────────────────────────────────────────
+import { FastifyInstance } from 'fastify';
+import crypto from 'crypto';
+import { Permission } from '@massvision/shared';
+import { createAuditLog } from '../services/audit.service.js';
+
+export default async function enrollmentRoutes(fastify: FastifyInstance) {
+  // ── List tokens ──
+  fastify.get('/api/enrollment/tokens', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenList)] }, async (request) => {
+    const query = request.query as any;
+    const page = Number(query.page ?? 1);
+    const limit = Math.min(Number(query.limit ?? 50), 200);
+    const offset = (page - 1) * limit;
+
+    const orgId = request.currentUser.org_id;
+    const countRes = await fastify.pg.query(`SELECT count(*)::int FROM enrollment_tokens WHERE org_id = $1`, [orgId]);
+    const dataRes = await fastify.pg.query(
+      `SELECT et.*, c.name as company_name, f.name as folder_name
+       FROM enrollment_tokens et
+       LEFT JOIN companies c ON c.id = et.company_id
+       LEFT JOIN folders f ON f.id = et.folder_id
+       WHERE et.org_id = $1
+       ORDER BY et.created_at DESC LIMIT $2 OFFSET $3`,
+      [orgId, limit, offset],
+    );
+    return { data: dataRes.rows, total: countRes.rows[0].count, page, limit };
+  });
+
+  // ── Create token ──
+  fastify.post('/api/enrollment/tokens', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenCreate)] }, async (request, reply) => {
+    const body = request.body as any;
+    const token = crypto.randomBytes(32).toString('hex');
+    const { rows } = await fastify.pg.query(
+      `INSERT INTO enrollment_tokens (token, name, org_id, site_id, company_id, folder_id, max_uses, expires_at, created_by)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+       RETURNING *`,
+      [
+        token, body.name, request.currentUser.org_id,
+        body.site_id ?? null, body.company_id ?? null, body.folder_id ?? null,
+        body.max_uses ?? null, body.expires_at ?? null, request.currentUser.id,
+      ],
+    );
+    await createAuditLog(fastify, {
+      user_id: request.currentUser.id, org_id: request.currentUser.org_id,
+      action: 'token.create', entity_type: 'enrollment_token', entity_id: rows[0].id,
+      details: { name: body.name }, ip_address: request.ip,
+    });
+    return reply.status(201).send(rows[0]);
+  });
+
+  // ── Revoke token ──
+  fastify.post('/api/enrollment/tokens/:id/revoke', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenRevoke)] }, async (request, reply) => {
+    const { id } = request.params as any;
+    const { rows } = await fastify.pg.query(
+      `UPDATE enrollment_tokens SET revoked = true WHERE id = $1 AND org_id = $2 RETURNING *`,
+      [id, request.currentUser.org_id],
+    );
+    if (rows.length === 0) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
+    await createAuditLog(fastify, {
+      user_id: request.currentUser.id, org_id: request.currentUser.org_id,
+      action: 'token.revoke', entity_type: 'enrollment_token', entity_id: id,
+      details: null, ip_address: request.ip,
+    });
+    return { message: 'Token revoked' };
+  });
+
+  // ── Delete token ──
+  fastify.delete('/api/enrollment/tokens/:id', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenRevoke)] }, async (request, reply) => {
+    const { id } = request.params as any;
+    const { rowCount } = await fastify.pg.query(
+      `DELETE FROM enrollment_tokens WHERE id = $1 AND org_id = $2`,
+      [id, request.currentUser.org_id],
+    );
+    if (rowCount === 0) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
+    return { message: 'Token deleted' };
+  });
+
+  // ── Deployment commands (for copy/paste) ──
+  fastify.get('/api/enrollment/tokens/:id/commands', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenList)] }, async (request, reply) => {
+    const { id } = request.params as any;
+    const { rows } = await fastify.pg.query(
+      `SELECT token FROM enrollment_tokens WHERE id = $1 AND org_id = $2`,
+      [id, request.currentUser.org_id],
+    );
+    if (rows.length === 0) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
+    const t = rows[0].token;
+    const apiBase = process.env.API_BASE_URL || 'https://your-server.massvision.io';
+    return {
+      windows_powershell: `$token="${t}"; Invoke-WebRequest -Uri "${apiBase}/install/windows?token=$token" -OutFile reap3r-installer.exe; Start-Process .\\reap3r-installer.exe -ArgumentList "--token $token --server ${apiBase}" -Wait`,
+      linux_bash: `curl -sSL "${apiBase}/install/linux?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
+      macos_bash: `curl -sSL "${apiBase}/install/macos?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
+    };
+  });
+}

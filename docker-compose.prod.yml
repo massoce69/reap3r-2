@@ -1,0 +1,146 @@
+# ─────────────────────────────────────────────────────────
+# MASSVISION Reap3r — Docker Compose (Production)
+# Optimized for Ubuntu 24.04 LTS
+# ─────────────────────────────────────────────────────────
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-reap3r}
+      POSTGRES_USER: ${DB_USER:-reap3r}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?DB_PASSWORD required}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - internal
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${DB_USER:-reap3r}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 1G
+          cpus: '1.0'
+
+  backend:
+    build:
+      context: .
+      dockerfile: backend/Dockerfile
+    environment:
+      DATABASE_URL: postgres://${DB_USER:-reap3r}:${DB_PASSWORD}@postgres:5432/${DB_NAME:-reap3r}
+      JWT_SECRET: ${JWT_SECRET:?JWT_SECRET required}
+      HMAC_SECRET: ${HMAC_SECRET:?HMAC_SECRET required}
+      PORT: 4000
+      NODE_ENV: production
+      LOG_LEVEL: info
+      CORS_ORIGIN: ${CORS_ORIGIN:-https://reap3r.example.com}
+    networks:
+      - internal
+      - web
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '1.0'
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend/Dockerfile
+    environment:
+      NEXT_PUBLIC_API_URL: ${API_URL:-https://reap3r.example.com}
+      NEXT_PUBLIC_WS_URL: ${WS_URL:-wss://reap3r.example.com}
+    networks:
+      - web
+    depends_on:
+      - backend
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+  nginx:
+    image: nginx:1.25-alpine
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./infra/nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./infra/nginx/conf.d:/etc/nginx/conf.d:ro
+      - ${TLS_CERT_PATH:-./infra/certs/fullchain.pem}:/etc/nginx/ssl/fullchain.pem:ro
+      - ${TLS_KEY_PATH:-./infra/certs/privkey.pem}:/etc/nginx/ssl/privkey.pem:ro
+      - certbot_webroot:/var/www/certbot:ro
+    networks:
+      - web
+    depends_on:
+      - backend
+      - frontend
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 128M
+          cpus: '0.25'
+
+  prometheus:
+    image: prom/prometheus:v2.51.0
+    volumes:
+      - ./infra/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus_data:/prometheus
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.retention.time=90d'
+      - '--web.enable-lifecycle'
+    networks:
+      - internal
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 512M
+          cpus: '0.5'
+
+  grafana:
+    image: grafana/grafana:10.4.0
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD: ${GRAFANA_PASSWORD:?GRAFANA_PASSWORD required}
+      GF_SERVER_ROOT_URL: ${GRAFANA_URL:-https://reap3r.example.com/grafana}
+      GF_SERVER_SERVE_FROM_SUB_PATH: "true"
+      GF_INSTALL_PLUGINS: grafana-clock-panel,grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/grafana/provisioning:/etc/grafana/provisioning:ro
+    networks:
+      - internal
+      - web
+    depends_on:
+      - prometheus
+    restart: always
+    deploy:
+      resources:
+        limits:
+          memory: 256M
+          cpus: '0.5'
+
+volumes:
+  pgdata:
+  prometheus_data:
+  grafana_data:
+  certbot_webroot:
+
+networks:
+  internal:
+    driver: bridge
+  web:
+    driver: bridge

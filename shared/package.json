@@ -1,0 +1,28 @@
+{
+  "name": "@massvision/shared",
+  "version": "1.0.0",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": { "import": "./dist/index.js", "types": "./dist/index.d.ts" },
+    "./protocol": { "import": "./dist/protocol.js", "types": "./dist/protocol.d.ts" },
+    "./jobs": { "import": "./dist/job-types.js", "types": "./dist/job-types.d.ts" },
+    "./rbac": { "import": "./dist/rbac.js", "types": "./dist/rbac.d.ts" },
+    "./schemas": { "import": "./dist/schemas.js", "types": "./dist/schemas.d.ts" }
+  },
+  "scripts": {
+    "build": "tsc",
+    "lint": "tsc --noEmit",
+    "watch": "tsc --watch",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "dependencies": {
+    "zod": "^3.23.0"
+  },
+  "devDependencies": {
+    "typescript": "^5.6.0",
+    "vitest": "^2.1.0"
+  }
+}

@@ -1,0 +1,336 @@
+// ─────────────────────────────────────────────
+// MASSVISION Reap3r — API Client
+// ─────────────────────────────────────────────
+
+const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+
+export class ApiError extends Error {
+  constructor(
+    public statusCode: number,
+    public error: string,
+    message: string
+  ) {
+    super(message);
+    this.name = 'ApiError';
+  }
+}
+
+function getToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem('reap3r_token');
+}
+
+export function setToken(token: string) {
+  localStorage.setItem('reap3r_token', token);
+}
+
+export function clearToken() {
+  localStorage.removeItem('reap3r_token');
+}
+
+async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
+  const token = getToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+    ...(options.headers as Record<string, string> ?? {}),
+  };
+  if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  });
+
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new ApiError(
+      res.status,
+      body.error ?? 'Error',
+      body.message ?? `Request failed: ${res.status}`
+    );
+  }
+
+  return res.json();
+}
+
+// ── Auth ──
+export const api = {
+  auth: {
+    login: (email: string, password: string) =>
+      request<{ token: string; user: any }>('/api/auth/login', {
+        method: 'POST',
+        body: JSON.stringify({ email, password }),
+      }),
+    me: () => request<any>('/api/auth/me'),
+  },
+
+  users: {
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/users${qs}`);
+    },
+    create: (data: any) =>
+      request<any>('/api/users', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: any) =>
+      request<any>(`/api/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+  },
+
+  agents: {
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number; page: number; limit: number }>(`/api/agents${qs}`);
+    },
+    get: (id: string) => request<any>(`/api/agents/${id}`),
+    delete: (id: string) => request<any>(`/api/agents/${id}`, { method: 'DELETE' }),
+    stats: () => request<any>('/api/agents/stats'),
+    move: (id: string, data: any) =>
+      request<any>(`/api/agents/${id}/move`, { method: 'POST', body: JSON.stringify(data) }),
+  },
+
+  jobs: {
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number; page: number; limit: number }>(`/api/jobs${qs}`);
+    },
+    get: (id: string) => request<any>(`/api/jobs/${id}`),
+    create: (data: any) =>
+      request<any>('/api/jobs', { method: 'POST', body: JSON.stringify(data) }),
+    cancel: (id: string) =>
+      request<any>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
+    stats: () => request<any>('/api/jobs/stats'),
+  },
+
+  audit: {
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number; page: number; limit: number }>(`/api/audit${qs}`);
+    },
+  },
+
+  enrollment: {
+    tokens: {
+      list: (params?: Record<string, string>) => {
+        const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+        return request<{ data: any[]; total: number }>(`/api/enrollment/tokens${qs}`);
+      },
+      create: (data: any) =>
+        request<any>('/api/enrollment/tokens', { method: 'POST', body: JSON.stringify(data) }),
+      revoke: (id: string) =>
+        request<any>(`/api/enrollment/tokens/${id}/revoke`, { method: 'POST' }),
+      delete: (id: string) =>
+        request<any>(`/api/enrollment/tokens/${id}`, { method: 'DELETE' }),
+      commands: (id: string) => request<any>(`/api/enrollment/tokens/${id}/commands`),
+    },
+  },
+
+  companies: {
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/companies${qs}`);
+    },
+    get: (id: string) => request<any>(`/api/companies/${id}`),
+    create: (data: any) =>
+      request<any>('/api/companies', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: any) =>
+      request<any>(`/api/companies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    delete: (id: string) =>
+      request<any>(`/api/companies/${id}`, { method: 'DELETE' }),
+  },
+
+  folders: {
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/folders${qs}`);
+    },
+    get: (id: string) => request<any>(`/api/folders/${id}`),
+    create: (data: any) =>
+      request<any>('/api/folders', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: any) =>
+      request<any>(`/api/folders/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    delete: (id: string) =>
+      request<any>(`/api/folders/${id}`, { method: 'DELETE' }),
+  },
+
+  vault: {
+    list: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/vault/secrets${qs}`);
+    },
+    create: (data: any) =>
+      request<any>('/api/vault/secrets', { method: 'POST', body: JSON.stringify(data) }),
+    update: (id: string, data: any) =>
+      request<any>(`/api/vault/secrets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    delete: (id: string) =>
+      request<any>(`/api/vault/secrets/${id}`, { method: 'DELETE' }),
+    reveal: (id: string) =>
+      request<any>(`/api/vault/secrets/${id}/reveal`, { method: 'POST' }),
+    use: (id: string) =>
+      request<any>(`/api/vault/secrets/${id}/use`, { method: 'POST' }),
+    accessLogs: (id: string) =>
+      request<{ data: any[] }>(`/api/vault/secrets/${id}/access-logs`),
+    
+    // Premium: Versioning
+    versions: (id: string) =>
+      request<{ data: any[] }>(`/api/vault/secrets/${id}/versions`),
+    revealVersion: (id: string, versionId: string) =>
+      request<{ value: string }>(`/api/vault/secrets/${id}/versions/${versionId}/reveal`, { method: 'POST' }),
+    
+    // Premium: Sharing
+    permissions: (id: string) =>
+      request<{ data: any[] }>(`/api/vault/secrets/${id}/permissions`),
+    share: (id: string, data: { principal_type: string; principal_id: string; rights: string[] }) =>
+      request<any>(`/api/vault/secrets/${id}/share`, { method: 'POST', body: JSON.stringify(data) }),
+    revokePermission: (id: string, permId: string) =>
+      request<any>(`/api/vault/secrets/${id}/permissions/${permId}`, { method: 'DELETE' }),
+    
+    // Premium: Rotation
+    expiring: (days?: number) => {
+      const qs = days ? `?days=${days}` : '';
+      return request<{ data: any[] }>(`/api/vault/expiring${qs}`);
+    },
+    rotate: (id: string) =>
+      request<any>(`/api/vault/secrets/${id}/rotate`, { method: 'POST' }),
+  },
+
+  chat: {
+    channels: {
+      list: () => request<{ data: any[] }>('/api/chat/channels'),
+      create: (data: any) =>
+        request<any>('/api/chat/channels', { method: 'POST', body: JSON.stringify(data) }),
+      messages: (id: string, params?: Record<string, string>) => {
+        const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+        return request<{ data: any[]; total: number }>(`/api/chat/channels/${id}/messages${qs}`);
+      },
+      sendMessage: (id: string, data: any) =>
+        request<any>(`/api/chat/channels/${id}/messages`, { method: 'POST', body: JSON.stringify(data) }),
+      addMember: (id: string, userId: string) =>
+        request<any>(`/api/chat/channels/${id}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+      removeMember: (id: string, userId: string) =>
+        request<any>(`/api/chat/channels/${id}/members/${userId}`, { method: 'DELETE' }),
+    },
+  },
+
+  edr: {
+    events: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/edr/events${qs}`);
+    },
+    detections: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/edr/detections${qs}`);
+    },
+    updateDetection: (id: string, data: any) =>
+      request<any>(`/api/edr/detections/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    incidents: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/edr/incidents${qs}`);
+    },
+    createIncident: (data: any) =>
+      request<any>('/api/edr/incidents', { method: 'POST', body: JSON.stringify(data) }),
+    updateIncident: (id: string, data: any) =>
+      request<any>(`/api/edr/incidents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    respond: (data: any) =>
+      request<any>('/api/edr/respond', { method: 'POST', body: JSON.stringify(data) }),
+  },
+
+  admin: {
+    users: {
+      list: (params?: Record<string, string>) => {
+        const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+        return request<{ data: any[]; total: number }>(`/api/admin/users${qs}`);
+      },
+      create: (data: any) =>
+        request<any>('/api/admin/users', { method: 'POST', body: JSON.stringify(data) }),
+      update: (id: string, data: any) =>
+        request<any>(`/api/admin/users/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+      suspend: (id: string, active: boolean) =>
+        request<any>(`/api/admin/users/${id}/suspend`, { method: 'POST', body: JSON.stringify({ active }) }),
+      changeRole: (id: string, role: string) =>
+        request<any>(`/api/admin/users/${id}/role`, { method: 'PATCH', body: JSON.stringify({ role }) }),
+      getSessions: (id: string) =>
+        request<any[]>(`/api/admin/users/${id}/sessions`),
+      revokeAllSessions: (id: string) =>
+        request<any>(`/api/admin/users/${id}/sessions/revoke-all`, { method: 'POST' }),
+      setupMFA: (id: string, secret: string) =>
+        request<any>(`/api/admin/users/${id}/mfa/setup`, { method: 'POST', body: JSON.stringify({ secret }) }),
+      enableMFA: (id: string) =>
+        request<any>(`/api/admin/users/${id}/mfa/enable`, { method: 'POST' }),
+      disableMFA: (id: string) =>
+        request<any>(`/api/admin/users/${id}/mfa/disable`, { method: 'POST' }),
+    },
+    sessions: {
+      revoke: (id: string) =>
+        request<any>(`/api/admin/sessions/${id}`, { method: 'DELETE' }),
+    },
+    roles: {
+      list: () =>
+        request<any[]>('/api/admin/roles'),
+    },
+    teams: {
+      list: () => request<{ data: any[] }>('/api/admin/teams'),
+      create: (data: any) =>
+        request<any>('/api/admin/teams', { method: 'POST', body: JSON.stringify(data) }),
+      update: (id: string, data: any) =>
+        request<any>(`/api/admin/teams/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+      delete: (id: string) =>
+        request<any>(`/api/admin/teams/${id}`, { method: 'DELETE' }),
+      members: (id: string) =>
+        request<{ data: any[] }>(`/api/admin/teams/${id}/members`),
+      addMember: (id: string, userId: string) =>
+        request<any>(`/api/admin/teams/${id}/members`, { method: 'POST', body: JSON.stringify({ user_id: userId }) }),
+      removeMember: (id: string, userId: string) =>
+        request<any>(`/api/admin/teams/${id}/members/${userId}`, { method: 'DELETE' }),
+    },
+    policies: {
+      list: () => request<{ data: any[] }>('/api/admin/policies'),
+      update: (id: string, data: any) =>
+        request<any>(`/api/admin/policies/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    },
+    loginEvents: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/admin/login-events${qs}`);
+    },
+  },
+
+  // ── Alerting ──
+  alerts: {
+    rules: {
+      list: (params?: Record<string, string>) => {
+        const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+        return request<{ data: any[]; total: number }>(`/api/alerts/rules${qs}`);
+      },
+      get: (id: string) => request<any>(`/api/alerts/rules/${id}`),
+      create: (data: any) =>
+        request<any>('/api/alerts/rules', { method: 'POST', body: JSON.stringify(data) }),
+      update: (id: string, data: any) =>
+        request<any>(`/api/alerts/rules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+      delete: (id: string) =>
+        request<any>(`/api/alerts/rules/${id}`, { method: 'DELETE' }),
+    },
+    events: {
+      list: (params?: Record<string, string>) => {
+        const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+        return request<{ data: any[]; total: number }>(`/api/alerts/events${qs}`);
+      },
+      get: (id: string) => request<any>(`/api/alerts/events/${id}`),
+      ack: (id: string, note?: string) =>
+        request<any>(`/api/alerts/events/${id}/ack`, { method: 'POST', body: JSON.stringify({ note }) }),
+      resolve: (id: string, note?: string) =>
+        request<any>(`/api/alerts/events/${id}/resolve`, { method: 'POST', body: JSON.stringify({ note }) }),
+      snooze: (id: string, duration_min: number, note?: string) =>
+        request<any>(`/api/alerts/events/${id}/snooze`, { method: 'POST', body: JSON.stringify({ duration_min, note }) }),
+    },
+    stats: () => request<any>('/api/alerts/stats'),
+    integrations: {
+      list: () => request<{ data: any[] }>('/api/alerts/integrations'),
+      create: (data: any) =>
+        request<any>('/api/alerts/integrations', { method: 'POST', body: JSON.stringify(data) }),
+      update: (id: string, data: any) =>
+        request<any>(`/api/alerts/integrations/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+      delete: (id: string) =>
+        request<any>(`/api/alerts/integrations/${id}`, { method: 'DELETE' }),
+    },
+    test: (channel: string) =>
+      request<any>('/api/alerts/test', { method: 'POST', body: JSON.stringify({ channel }) }),
+  },
+};
