@@ -11,6 +11,19 @@ echo ""
 
 APP_DIR="/app/massvision-reap3r"
 
+# 0. Swap Setup (Crucial for build)
+echo "[0/8] Configuring Swap Memory..."
+if [ ! -f /swapfile ]; then
+    fallocate -l 2G /swapfile
+    chmod 600 /swapfile
+    mkswap /swapfile
+    swapon /swapfile
+    echo '/swapfile none swap sw 0 0' >> /etc/fstab
+    echo "Swap enabled"
+else
+    echo "Swap already exists"
+fi
+
 # 1. System Update
 echo "[1/8] System Update..."
 apt-get update > /dev/null 2>&1
@@ -53,21 +66,35 @@ mkdir -p /app
 cd /app
 
 if [ ! -d "massvision-reap3r" ]; then
-    # Try GitHub first, fallback to creating empty dir
-    git clone https://github.com/yourusername/massvision-reap3r.git 2>/dev/null || \
-    git clone https://github.com/massvision/reap3r.git massvision-reap3r 2>/dev/null || \
-    mkdir -p massvision-reap3r
+    # Try GitHub if provided, else create empty for manual
+    if git ls-remote https://github.com/yourusername/massvision-reap3r.git >/dev/null 2>&1; then
+        git clone https://github.com/yourusername/massvision-reap3r.git 2>/dev/null
+    else
+        mkdir -p massvision-reap3r
+    fi
 else
+    # Only pull if .git exists (GitHub deployment)
     cd massvision-reap3r
-    git fetch origin 2>/dev/null && git reset --hard origin/main 2>/dev/null || true
+    if [ -d ".git" ]; then
+        git fetch origin 2>/dev/null && git reset --hard origin/main 2>/dev/null || true
+    fi
     cd /app
 fi
 
 cd "$APP_DIR"
 
 # 6. Dependencies & Build
-echo "[6/8] Building Application..."
-npm ci --workspaces > /dev/null 2>&1
+echo "[6/8] Building Application (using swap)..."
+echo "  Installing dependencies..."
+# Use npm install instead of ci for flexibility and handle errors individually
+if ! npm install --workspaces; then
+    echo "  ⚠️ npm install failed! Retrying with --force..."
+    npm install --workspaces --force
+    if [ $? -ne 0 ]; then
+        echo "  ❌ Failed to install dependencies."
+        exit 1
+    fi
+fi
 
 # Setup environment
 mkdir -p backend frontend
@@ -83,17 +110,42 @@ WEBSOCKET_PORT=4001
 EOF
 
 cat > frontend/.env.local <<EOF
-NEXT_PUBLIC_API_URL=http://localhost/api
+NEXT_PUBLIC_API_URL=/api
 EOF
+
+# Build shared explicitly
+echo "  Building shared library..."
+cd "$APP_DIR/shared" || exit 1
+npm run build || { echo "❌ Shared build failed"; exit 1; }
 
 # Run migrations
 export DATABASE_URL="postgresql://reap3r:reap3r_secret@localhost:5432/reap3r"
 cd "$APP_DIR/backend"
-npm run db:migrate > /dev/null 2>&1
-npm run build > /dev/null 2>&1
+echo "  Setting up backend..."
+if ! npm run db:migrate; then
+    echo "  ⚠️ Migration failed! Check DB logs."
+    # Non-fatal for initial deploys sometimes, but usually fatal
+    exit 1
+fi
+if ! npm run build; then
+    echo "  ❌ Backend build failed."
+    exit 1
+fi
 
 cd "$APP_DIR/frontend"
-npm run build > /dev/null 2>&1
+echo "  Building frontend (Next.js)..."
+# Increase node memory limit
+export NODE_OPTIONS="--max-old-space-size=4096"
+if ! npm run build; then
+    echo "  ❌ Frontend build failed."
+    # Try cleaner build
+    rm -rf .next node_modules
+    npm install
+    if ! npm run build; then
+        echo "  ❌ Frontend build failed AGAIN."
+        exit 1
+    fi
+fi
 
 # 7. Services Start
 echo "[7/8] Starting Services..."

@@ -72,19 +72,19 @@ async function main() {
   }
 
   // ── Routes ──
-  await fastify.register(healthRoutes);
-  await fastify.register(authRoutes);
-  await fastify.register(agentRoutes);
-  await fastify.register(jobRoutes);
-  await fastify.register(auditRoutes);
-  await fastify.register(enrollmentRoutes);
-  await fastify.register(companyRoutes);
-  await fastify.register(folderRoutes);
-  await fastify.register(vaultRoutes);
-  await fastify.register(chatRoutes);
-  await fastify.register(edrRoutes);
-  await fastify.register(adminRoutes);
-  await fastify.register(alertingRoutes);
+  await fastify.register(healthRoutes, { prefix: '/api' });
+  await fastify.register(authRoutes, { prefix: '/api' });
+  await fastify.register(agentRoutes, { prefix: '/api' });
+  await fastify.register(jobRoutes, { prefix: '/api' });
+  await fastify.register(auditRoutes, { prefix: '/api' });
+  await fastify.register(enrollmentRoutes, { prefix: '/api' });
+  await fastify.register(companyRoutes, { prefix: '/api' });
+  await fastify.register(folderRoutes, { prefix: '/api' });
+  await fastify.register(vaultRoutes, { prefix: '/api' });
+  await fastify.register(chatRoutes, { prefix: '/api' });
+  await fastify.register(edrRoutes, { prefix: '/api' });
+  await fastify.register(adminRoutes, { prefix: '/api' });
+  await fastify.register(alertingRoutes, { prefix: '/api' });
 
   // ── Agent Gateway (WS) ──
   setupAgentGateway(fastify);

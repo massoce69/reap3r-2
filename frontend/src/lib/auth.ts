@@ -15,6 +15,7 @@ interface User {
 interface AuthState {
   user: User | null;
   initialized: boolean;
+  loading: boolean;
   error: string | null;
   login: (email: string, password: string) => Promise<boolean>;
   logout: () => void;
@@ -24,17 +25,18 @@ interface AuthState {
 export const useAuth = create<AuthState>((set) => ({
   user: null,
   initialized: false,
+  loading: false,
   error: null,
 
   login: async (email, password) => {
-    set({ error: null });
+    set({ loading: true, error: null });
     try {
       const res = await api.auth.login(email, password);
       setToken(res.token);
-      set({ user: res.user });
+      set({ user: res.user, loading: false });
       return true;
     } catch (err: any) {
-      set({ error: err.message });
+      set({ error: err.message, loading: false });
       return false;
     }
   },
