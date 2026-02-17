@@ -44,7 +44,7 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
   }, async (request, reply) => {
     const body = parseBody(CreateAlertRuleSchema, request.body, reply);
     if (!body) return;
-    const rule = await alertSvc.createAlertRule(request.currentUser.org_id, request.currentUser.id, body);
+    const rule = await alertSvc.createAlertRule(request.currentUser.org_id, request.currentUser.id, body as any);
     await request.audit({
       action: 'alert_rule_create',
       entity_type: 'alert_rule',
@@ -62,7 +62,7 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
     if (!id) return;
     const body = parseBody(UpdateAlertRuleSchema, request.body, reply);
     if (!body) return;
-    const rule = await alertSvc.updateAlertRule(request.currentUser.org_id, id, body);
+    const rule = await alertSvc.updateAlertRule(request.currentUser.org_id, id, body as any);
     if (!rule) return reply.status(404).send({ error: 'Rule not found' });
     await request.audit({
       action: 'alert_rule_update',
@@ -167,7 +167,7 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
       action: 'alert_event_snooze',
       entity_type: 'alert_event',
       entity_id: id,
-      details: { duration_min: body.duration_min, note: body.note },
+      details: { duration_min: body.data.duration_min, note: body.data.note },
     });
     return { ok: true };
   });
