@@ -165,5 +165,14 @@ CREATE INDEX IF NOT EXISTS idx_metrics_org_time ON metrics_timeseries(org_id, co
 -- ══════════════════════════════════════════════
 -- 11) TRIGGERS for updated_at on new tables
 -- ══════════════════════════════════════════════
-CREATE TRIGGER IF NOT EXISTS trg_api_keys_updated BEFORE UPDATE ON api_keys FOR EACH ROW EXECUTE FUNCTION update_updated_at();
-CREATE TRIGGER IF NOT EXISTS trg_notification_channels_updated BEFORE UPDATE ON notification_channels FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_api_keys_updated') THEN
+    CREATE TRIGGER trg_api_keys_updated BEFORE UPDATE ON api_keys FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+END $$;
+
+DO $$ BEGIN
+  IF NOT EXISTS (SELECT 1 FROM pg_trigger WHERE tgname = 'trg_notification_channels_updated') THEN
+    CREATE TRIGGER trg_notification_channels_updated BEFORE UPDATE ON notification_channels FOR EACH ROW EXECUTE FUNCTION update_updated_at();
+  END IF;
+END $$;
