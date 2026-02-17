@@ -374,7 +374,7 @@ function IntegrationsTab() {
                   </Button>
                 </div>
               </div>
-              {testResult?.id === integ.id && (
+              {testResult?.id === integ.id && testResult && (
                 <div className={`mt-3 px-3 py-2 rounded-lg text-xs flex items-center gap-2 ${testResult.ok ? 'bg-reap3r-success/10 text-reap3r-success' : 'bg-reap3r-danger/10 text-reap3r-danger'}`}>
                   {testResult.ok ? <CheckCircle className="w-3 h-3" /> : <AlertTriangle className="w-3 h-3" />}
                   {testResult.ok ? 'Test notification sent successfully' : `Test failed: ${testResult.error}`}
