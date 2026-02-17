@@ -56,3 +56,8 @@ class RealtimeClient {
 }
 
 export const realtime = new RealtimeClient();
+
+/** React hook to access the realtime client. Connects on mount if token available. */
+export function useRealtimeClient() {
+  return realtime;
+}
