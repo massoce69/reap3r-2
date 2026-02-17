@@ -27,20 +27,24 @@ CREATE INDEX IF NOT EXISTS idx_metrics_org_agent_time ON metrics_timeseries(org_
 -- DELETE FROM metrics_timeseries WHERE collected_at < NOW() - INTERVAL '30 days';
 
 -- ══════════════════════════════════════════════
--- 4) EDR RULES: ensure table exists for detection rule matching
+-- 4) EDR RULES: ensure columns exist (table may already exist from earlier migration)
 -- ══════════════════════════════════════════════
 CREATE TABLE IF NOT EXISTS edr_rules (
   id            UUID PRIMARY KEY DEFAULT gen_random_uuid(),
   org_id        UUID NOT NULL REFERENCES orgs(id) ON DELETE CASCADE,
   name          VARCHAR(200) NOT NULL,
   description   TEXT,
-  event_type    VARCHAR(50) NOT NULL,
+  event_type    VARCHAR(50) NOT NULL DEFAULT 'generic',
   severity      VARCHAR(20) NOT NULL DEFAULT 'medium',
-  logic         JSONB NOT NULL DEFAULT '{}',       -- matching criteria
+  logic         JSONB NOT NULL DEFAULT '{}',
   is_enabled    BOOLEAN NOT NULL DEFAULT TRUE,
   created_at    TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   updated_at    TIMESTAMPTZ NOT NULL DEFAULT NOW()
 );
+-- Add missing columns to pre-existing table
+ALTER TABLE edr_rules ADD COLUMN IF NOT EXISTS event_type VARCHAR(50) NOT NULL DEFAULT 'generic';
+ALTER TABLE edr_rules ADD COLUMN IF NOT EXISTS is_enabled BOOLEAN NOT NULL DEFAULT TRUE;
+ALTER TABLE edr_rules ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NOT NULL DEFAULT NOW();
 CREATE INDEX IF NOT EXISTS idx_edr_rules_org ON edr_rules(org_id);
 CREATE INDEX IF NOT EXISTS idx_edr_rules_event ON edr_rules(event_type);
 
