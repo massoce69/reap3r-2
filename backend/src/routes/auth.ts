@@ -17,7 +17,7 @@ function generateTOTP(secret: string, window = 0): string {
   const buf = Buffer.alloc(8);
   buf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
   buf.writeUInt32BE(counter & 0xffffffff, 4);
-  const hmac = crypto.createHmac('sha1', Buffer.from(secret, 'base32'));
+  const hmac = crypto.createHmac('sha1', Buffer.from(secret, 'hex'));
   hmac.update(buf);
   const hash = hmac.digest();
   const offset = hash[hash.length - 1] & 0xf;
@@ -189,19 +189,20 @@ export default async function authRoutes(fastify: FastifyInstance) {
   });
 
   // ── Update user ──
-  fastify.patch('/api/users/:id', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.UserUpdate)] }, async (request) => {
+  fastify.patch('/api/users/:id', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.UserUpdate)] }, async (request, reply) => {
     const id = parseUUID((request.params as any).id, reply);
     if (!id) return;
     const body = parseBody(UpdateUserSchema, request.body, reply);
     if (!body) return;
+    const rawBody = request.body as any;
     const fields: string[] = [];
     const params: unknown[] = [];
     let idx = 1;
     if (body.name) { fields.push(`name = $${idx++}`); params.push(body.name); }
     if (body.role) { fields.push(`role = $${idx++}`); params.push(body.role); }
     if (body.is_active !== undefined) { fields.push(`is_active = $${idx++}`); params.push(body.is_active); }
-    if (body.password) {
-      const hash = await bcrypt.hash(body.password, config.bcryptRounds);
+    if (rawBody.password && typeof rawBody.password === 'string' && rawBody.password.length >= 8) {
+      const hash = await bcrypt.hash(rawBody.password, config.bcryptRounds);
       fields.push(`password_hash = $${idx++}`);
       params.push(hash);
     }

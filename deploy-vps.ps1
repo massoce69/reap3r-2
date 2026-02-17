@@ -246,7 +246,7 @@ if [ ! -d "$AppDir" ]; then
     mkdir -p /app
     cd /app
     # À remplacer par votre repo Git
-    git clone https://github.com/yourusername/massvision-reap3r.git massvision-reap3r 2>/dev/null || \
+    git clone https://github.com/massoce69/reap3r-2.git massvision-reap3r 2>/dev/null || \
     mkdir -p massvision-reap3r
 else
     cd "$AppDir"
