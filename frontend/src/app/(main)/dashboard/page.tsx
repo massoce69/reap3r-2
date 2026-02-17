@@ -51,15 +51,12 @@ export default function DashboardPage() {
       const timer = setTimeout(loadData, 2000);
       return () => clearTimeout(timer);
     };
-    ws.on('agent_online', handleUpdate);
-    ws.on('agent_offline', handleUpdate);
-    ws.on('job_update', handleUpdate);
-    ws.on('alert_event', handleUpdate);
+    const unsub1 = ws.on('agent_online', handleUpdate);
+    const unsub2 = ws.on('agent_offline', handleUpdate);
+    const unsub3 = ws.on('job_update', handleUpdate);
+    const unsub4 = ws.on('alert_event', handleUpdate);
     return () => {
-      ws.off('agent_online', handleUpdate);
-      ws.off('agent_offline', handleUpdate);
-      ws.off('job_update', handleUpdate);
-      ws.off('alert_event', handleUpdate);
+      unsub1(); unsub2(); unsub3(); unsub4();
     };
   }, [ws, loadData]);
 
