@@ -3,7 +3,9 @@
 // Sends notifications via Teams, Email, PagerDuty, Opsgenie, Webhook
 // ─────────────────────────────────────────────
 import { query } from '../db/pool.js';
+import { config } from '../config.js';
 import * as alertSvc from './alerting.service.js';
+import nodemailer from 'nodemailer';
 
 interface NotifPayload {
   event_id: string;
@@ -96,21 +98,76 @@ async function sendTeams(p: NotifPayload): Promise<void> {
   }
 }
 
-// ── Email (SMTP stub — production: use nodemailer or SES) ──
+// ── Email (SMTP via nodemailer) ──
 async function sendEmail(p: NotifPayload): Promise<void> {
   const integrations = await alertSvc.getIntegrationsByType(p.org_id, 'email');
   if (!integrations.length) {
-    // Log only — email not configured
     console.warn('[notifier] No email integration configured, skipping');
     return;
   }
 
   for (const integ of integrations) {
     const smtpConfig = integ.config;
-    // In production, use nodemailer here
-    // For now, log the intent
-    console.log(`[notifier:email] Would send to ${p.recipient ?? smtpConfig?.to ?? 'default'}: [${p.severity}] ${p.title}`);
-    console.log(`[notifier:email] SMTP host: ${smtpConfig?.host ?? 'not set'}, from: ${smtpConfig?.from ?? 'not set'}`);
+    const host = smtpConfig?.host ?? config.smtp.host;
+    const port = smtpConfig?.port ?? config.smtp.port;
+    const user = smtpConfig?.user ?? config.smtp.user;
+    const pass = smtpConfig?.pass ?? config.smtp.pass;
+    const from = smtpConfig?.from ?? config.smtp.from;
+    const to = p.recipient ?? smtpConfig?.to;
+
+    if (!host || !to) {
+      console.warn('[notifier:email] SMTP host or recipient not configured, skipping');
+      continue;
+    }
+
+    const transporter = nodemailer.createTransport({
+      host,
+      port,
+      secure: port === 465,
+      auth: user ? { user, pass } : undefined,
+      tls: { rejectUnauthorized: false },
+    });
+
+    const severityColors: Record<string, string> = {
+      critical: '#DC2626',
+      high: '#EA580C',
+      medium: '#D97706',
+      low: '#16A34A',
+      info: '#2563EB',
+    };
+    const color = severityColors[p.severity] ?? '#6B7280';
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"></head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: #111; color: #e5e5e5; padding: 24px;">
+  <div style="max-width: 600px; margin: 0 auto; background: #1a1a1a; border-radius: 12px; border: 1px solid #333; overflow: hidden;">
+    <div style="background: ${color}; padding: 16px 24px;">
+      <h2 style="margin: 0; color: white; font-size: 16px;">🚨 Reap3r Alert — ${p.severity.toUpperCase()}</h2>
+    </div>
+    <div style="padding: 24px;">
+      <h3 style="margin: 0 0 16px; color: #f5f5f5;">${p.title}</h3>
+      <p style="color: #a3a3a3; line-height: 1.6;">${p.body}</p>
+      <hr style="border: none; border-top: 1px solid #333; margin: 20px 0;">
+      <p style="font-size: 12px; color: #737373;">
+        Event ID: ${p.event_id}<br>
+        Time: ${new Date().toISOString()}<br>
+        Source: MASSVISION Reap3r
+      </p>
+    </div>
+  </div>
+</body>
+</html>`;
+
+    await transporter.sendMail({
+      from: `"Reap3r Alerts" <${from}>`,
+      to,
+      subject: `[${p.severity.toUpperCase()}] ${p.title}`,
+      html,
+    });
+
+    console.log(`[notifier:email] Sent to ${to}: [${p.severity}] ${p.title}`);
   }
 }
 

@@ -2,9 +2,11 @@
 // MASSVISION Reap3r — EDR Routes
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
+import { z } from 'zod';
 import { Permission, CreateIncidentSchema, EdrRespondSchema, JobType } from '@massvision/shared';
 import * as edr from '../services/edr.service.js';
 import * as jobSvc from '../services/job.service.js';
+import { parseUUID, clampLimit } from '../lib/validate.js';
 
 export default async function edrRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', fastify.authenticate);
@@ -16,7 +18,7 @@ export default async function edrRoutes(fastify: FastifyInstance) {
     const q = request.query as any;
     return edr.listSecurityEvents(request.currentUser.org_id, {
       page: Number(q.page) || 1,
-      limit: Number(q.limit) || 50,
+      limit: clampLimit(q.limit, 50),
       agent_id: q.agent_id,
       event_type: q.event_type,
       severity: q.severity,
@@ -30,7 +32,7 @@ export default async function edrRoutes(fastify: FastifyInstance) {
     const q = request.query as any;
     return edr.listDetections(request.currentUser.org_id, {
       page: Number(q.page) || 1,
-      limit: Number(q.limit) || 50,
+      limit: clampLimit(q.limit, 50),
       status: q.status,
       severity: q.severity,
       agent_id: q.agent_id,
@@ -41,8 +43,12 @@ export default async function edrRoutes(fastify: FastifyInstance) {
   fastify.patch('/api/edr/detections/:id/status', {
     preHandler: [fastify.requirePermission(Permission.EdrDetectionsView)],
   }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const { status } = request.body as { status: string };
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
+    const statusSchema = z.object({ status: z.enum(['open', 'acknowledged', 'resolved', 'false_positive']) });
+    const parsed = statusSchema.safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ statusCode: 400, error: 'Bad Request', message: parsed.error.message });
+    const { status } = parsed.data;
     const ok = await edr.updateDetectionStatus(request.currentUser.org_id, id, status, request.currentUser.id);
     if (!ok) return reply.status(404).send({ error: 'Not found' });
     await request.audit({ action: 'detection_status_update', entity_type: 'detection', entity_id: id, details: { status } });
@@ -56,7 +62,7 @@ export default async function edrRoutes(fastify: FastifyInstance) {
     const q = request.query as any;
     return edr.listIncidents(request.currentUser.org_id, {
       page: Number(q.page) || 1,
-      limit: Number(q.limit) || 25,
+      limit: clampLimit(q.limit),
       status: q.status,
       severity: q.severity,
     });
@@ -78,8 +84,12 @@ export default async function edrRoutes(fastify: FastifyInstance) {
   fastify.patch('/api/edr/incidents/:id/status', {
     preHandler: [fastify.requirePermission(Permission.EdrIncidentManage)],
   }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const { status } = request.body as { status: string };
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
+    const statusSchema = z.object({ status: z.enum(['open', 'investigating', 'contained', 'resolved', 'closed']) });
+    const parsed = statusSchema.safeParse(request.body);
+    if (!parsed.success) return reply.status(400).send({ statusCode: 400, error: 'Bad Request', message: parsed.error.message });
+    const { status } = parsed.data;
     const ok = await edr.updateIncidentStatus(request.currentUser.org_id, id, status);
     if (!ok) return reply.status(404).send({ error: 'Not found' });
     await request.audit({ action: 'incident_status_update', entity_type: 'incident', entity_id: id, details: { status } });

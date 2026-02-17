@@ -276,3 +276,247 @@ describe('Security', () => {
     expect(res.status).toBe(401);
   });
 });
+
+describe('API Keys', () => {
+  let apiKeyId: string;
+
+  it('POST /api/api-keys creates a key', async () => {
+    const { status, body } = await api('/api/api-keys', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Test API Key',
+        scopes: ['read', 'agents'],
+      }),
+    });
+    expect(status).toBe(201);
+    expect(body.key).toContain('rp3r_');
+    expect(body.name).toBe('Test API Key');
+    apiKeyId = body.id;
+  });
+
+  it('GET /api/api-keys lists keys', async () => {
+    const { status, body } = await api('/api/api-keys');
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+    expect(body.length).toBeGreaterThanOrEqual(1);
+  });
+
+  it('PATCH /api/api-keys/:id/revoke revokes key', async () => {
+    const { status, body } = await api(`/api/api-keys/${apiKeyId}/revoke`, {
+      method: 'PATCH',
+    });
+    expect(status).toBe(200);
+    expect(body.message).toContain('revoked');
+  });
+
+  it('DELETE /api/api-keys/:id deletes key', async () => {
+    const { status } = await api(`/api/api-keys/${apiKeyId}`, {
+      method: 'DELETE',
+    });
+    expect(status).toBe(200);
+  });
+});
+
+describe('Dashboard Stats', () => {
+  it('GET /api/agents/stats returns stats object', async () => {
+    const { status, body } = await api('/api/agents/stats');
+    expect(status).toBe(200);
+    expect(body.total).toBeDefined();
+    expect(body.online).toBeDefined();
+    expect(body.offline).toBeDefined();
+    expect(body.by_os).toBeDefined();
+  });
+
+  it('GET /api/jobs/stats returns job counts', async () => {
+    const { status, body } = await api('/api/jobs/stats');
+    expect(status).toBe(200);
+    expect(typeof body.pending).toBe('number');
+  });
+});
+
+describe('Alerting', () => {
+  let ruleId: string;
+
+  it('POST /api/alerts/rules creates a rule', async () => {
+    const { status, body } = await api('/api/alerts/rules', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'Test Offline Rule',
+        rule_type: 'agent_offline',
+        severity: 'warning',
+        params: { threshold_minutes: 5 },
+      }),
+    });
+    expect(status).toBe(201);
+    expect(body.name).toBe('Test Offline Rule');
+    ruleId = body.id;
+  });
+
+  it('GET /api/alerts/rules lists rules', async () => {
+    const { status, body } = await api('/api/alerts/rules');
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+  });
+
+  it('GET /api/alerts/stats returns alert stats', async () => {
+    const { status, body } = await api('/api/alerts/stats');
+    expect(status).toBe(200);
+    expect(typeof body.open).toBe('number');
+  });
+
+  it('PATCH /api/alerts/rules/:id updates rule', async () => {
+    if (!ruleId) return;
+    const { status } = await api(`/api/alerts/rules/${ruleId}`, {
+      method: 'PATCH',
+      body: JSON.stringify({ severity: 'critical' }),
+    });
+    expect(status).toBe(200);
+  });
+
+  it('DELETE /api/alerts/rules/:id deletes rule', async () => {
+    if (!ruleId) return;
+    const { status } = await api(`/api/alerts/rules/${ruleId}`, {
+      method: 'DELETE',
+    });
+    expect(status).toBe(200);
+  });
+});
+
+describe('Vault', () => {
+  let secretId: string;
+
+  it('POST /api/vault/secrets creates a secret', async () => {
+    const { status, body } = await api('/api/vault/secrets', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'test-secret',
+        type: 'password',
+        value: 'SuperSecret123!',
+        notes: 'E2E test secret',
+      }),
+    });
+    expect(status).toBe(201);
+    expect(body.name).toBe('test-secret');
+    secretId = body.id;
+  });
+
+  it('GET /api/vault/secrets lists secrets', async () => {
+    const { status, body } = await api('/api/vault/secrets');
+    expect(status).toBe(200);
+    expect(body.data || body).toBeDefined();
+  });
+
+  it('POST /api/vault/secrets/:id/reveal decrypts value', async () => {
+    if (!secretId) return;
+    const { status, body } = await api(`/api/vault/secrets/${secretId}/reveal`, {
+      method: 'POST',
+    });
+    expect(status).toBe(200);
+    expect(body.value).toBe('SuperSecret123!');
+  });
+
+  it('DELETE /api/vault/secrets/:id removes secret', async () => {
+    if (!secretId) return;
+    const { status } = await api(`/api/vault/secrets/${secretId}`, {
+      method: 'DELETE',
+    });
+    expect(status).toBe(200);
+  });
+});
+
+describe('EDR', () => {
+  it('GET /api/edr/events returns events', async () => {
+    const { status, body } = await api('/api/edr/events');
+    expect(status).toBe(200);
+    expect(body.data).toBeDefined();
+  });
+
+  it('GET /api/edr/detections returns detections', async () => {
+    const { status, body } = await api('/api/edr/detections');
+    expect(status).toBe(200);
+    expect(body.data).toBeDefined();
+  });
+
+  it('GET /api/edr/incidents returns incidents', async () => {
+    const { status, body } = await api('/api/edr/incidents');
+    expect(status).toBe(200);
+    expect(body.data).toBeDefined();
+  });
+});
+
+describe('Chat', () => {
+  let channelId: string;
+
+  it('POST /api/chat/channels creates channel', async () => {
+    const { status, body } = await api('/api/chat/channels', {
+      method: 'POST',
+      body: JSON.stringify({
+        name: 'test-channel',
+        description: 'E2E test channel',
+      }),
+    });
+    expect(status).toBe(201);
+    expect(body.name).toBe('test-channel');
+    channelId = body.id;
+  });
+
+  it('GET /api/chat/channels lists channels', async () => {
+    const { status, body } = await api('/api/chat/channels');
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+  });
+
+  it('POST /api/chat/channels/:id/messages sends a message', async () => {
+    if (!channelId) return;
+    const { status, body } = await api(`/api/chat/channels/${channelId}/messages`, {
+      method: 'POST',
+      body: JSON.stringify({ content: 'Hello from E2E test!' }),
+    });
+    expect(status).toBe(201);
+    expect(body.content).toBe('Hello from E2E test!');
+  });
+
+  it('GET /api/chat/channels/:id/messages retrieves messages', async () => {
+    if (!channelId) return;
+    const { status, body } = await api(`/api/chat/channels/${channelId}/messages`);
+    expect(status).toBe(200);
+    expect(Array.isArray(body.data || body)).toBe(true);
+  });
+});
+
+describe('Companies & Folders', () => {
+  let companyId: string;
+  let folderId: string;
+
+  it('POST /api/companies creates company', async () => {
+    const { status, body } = await api('/api/companies', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Test Company', description: 'E2E test' }),
+    });
+    expect(status).toBe(201);
+    expect(body.name).toBe('Test Company');
+    companyId = body.id;
+  });
+
+  it('GET /api/companies lists companies', async () => {
+    const { status, body } = await api('/api/companies');
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+  });
+
+  it('POST /api/folders creates folder', async () => {
+    const { status, body } = await api('/api/folders', {
+      method: 'POST',
+      body: JSON.stringify({ name: 'Test Folder', company_id: companyId }),
+    });
+    expect(status).toBe(201);
+    expect(body.name).toBe('Test Folder');
+    folderId = body.id;
+  });
+
+  it('GET /api/folders lists folders', async () => {
+    const { status, body } = await api('/api/folders');
+    expect(status).toBe(200);
+    expect(Array.isArray(body)).toBe(true);
+  });
+});

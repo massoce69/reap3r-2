@@ -3,18 +3,27 @@ import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
 import { Button, Input } from '@/components/ui';
-import { Shield } from 'lucide-react';
+import { Shield, KeyRound } from 'lucide-react';
 
 export default function LoginPage() {
   const router = useRouter();
-  const { login, loading, error } = useAuth();
+  const { login, loading, error, mfaRequired, mfaEmail, mfaPassword } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
+  const [mfaCode, setMfaCode] = useState('');
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     const ok = await login(email, password);
-    if (ok) router.push('/dashboard');
+    if (ok === true) router.push('/dashboard');
+    // if ok === 'mfa', the MFA form will show
+  };
+
+  const handleMfaSubmit = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!mfaEmail || !mfaPassword) return;
+    const ok = await login(mfaEmail, mfaPassword, mfaCode);
+    if (ok === true) router.push('/dashboard');
   };
 
   return (
@@ -29,36 +38,69 @@ export default function LoginPage() {
           <p className="text-xs text-reap3r-accent font-mono tracking-[0.3em] mt-1">REAP3R PLATFORM</p>
         </div>
 
-        {/* Form */}
-        <form onSubmit={handleSubmit} className="bg-reap3r-card border border-reap3r-border rounded-xl p-6 space-y-4">
-          <Input
-            label="Email"
-            type="email"
-            placeholder="admin@massvision.local"
-            value={email}
-            onChange={(e) => setEmail(e.target.value)}
-            required
-            autoFocus
-          />
-          <Input
-            label="Password"
-            type="password"
-            placeholder="••••••••"
-            value={password}
-            onChange={(e) => setPassword(e.target.value)}
-            required
-          />
-
-          {error && (
-            <div className="bg-reap3r-danger/10 border border-reap3r-danger/20 rounded-lg px-3 py-2 text-xs text-reap3r-danger">
-              {error}
+        {/* MFA Form */}
+        {mfaRequired ? (
+          <form onSubmit={handleMfaSubmit} className="bg-reap3r-card border border-reap3r-border rounded-xl p-6 space-y-4">
+            <div className="flex items-center gap-3 mb-2">
+              <div className="w-10 h-10 rounded-lg bg-reap3r-accent/10 flex items-center justify-center">
+                <KeyRound className="w-5 h-5 text-reap3r-accent" />
+              </div>
+              <div>
+                <h3 className="text-sm font-semibold text-reap3r-text">Two-Factor Authentication</h3>
+                <p className="text-xs text-reap3r-muted">Enter the 6-digit code from your authenticator app</p>
+              </div>
             </div>
-          )}
+            <Input
+              label="MFA Code"
+              type="text"
+              placeholder="000000"
+              value={mfaCode}
+              onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
+              required
+              autoFocus
+              maxLength={6}
+            />
+            {error && (
+              <div className="bg-reap3r-danger/10 border border-reap3r-danger/20 rounded-lg px-3 py-2 text-xs text-reap3r-danger">
+                {error}
+              </div>
+            )}
+            <Button type="submit" className="w-full" loading={loading} disabled={mfaCode.length !== 6}>
+              Verify
+            </Button>
+          </form>
+        ) : (
+          /* Login Form */
+          <form onSubmit={handleSubmit} className="bg-reap3r-card border border-reap3r-border rounded-xl p-6 space-y-4">
+            <Input
+              label="Email"
+              type="email"
+              placeholder="admin@massvision.local"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              required
+              autoFocus
+            />
+            <Input
+              label="Password"
+              type="password"
+              placeholder="••••••••"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              required
+            />
 
-          <Button type="submit" className="w-full" loading={loading}>
-            Sign In
-          </Button>
-        </form>
+            {error && (
+              <div className="bg-reap3r-danger/10 border border-reap3r-danger/20 rounded-lg px-3 py-2 text-xs text-reap3r-danger">
+                {error}
+              </div>
+            )}
+
+            <Button type="submit" className="w-full" loading={loading}>
+              Sign In
+            </Button>
+          </form>
+        )}
 
         <p className="text-center text-xs text-reap3r-muted mt-6">
           Secured by MASSVISION Reap3r &copy; {new Date().getFullYear()}

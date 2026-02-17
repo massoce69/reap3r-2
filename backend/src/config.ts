@@ -50,4 +50,14 @@ export const config = {
 
   // Agent heartbeat timeout (seconds)
   agentOfflineThresholdSecs: envInt('AGENT_OFFLINE_THRESHOLD_SECS', 90),
+
+  // SMTP / Email
+  smtp: {
+    host: env('SMTP_HOST', ''),
+    port: envInt('SMTP_PORT', 587),
+    secure: env('SMTP_SECURE', 'false') === 'true',
+    user: env('SMTP_USER', ''),
+    pass: env('SMTP_PASS', ''),
+    from: env('SMTP_FROM', 'noreply@massvision.local'),
+  },
 } as const;

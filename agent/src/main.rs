@@ -7,6 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -57,6 +58,67 @@ struct EnrollResponse {
     agent_secret: Option<String>,
     error: Option<String>,
     server_ts: Option<u64>,
+}
+
+// ── Config persistence ──────────────────────────────────────
+
+#[derive(Serialize, Deserialize, Debug, Clone)]
+struct AgentConfig {
+    agent_id: String,
+    agent_secret: String,
+    server: String,
+    enrolled_at: u64,
+}
+
+fn config_dir() -> PathBuf {
+    if cfg!(target_os = "windows") {
+        // %ProgramData%\Reap3r
+        let pd = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
+        PathBuf::from(pd).join("Reap3r")
+    } else {
+        // /etc/reap3r
+        PathBuf::from("/etc/reap3r")
+    }
+}
+
+fn config_path() -> PathBuf {
+    config_dir().join("agent.conf")
+}
+
+fn save_config(cfg: &AgentConfig) -> Result<(), String> {
+    let dir = config_dir();
+    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create config dir {:?}: {}", dir, e))?;
+    let json = serde_json::to_string_pretty(cfg).map_err(|e| format!("Serialize: {}", e))?;
+    let path = config_path();
+    std::fs::write(&path, &json).map_err(|e| format!("Cannot write {:?}: {}", path, e))?;
+
+    // Restrict permissions on Unix
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let perms = std::fs::Permissions::from_mode(0o600);
+        std::fs::set_permissions(&path, perms).ok();
+    }
+
+    info!(path = %path.display(), "Agent config saved");
+    Ok(())
+}
+
+fn load_config() -> Option<AgentConfig> {
+    let path = config_path();
+    match std::fs::read_to_string(&path) {
+        Ok(data) => match serde_json::from_str::<AgentConfig>(&data) {
+            Ok(cfg) => {
+                info!(agent_id = %cfg.agent_id, path = %path.display(), "Loaded saved agent config");
+                Some(cfg)
+            }
+            Err(e) => {
+                warn!(error = %e, "Corrupt agent config, ignoring");
+                None
+            }
+        },
+        Err(_) => None,
+    }
 }
 
 fn now_ms() -> u64 {
@@ -198,6 +260,11 @@ async fn handle_job(
             execute_system_command("shutdown", delay).await
         }
         "collect_metrics" => Ok(collect_metrics()),
+        "collect_inventory" => Ok(collect_inventory()),
+        "process_action" => execute_process_action(payload).await,
+        "service_action" => execute_service_action(payload).await,
+        "edr_kill_process" => execute_edr_kill_process(payload).await,
+        "edr_isolate_machine" => execute_edr_isolate(payload).await,
         _ => Err(format!("Unsupported job type: {}", job_type)),
     };
 
@@ -226,6 +293,303 @@ async fn handle_job(
 
     // Return ACK first, result will be sent separately
     ack
+}
+
+// ── Inventory Collection ──────────────────────────────────
+
+fn collect_inventory() -> serde_json::Value {
+    let mut sys = System::new_all();
+    sys.refresh_all();
+
+    let (hostname, os, arch, os_version) = get_system_info();
+
+    // CPU info
+    let cpus = sys.cpus();
+    let cpu_model = cpus.first().map(|c| c.brand().to_string()).unwrap_or_default();
+    let cpu_cores = cpus.len();
+
+    // Memory
+    let memory_total = sys.total_memory();
+
+    // Disk info
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disk_total: u64 = disks.iter().map(|d| d.total_space()).sum();
+    let disk_used: u64 = disks.iter().map(|d| d.total_space() - d.available_space()).sum();
+    let disk_list: Vec<serde_json::Value> = disks.iter().map(|d| {
+        serde_json::json!({
+            "mount_point": d.mount_point().to_string_lossy(),
+            "total_bytes": d.total_space(),
+            "available_bytes": d.available_space(),
+            "fs_type": String::from_utf8_lossy(d.file_system().as_encoded_bytes()),
+        })
+    }).collect();
+
+    // Network interfaces
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let net_interfaces: Vec<serde_json::Value> = networks.iter().map(|(name, data)| {
+        serde_json::json!({
+            "name": name,
+            "mac": data.mac_address().to_string(),
+            "rx_bytes": data.total_received(),
+            "tx_bytes": data.total_transmitted(),
+        })
+    }).collect();
+
+    // Processes
+    let process_count = sys.processes().len();
+
+    // Top processes by CPU
+    let mut procs: Vec<_> = sys.processes().values().collect();
+    procs.sort_by(|a, b| b.cpu_usage().partial_cmp(&a.cpu_usage()).unwrap_or(std::cmp::Ordering::Equal));
+    let top_procs: Vec<serde_json::Value> = procs.iter().take(20).map(|p| {
+        serde_json::json!({
+            "pid": p.pid().as_u32(),
+            "name": p.name().to_string_lossy(),
+            "cpu_percent": p.cpu_usage(),
+            "memory_bytes": p.memory(),
+            "status": format!("{:?}", p.status()),
+            "user": p.user_id().map(|u| format!("{:?}", u)),
+        })
+    }).collect();
+
+    serde_json::json!({
+        "collected_at": now_ms(),
+        "hostname": hostname,
+        "os": os,
+        "os_version": os_version,
+        "arch": arch,
+        "cpu_model": cpu_model,
+        "cpu_cores": cpu_cores,
+        "memory_total_bytes": memory_total,
+        "disk_total_bytes": disk_total,
+        "disk_used_bytes": disk_used,
+        "disks": disk_list,
+        "network_interfaces": net_interfaces,
+        "process_count": process_count,
+        "top_processes": top_procs,
+    })
+}
+
+// ── Process Management ────────────────────────────────────
+
+async fn execute_process_action(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let action = payload["action"].as_str().unwrap_or("list");
+    match action {
+        "list" => {
+            let mut sys = System::new_all();
+            sys.refresh_all();
+            let mut procs: Vec<serde_json::Value> = sys.processes().values().map(|p| {
+                serde_json::json!({
+                    "pid": p.pid().as_u32(),
+                    "name": p.name().to_string_lossy(),
+                    "cpu_percent": p.cpu_usage(),
+                    "memory_bytes": p.memory(),
+                    "status": format!("{:?}", p.status()),
+                    "start_time": p.start_time(),
+                    "cmd": p.cmd().join(" "),
+                    "exe": p.exe().map(|e| e.to_string_lossy().to_string()),
+                })
+            }).collect();
+            procs.sort_by(|a, b| {
+                let ca = a["cpu_percent"].as_f64().unwrap_or(0.0);
+                let cb = b["cpu_percent"].as_f64().unwrap_or(0.0);
+                cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
+            });
+            Ok(serde_json::json!({ "processes": procs, "total": procs.len() }))
+        }
+        "kill" => {
+            let pid = payload["pid"].as_u64().ok_or("Missing pid")?;
+            let sys = System::new_all();
+            let pid = sysinfo::Pid::from(pid as usize);
+            if let Some(process) = sys.process(pid) {
+                let killed = process.kill();
+                Ok(serde_json::json!({ "killed": killed, "pid": pid.as_u32() }))
+            } else {
+                Err(format!("Process {} not found", pid))
+            }
+        }
+        _ => Err(format!("Unknown process action: {}", action)),
+    }
+}
+
+// ── Service Management ────────────────────────────────────
+
+async fn execute_service_action(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let service_name = payload["service_name"].as_str().ok_or("Missing service_name")?;
+    let action = payload["action"].as_str().unwrap_or("status");
+
+    let (cmd, args): (&str, Vec<String>) = if cfg!(target_os = "windows") {
+        match action {
+            "start" => ("sc", vec!["start".into(), service_name.into()]),
+            "stop" => ("sc", vec!["stop".into(), service_name.into()]),
+            "restart" => ("powershell", vec![
+                "-NoProfile".into(), "-Command".into(),
+                format!("Restart-Service -Name '{}' -Force", service_name),
+            ]),
+            "status" => ("sc", vec!["query".into(), service_name.into()]),
+            _ => return Err(format!("Unknown service action: {}", action)),
+        }
+    } else {
+        match action {
+            "start" => ("systemctl", vec!["start".into(), service_name.into()]),
+            "stop" => ("systemctl", vec!["stop".into(), service_name.into()]),
+            "restart" => ("systemctl", vec!["restart".into(), service_name.into()]),
+            "status" => ("systemctl", vec!["status".into(), service_name.into()]),
+            _ => return Err(format!("Unknown service action: {}", action)),
+        }
+    };
+
+    match tokio::process::Command::new(cmd).args(&args).output().await {
+        Ok(output) => Ok(serde_json::json!({
+            "exit_code": output.status.code().unwrap_or(-1),
+            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            "service": service_name,
+            "action": action,
+        })),
+        Err(e) => Err(format!("Failed to execute service action: {}", e)),
+    }
+}
+
+// ── EDR Kill Process ──────────────────────────────────────
+
+async fn execute_edr_kill_process(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let pid = payload["pid"].as_u64().ok_or("Missing pid")?;
+    let reason = payload["reason"].as_str().unwrap_or("EDR response");
+    info!(pid, reason, "EDR: Killing process");
+
+    let sys = System::new_all();
+    let pid = sysinfo::Pid::from(pid as usize);
+    if let Some(process) = sys.process(pid) {
+        let name = process.name().to_string_lossy().to_string();
+        let killed = process.kill();
+        Ok(serde_json::json!({
+            "killed": killed,
+            "pid": pid.as_u32(),
+            "process_name": name,
+            "reason": reason,
+        }))
+    } else {
+        Err(format!("Process {} not found", pid))
+    }
+}
+
+// ── EDR Network Isolation ─────────────────────────────────
+
+async fn execute_edr_isolate(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let mode = payload["mode"].as_str().unwrap_or("soft");
+    let reason = payload["reason"].as_str().unwrap_or("EDR response");
+
+    info!(mode, reason, "EDR: Network isolation requested");
+
+    // Platform-specific firewall rules
+    let (cmd, args): (&str, Vec<String>) = if cfg!(target_os = "windows") {
+        ("powershell", vec![
+            "-NoProfile".into(), "-Command".into(),
+            format!(
+                "New-NetFirewallRule -DisplayName 'Reap3r-EDR-Isolate' -Direction Outbound -Action Block -Enabled True; \
+                 New-NetFirewallRule -DisplayName 'Reap3r-EDR-Isolate-In' -Direction Inbound -Action Block -Enabled True"
+            ),
+        ])
+    } else {
+        ("bash", vec![
+            "-c".into(),
+            "iptables -I OUTPUT -j DROP -m comment --comment 'reap3r-edr-isolate'; \
+             iptables -I INPUT -j DROP -m comment --comment 'reap3r-edr-isolate'".into(),
+        ])
+    };
+
+    match tokio::process::Command::new(cmd).args(&args).output().await {
+        Ok(output) => Ok(serde_json::json!({
+            "isolated": output.status.success(),
+            "mode": mode,
+            "reason": reason,
+            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
+        })),
+        Err(e) => Err(format!("Failed to isolate: {}", e)),
+    }
+}
+
+// ── Security Monitoring ───────────────────────────────────
+
+fn check_security_events() -> Vec<serde_json::Value> {
+    let mut events = Vec::new();
+    let sys = System::new_all();
+
+    // Suspicious process names (common malware indicators)
+    let suspicious_names = [
+        "mimikatz", "bloodhound", "rubeus", "cobalt", "meterpreter",
+        "powershell_ise", "certutil", "psexec", "procdump",
+    ];
+
+    // Suspicious paths
+    let suspicious_paths = [
+        "/tmp/.hidden", "/dev/shm/", "\\AppData\\Local\\Temp\\svchost",
+        "\\Windows\\Temp\\cmd", "C:\\Users\\Public\\",
+    ];
+
+    for (pid, process) in sys.processes() {
+        let name = process.name().to_string_lossy().to_lowercase();
+        let exe = process.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let cmd = process.cmd().join(" ");
+
+        // Check suspicious process names
+        for s in &suspicious_names {
+            if name.contains(s) {
+                events.push(serde_json::json!({
+                    "event_type": "suspicious_path",
+                    "severity": "high",
+                    "timestamp": now_ms(),
+                    "process_name": name,
+                    "process_path": exe,
+                    "pid": pid.as_u32(),
+                    "cmdline": cmd,
+                    "user": process.user_id().map(|u| format!("{:?}", u)),
+                    "details": {
+                        "reason": format!("Suspicious process detected: {}", s),
+                        "match": s,
+                    }
+                }));
+            }
+        }
+
+        // Check suspicious paths
+        for sp in &suspicious_paths {
+            if exe.contains(sp) {
+                events.push(serde_json::json!({
+                    "event_type": "suspicious_path",
+                    "severity": "medium",
+                    "timestamp": now_ms(),
+                    "process_name": name,
+                    "process_path": exe,
+                    "pid": pid.as_u32(),
+                    "cmdline": cmd,
+                    "details": {
+                        "reason": format!("Process running from suspicious path: {}", sp),
+                        "match": sp,
+                    }
+                }));
+            }
+        }
+
+        // Detect suspicious PowerShell usage (encoded commands)
+        if name.contains("powershell") && (cmd.contains("-enc") || cmd.contains("-EncodedCommand") || cmd.contains("-WindowStyle Hidden")) {
+            events.push(serde_json::json!({
+                "event_type": "suspicious_powershell",
+                "severity": "high",
+                "timestamp": now_ms(),
+                "process_name": name,
+                "process_path": exe,
+                "pid": pid.as_u32(),
+                "cmdline": cmd,
+                "details": {
+                    "reason": "PowerShell with suspicious flags (encoded/hidden)",
+                }
+            }));
+        }
+    }
+
+    events
 }
 
 async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
@@ -329,8 +693,12 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     // Determine if we need to enroll or reconnect
     let (agent_id, agent_secret) = if let (Some(id), Some(secret)) = (&args.agent_id, &args.agent_secret) {
-        info!(agent_id = %id, "Reconnecting with known identity");
+        info!(agent_id = %id, "Reconnecting with CLI-provided identity");
         (id.clone(), secret.clone())
+    } else if let Some(saved) = load_config() {
+        // Auto-reconnect with persisted credentials
+        info!(agent_id = %saved.agent_id, "Reconnecting with saved config");
+        (saved.agent_id, saved.agent_secret)
     } else if let Some(token) = &args.token {
         info!("Enrolling with token...");
         // Send enrollment
@@ -361,7 +729,15 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                     let id = payload["agent_id"].as_str().unwrap().to_string();
                     let secret = payload["agent_secret"].as_str().unwrap().to_string();
                     info!(agent_id = %id, "Enrollment successful!");
-                    // TODO: Persist agent_id + secret to config file
+                    // Persist agent_id + secret to config file
+                    if let Err(e) = save_config(&AgentConfig {
+                        agent_id: id.clone(),
+                        agent_secret: secret.clone(),
+                        server: args.server.clone(),
+                        enrolled_at: now_ms(),
+                    }) {
+                        warn!(error = %e, "Failed to save agent config — agent will need re-enrollment on next restart");
+                    }
                     (id, secret)
                 } else {
                     let err = payload["error"].as_str().unwrap_or("Unknown error");
@@ -399,6 +775,7 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(hb_interval));
+        let mut inventory_counter: u64 = 0;
         loop {
             interval.tick().await;
             let metrics = collect_metrics();
@@ -426,6 +803,35 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             );
             if tx_hb.send(metrics_msg).await.is_err() {
                 break;
+            }
+
+            // Send inventory every 10 heartbeats (~5min at 30s interval)
+            inventory_counter += 1;
+            if inventory_counter % 10 == 1 {
+                let inv = collect_inventory();
+                let inv_msg = build_message(
+                    &agent_id_hb,
+                    "inventory_push",
+                    inv,
+                    &secret_hb,
+                );
+                if tx_hb.send(inv_msg).await.is_err() {
+                    break;
+                }
+            }
+
+            // Security monitoring: check for suspicious processes every heartbeat
+            let alerts = check_security_events();
+            for alert in alerts {
+                let sec_msg = build_message(
+                    &agent_id_hb,
+                    "security_event_push",
+                    alert,
+                    &secret_hb,
+                );
+                if tx_hb.send(sec_msg).await.is_err() {
+                    break;
+                }
             }
         }
     });

@@ -3,8 +3,9 @@
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
 import crypto from 'crypto';
-import { Permission } from '@massvision/shared';
+import { Permission, CreateEnrollmentTokenSchema } from '@massvision/shared';
 import { createAuditLog } from '../services/audit.service.js';
+import { parseUUID, parseBody } from '../lib/validate.js';
 
 export default async function enrollmentRoutes(fastify: FastifyInstance) {
   // ── List tokens ──
@@ -30,7 +31,8 @@ export default async function enrollmentRoutes(fastify: FastifyInstance) {
 
   // ── Create token ──
   fastify.post('/api/enrollment/tokens', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenCreate)] }, async (request, reply) => {
-    const body = request.body as any;
+    const body = parseBody(CreateEnrollmentTokenSchema, request.body, reply);
+    if (!body) return;
     const token = crypto.randomBytes(32).toString('hex');
     const { rows } = await fastify.pg.query(
       `INSERT INTO enrollment_tokens (token, name, org_id, site_id, company_id, folder_id, max_uses, expires_at, created_by)
@@ -52,7 +54,8 @@ export default async function enrollmentRoutes(fastify: FastifyInstance) {
 
   // ── Revoke token ──
   fastify.post('/api/enrollment/tokens/:id/revoke', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenRevoke)] }, async (request, reply) => {
-    const { id } = request.params as any;
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
     const { rows } = await fastify.pg.query(
       `UPDATE enrollment_tokens SET revoked = true WHERE id = $1 AND org_id = $2 RETURNING *`,
       [id, request.currentUser.org_id],
@@ -68,7 +71,8 @@ export default async function enrollmentRoutes(fastify: FastifyInstance) {
 
   // ── Delete token ──
   fastify.delete('/api/enrollment/tokens/:id', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenRevoke)] }, async (request, reply) => {
-    const { id } = request.params as any;
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
     const { rowCount } = await fastify.pg.query(
       `DELETE FROM enrollment_tokens WHERE id = $1 AND org_id = $2`,
       [id, request.currentUser.org_id],
@@ -79,7 +83,8 @@ export default async function enrollmentRoutes(fastify: FastifyInstance) {
 
   // ── Deployment commands (for copy/paste) ──
   fastify.get('/api/enrollment/tokens/:id/commands', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenList)] }, async (request, reply) => {
-    const { id } = request.params as any;
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
     const { rows } = await fastify.pg.query(
       `SELECT token FROM enrollment_tokens WHERE id = $1 AND org_id = $2`,
       [id, request.currentUser.org_id],

@@ -5,6 +5,7 @@ import { FastifyInstance } from 'fastify';
 import { Permission, CreateAlertRuleSchema, UpdateAlertRuleSchema, AlertAckSchema, AlertSnoozeSchema, CreateAlertIntegrationSchema } from '@massvision/shared';
 import * as alertSvc from '../services/alerting.service.js';
 import * as notifier from '../services/notification.service.js';
+import { parseUUID, parseBody, clampLimit } from '../lib/validate.js';
 
 export default async function alertingRoutes(fastify: FastifyInstance) {
   fastify.addHook('preHandler', fastify.authenticate);
@@ -20,7 +21,7 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
     const q = request.query as any;
     return alertSvc.listAlertRules(request.currentUser.org_id, {
       page: Number(q.page) || 1,
-      limit: Number(q.limit) || 25,
+      limit: clampLimit(q.limit),
       rule_type: q.rule_type,
       is_enabled: q.is_enabled === 'true' ? true : q.is_enabled === 'false' ? false : undefined,
     });
@@ -30,7 +31,8 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
   fastify.get('/api/alerts/rules/:id', {
     preHandler: [fastify.requirePermission(Permission.AlertRuleList)],
   }, async (request, reply) => {
-    const { id } = request.params as { id: string };
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
     const rule = await alertSvc.getRuleById(request.currentUser.org_id, id);
     if (!rule) return reply.status(404).send({ error: 'Rule not found' });
     return rule;
@@ -40,7 +42,8 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
   fastify.post('/api/alerts/rules', {
     preHandler: [fastify.requirePermission(Permission.AlertRuleCreate)],
   }, async (request, reply) => {
-    const body = CreateAlertRuleSchema.parse(request.body);
+    const body = parseBody(CreateAlertRuleSchema, request.body, reply);
+    if (!body) return;
     const rule = await alertSvc.createAlertRule(request.currentUser.org_id, request.currentUser.id, body);
     await request.audit({
       action: 'alert_rule_create',
@@ -55,8 +58,10 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
   fastify.patch('/api/alerts/rules/:id', {
     preHandler: [fastify.requirePermission(Permission.AlertRuleUpdate)],
   }, async (request, reply) => {
-    const { id } = request.params as { id: string };
-    const body = UpdateAlertRuleSchema.parse(request.body);
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
+    const body = parseBody(UpdateAlertRuleSchema, request.body, reply);
+    if (!body) return;
     const rule = await alertSvc.updateAlertRule(request.currentUser.org_id, id, body);
     if (!rule) return reply.status(404).send({ error: 'Rule not found' });
     await request.audit({
@@ -94,7 +99,7 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
     const q = request.query as any;
     return alertSvc.listAlertEvents(request.currentUser.org_id, {
       page: Number(q.page) || 1,
-      limit: Number(q.limit) || 25,
+      limit: clampLimit(q.limit),
       status: q.status,
       severity: q.severity,
       entity_type: q.entity_type,
@@ -152,9 +157,10 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
     preHandler: [fastify.requirePermission(Permission.AlertEventSnooze)],
   }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const body = AlertSnoozeSchema.parse({ event_id: id, ...(request.body as any) });
+    const body = AlertSnoozeSchema.safeParse({ event_id: id, ...(request.body as any) });
+    if (!body.success) return reply.status(400).send({ statusCode: 400, error: 'Bad Request', message: body.error.message });
     const ok = await alertSvc.snoozeAlertEvent(
-      request.currentUser.org_id, id, request.currentUser.id, body.duration_min, body.note
+      request.currentUser.org_id, id, request.currentUser.id, body.data.duration_min, body.data.note
     );
     if (!ok) return reply.status(404).send({ error: 'Event not found or cannot be snoozed' });
     await request.audit({
@@ -188,7 +194,8 @@ export default async function alertingRoutes(fastify: FastifyInstance) {
   fastify.post('/api/alerts/integrations', {
     preHandler: [fastify.requirePermission(Permission.AlertIntegrationManage)],
   }, async (request, reply) => {
-    const body = CreateAlertIntegrationSchema.parse(request.body);
+    const body = parseBody(CreateAlertIntegrationSchema, request.body, reply);
+    if (!body) return;
     const integ = await alertSvc.createIntegration(request.currentUser.org_id, body);
     await request.audit({
       action: 'alert_integration_create',

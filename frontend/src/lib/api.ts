@@ -56,11 +56,13 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 // ── Auth ──
 export const api = {
   auth: {
-    login: (email: string, password: string) =>
-      request<{ token: string; user: any }>('/api/auth/login', {
+    login: (email: string, password: string, mfa_code?: string) =>
+      request<{ token?: string; user?: any; mfa_required?: boolean }>('/api/auth/login', {
         method: 'POST',
-        body: JSON.stringify({ email, password }),
+        body: JSON.stringify({ email, password, ...(mfa_code ? { mfa_code } : {}) }),
       }),
+    refresh: () =>
+      request<{ token: string }>('/api/auth/refresh', { method: 'POST' }),
     me: () => request<any>('/api/auth/me'),
   },
 
@@ -85,6 +87,13 @@ export const api = {
     stats: () => request<any>('/api/agents/stats'),
     move: (id: string, data: any) =>
       request<any>(`/api/agents/${id}/move`, { method: 'POST', body: JSON.stringify(data) }),
+    inventory: (id: string) => request<any>(`/api/agents/${id}/inventory`),
+    metrics: (id: string, hours?: number) =>
+      request<{ data: any[]; agent_id: string; period_hours: number }>(
+        `/api/agents/${id}/metrics?hours=${hours ?? 24}`
+      ),
+    collectInventory: (id: string) =>
+      request<any>(`/api/agents/${id}/collect-inventory`, { method: 'POST' }),
   },
 
   jobs: {
@@ -332,5 +341,16 @@ export const api = {
     },
     test: (channel: string) =>
       request<any>('/api/alerts/test', { method: 'POST', body: JSON.stringify({ channel }) }),
+  },
+
+  // ── API Keys ──
+  apiKeys: {
+    list: () => request<{ data: any[] }>('/api/api-keys'),
+    create: (data: { name: string; scopes?: string[]; expires_at?: string }) =>
+      request<any>('/api/api-keys', { method: 'POST', body: JSON.stringify(data) }),
+    revoke: (id: string) =>
+      request<any>(`/api/api-keys/${id}/revoke`, { method: 'PATCH' }),
+    delete: (id: string) =>
+      request<any>(`/api/api-keys/${id}`, { method: 'DELETE' }),
   },
 };

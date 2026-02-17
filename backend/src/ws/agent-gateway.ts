@@ -144,6 +144,32 @@ export function setupAgentGateway(fastify: FastifyInstance) {
                 mem_percent: (p.memory_used_bytes / p.memory_total_bytes) * 100,
                 disk_percent: (p.disk_used_bytes / p.disk_total_bytes) * 100,
               });
+
+              // Store time-series data
+              try {
+                const agent = await agentService.getAgentById(fastify, msg.agent_id);
+                if (agent) {
+                  await fastify.pg.query(
+                    `INSERT INTO metrics_timeseries (agent_id, org_id, collected_at, cpu_percent, memory_used_mb, memory_total_mb,
+                       disk_used_gb, disk_total_gb, network_rx_bytes, network_tx_bytes, processes_count)
+                     VALUES ($1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10)`,
+                    [
+                      msg.agent_id, agent.org_id,
+                      p.cpu_percent ?? 0,
+                      p.memory_used_bytes ? p.memory_used_bytes / 1048576 : 0,
+                      p.memory_total_bytes ? p.memory_total_bytes / 1048576 : 0,
+                      p.disk_used_bytes ? p.disk_used_bytes / 1073741824 : 0,
+                      p.disk_total_bytes ? p.disk_total_bytes / 1073741824 : 0,
+                      p.net_rx_bytes ?? 0,
+                      p.net_tx_bytes ?? 0,
+                      p.process_count ?? 0,
+                    ],
+                  );
+                }
+              } catch (err) {
+                fastify.log.warn({ err }, 'Failed to store time-series metric');
+              }
+
               fastify.broadcastToUI('agent:metrics', { agent_id: msg.agent_id, metrics: p });
             }
             break;

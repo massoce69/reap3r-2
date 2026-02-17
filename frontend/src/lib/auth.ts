@@ -17,24 +17,42 @@ interface AuthState {
   initialized: boolean;
   loading: boolean;
   error: string | null;
-  login: (email: string, password: string) => Promise<boolean>;
+  mfaRequired: boolean;
+  mfaEmail: string | null;
+  mfaPassword: string | null;
+  login: (email: string, password: string, mfaCode?: string) => Promise<boolean | 'mfa'>;
   logout: () => void;
   initialize: () => Promise<void>;
 }
 
-export const useAuth = create<AuthState>((set) => ({
+export const useAuth = create<AuthState>((set, get) => ({
   user: null,
   initialized: false,
   loading: false,
   error: null,
+  mfaRequired: false,
+  mfaEmail: null,
+  mfaPassword: null,
 
-  login: async (email, password) => {
+  login: async (email, password, mfaCode?) => {
     set({ loading: true, error: null });
     try {
-      const res = await api.auth.login(email, password);
-      setToken(res.token);
-      set({ user: res.user, loading: false });
-      return true;
+      const res = await api.auth.login(email, password, mfaCode);
+      
+      // MFA challenge response
+      if (res.mfa_required) {
+        set({ loading: false, mfaRequired: true, mfaEmail: email, mfaPassword: password });
+        return 'mfa';
+      }
+
+      if (res.token && res.user) {
+        setToken(res.token);
+        set({ user: res.user, loading: false, mfaRequired: false, mfaEmail: null, mfaPassword: null });
+        return true;
+      }
+      
+      set({ error: 'Unexpected response', loading: false });
+      return false;
     } catch (err: any) {
       set({ error: err.message, loading: false });
       return false;

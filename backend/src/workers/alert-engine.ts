@@ -231,9 +231,61 @@ async function evaluateTamperDetected(rule: any): Promise<void> {
 
 // ── Metric Threshold (CPU/RAM/etc) ──
 async function evaluateMetricThreshold(rule: any): Promise<void> {
-  // Stub: requires metrics table which may not exist yet
-  // In production, query agent metrics and compare against threshold
-  console.log('[alert-engine] metric_threshold rule evaluation — stub');
+  const metric = rule.params?.metric ?? 'cpu_percent'; // cpu_percent | mem_percent | disk_percent
+  const operator = rule.params?.operator ?? 'gt'; // gt | lt | gte | lte
+  const threshold = rule.params?.threshold ?? 90;
+  const durationMin = rule.params?.duration_minutes ?? 5;
+  const scopeFilter = buildScopeFilter(rule, 'a');
+
+  // Map metric name to agent column
+  const columnMap: Record<string, string> = {
+    cpu_percent: 'a.cpu_percent',
+    mem_percent: 'a.mem_percent',
+    disk_percent: 'a.disk_percent',
+  };
+  const column = columnMap[metric] ?? 'a.cpu_percent';
+
+  const opMap: Record<string, string> = { gt: '>', lt: '<', gte: '>=', lte: '<=' };
+  const op = opMap[operator] ?? '>';
+
+  const { rows: agents } = await query(
+    `SELECT a.id, a.hostname, ${column} AS metric_value
+     FROM agents a
+     WHERE a.org_id = $1
+       AND a.status = 'online'
+       AND a.last_seen_at >= NOW() - INTERVAL '${durationMin} minutes'
+       AND ${column} IS NOT NULL
+       AND ${column} ${op} $2
+       ${scopeFilter}
+     LIMIT 100`,
+    [rule.org_id, threshold]
+  );
+
+  for (const agent of agents) {
+    const fingerprint = `metric_threshold:${metric}:${agent.id}`;
+    const result = await alertSvc.createAlertEvent({
+      org_id: rule.org_id,
+      rule_id: rule.id,
+      rule_name: rule.name,
+      entity_type: 'agent',
+      entity_id: agent.id,
+      fingerprint,
+      severity: rule.severity,
+      title: `${metric} ${op} ${threshold}% on ${agent.hostname}`,
+      details: {
+        agent_id: agent.id,
+        hostname: agent.hostname,
+        metric,
+        current_value: agent.metric_value,
+        threshold,
+        operator,
+      },
+    });
+
+    if (!result.deduplicated) {
+      await triggerEscalation(rule, result.id);
+    }
+  }
 }
 
 // ════════════════════════════════════════════

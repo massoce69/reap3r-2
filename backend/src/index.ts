@@ -28,6 +28,7 @@ import chatRoutes from './routes/chat.js';
 import edrRoutes from './routes/edr.js';
 import adminRoutes from './routes/admin.js';
 import alertingRoutes from './routes/alerting.js';
+import apiKeyRoutes from './routes/api-keys.js';
 
 // WebSocket
 import { setupAgentGateway } from './ws/agent-gateway.js';
@@ -85,6 +86,7 @@ async function main() {
   await fastify.register(edrRoutes, { prefix: '/api' });
   await fastify.register(adminRoutes, { prefix: '/api' });
   await fastify.register(alertingRoutes, { prefix: '/api' });
+  await fastify.register(apiKeyRoutes, { prefix: '/api' });
 
   // ── Agent Gateway (WS) ──
   setupAgentGateway(fastify);

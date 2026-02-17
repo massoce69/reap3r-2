@@ -2,10 +2,11 @@
 // MASSVISION Reap3r — Job Routes
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
-import { Permission, JobTypePermission, JobType } from '@massvision/shared';
+import { Permission, JobTypePermission, JobType, CreateJobSchema } from '@massvision/shared';
 import { RolePermissions, Role } from '@massvision/shared';
 import * as jobService from '../services/job.service.js';
 import { createAuditLog } from '../services/audit.service.js';
+import { parseUUID, parseBody, clampLimit } from '../lib/validate.js';
 
 export default async function jobRoutes(fastify: FastifyInstance) {
   // ── List jobs ──
@@ -17,13 +18,14 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       status: query.status,
       type: query.type,
       page: query.page ? Number(query.page) : undefined,
-      limit: query.limit ? Number(query.limit) : undefined,
+      limit: clampLimit(query.limit),
     });
   });
 
   // ── Get job ──
   fastify.get('/api/jobs/:id', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.JobView)] }, async (request, reply) => {
-    const { id } = request.params as any;
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
     const job = await jobService.getJobById(fastify, id);
     if (!job) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
     return job;
@@ -31,7 +33,8 @@ export default async function jobRoutes(fastify: FastifyInstance) {
 
   // ── Create job ──
   fastify.post('/api/jobs', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.JobCreate)] }, async (request, reply) => {
-    const body = request.body as any;
+    const body = parseBody(CreateJobSchema, request.body, reply);
+    if (!body) return;
     const { agent_id, job_type, payload, reason, priority } = body;
 
     // Check job-type specific permission
@@ -75,7 +78,8 @@ export default async function jobRoutes(fastify: FastifyInstance) {
 
   // ── Cancel job ──
   fastify.post('/api/jobs/:id/cancel', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.JobCancel)] }, async (request, reply) => {
-    const { id } = request.params as any;
+    const id = parseUUID((request.params as any).id, reply);
+    if (!id) return;
     const job = await jobService.getJobById(fastify, id);
     if (!job) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
     if (!['pending', 'running'].includes(job.status)) {
