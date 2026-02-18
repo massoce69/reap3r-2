@@ -122,7 +122,32 @@ export const api = {
     },
     get: (id: string) => request<any>(`/api/jobs/${id}`),
     create: (data: any) =>
-      request<any>('/api/jobs', { method: 'POST', body: JSON.stringify(data) }),
+      request<any>('/api/jobs', {
+        method: 'POST',
+        body: JSON.stringify((() => {
+          // Backward/forward compatibility for UI callers.
+          // Backend expects CreateJobSchema: { agent_id, job_type, payload, ... }.
+          const body = { ...(data ?? {}) };
+          if (!body.job_type && body.type) {
+            body.job_type = body.type;
+            delete body.type;
+          }
+
+          // UI previously put timeout in payload as timeout_secs.
+          if (body.payload && typeof body.payload === 'object') {
+            if (body.payload.timeout_secs !== undefined && body.timeout_sec === undefined) {
+              body.timeout_sec = body.payload.timeout_secs;
+              delete body.payload.timeout_secs;
+            }
+            // If payload has timeout_sec, prefer it as the job timeout unless explicitly set.
+            if (body.payload.timeout_sec !== undefined && body.timeout_sec === undefined) {
+              body.timeout_sec = body.payload.timeout_sec;
+            }
+          }
+
+          return body;
+        })()),
+      }),
     cancel: (id: string) =>
       request<any>(`/api/jobs/${id}/cancel`, { method: 'POST' }),
     stats: () => request<any>('/api/jobs/stats'),
