@@ -227,6 +227,7 @@ export default function AgentDetailPage() {
   // ── Remote Desktop: WebSocket video streaming ──
   const startRdStream = async () => {
     if (!agent || rdLoading) return;
+    console.log('[RD] Starting stream, agent:', agent.id, 'ws connected:', realtime.connected);
     setRdLoading(true);
     setRdError(null);
     setRdFrameCount(0);
@@ -238,10 +239,12 @@ export default function AgentDetailPage() {
         reason: 'Remote Desktop stream',
       });
       const jobId = job.id ?? job.job_id;
+      console.log('[RD] Job created:', jobId);
       setRdSessionId(jobId);
       setRdStreaming(true);
       setRdLoading(false);
     } catch (err: any) {
+      console.error('[RD] Failed to start:', err);
       setRdError(err?.message ?? 'Failed to start remote desktop');
       setRdLoading(false);
     }
@@ -249,8 +252,10 @@ export default function AgentDetailPage() {
 
   const stopRdStream = async () => {
     if (!agent) return;
+    console.log('[RD] Stopping stream');
     setRdStreaming(false);
     setRdSessionId(null);
+    setRdFrame(null);
     try {
       await api.jobs.create({
         agent_id: agent.id,
@@ -264,14 +269,20 @@ export default function AgentDetailPage() {
   // Subscribe to rd:frame WebSocket events
   useEffect(() => {
     if (!rdStreaming || !agent) return;
+    console.log('[RD] Subscribing to rd:frame events for agent:', agent.id, 'ws connected:', realtime.connected);
+    let frameRx = 0;
     const unsub = realtime.on('rd:frame', (msg: any) => {
       const p = msg.payload ?? msg;
+      frameRx++;
+      if (frameRx <= 3 || frameRx % 30 === 0) {
+        console.log(`[RD] Frame received #${frameRx}, agent_id=${p.agent_id}, match=${p.agent_id === agent.id}, dataLen=${p.data?.length || 0}`);
+      }
       if (p.agent_id === agent.id) {
         setRdFrame(`data:image/jpeg;base64,${p.data}`);
         setRdFrameCount(prev => prev + 1);
       }
     });
-    return () => { unsub(); };
+    return () => { console.log('[RD] Unsubscribing from rd:frame'); unsub(); };
   }, [rdStreaming, agent?.id]);
 
   // Stop stream when leaving tab
@@ -812,6 +823,10 @@ export default function AgentDetailPage() {
                 <h3 className="text-sm font-semibold text-reap3r-text flex items-center gap-2">
                   <ScreenShare className="w-4 h-4" /> Remote Desktop — {agent.hostname}
                 </h3>
+                <span className={`flex items-center gap-1 text-[10px] ${realtime.connected ? 'text-green-400' : 'text-red-400'}`}>
+                  <span className={`w-1.5 h-1.5 rounded-full ${realtime.connected ? 'bg-green-400' : 'bg-red-400'}`} />
+                  WS {realtime.connected ? 'ON' : 'OFF'}
+                </span>
                 {rdLoading && <Loader2 className="w-4 h-4 text-reap3r-accent animate-spin" />}
                 {rdStreaming && (
                   <span className="flex items-center gap-1 text-[10px] text-green-400">
