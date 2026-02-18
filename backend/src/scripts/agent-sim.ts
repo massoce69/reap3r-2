@@ -154,6 +154,7 @@ ws.on('message', async (data: WebSocket.Data) => {
       ws.close();
       process.exit(0);
     } else if (type === 'error') {
+      const payload = msg.payload;
       log('error', `Server error: ${payload?.message || text}`);
       process.exit(1);
     } else {

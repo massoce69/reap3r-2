@@ -39,11 +39,11 @@ async function run() {
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
     const insertRes = await client.query(
-      `INSERT INTO enrollment_tokens (id, org_id, site_id, token, expires_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, NOW())
+      `INSERT INTO enrollment_tokens (id, org_id, site_id, name, token, expires_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, NOW())
        ON CONFLICT (token) DO UPDATE SET expires_at = EXCLUDED.expires_at
        RETURNING id, token, expires_at`,
-      [tokenId, orgId, siteId, token, expiresAt]
+      [tokenId, orgId, siteId, 'E2E Agent Test Token', token, expiresAt]
     );
 
     const record = insertRes.rows[0];
