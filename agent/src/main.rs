@@ -1100,8 +1100,8 @@ async fn main() {
     loop {
         let res = run_agent(&args, &server, &mut state).await;
         match &res {
-            Ok(()) => fwarn!("Connection closed cleanly. Reconnecting in {}s...", backoff_secs),
-            Err(e) => ferror!("Agent error: {}. Reconnecting in {}s...", e, backoff_secs),
+            Ok(()) => { fwarn!("Connection closed cleanly. Reconnecting in {}s...", backoff_secs) }
+            Err(e) => { ferror!("Agent error: {}. Reconnecting in {}s...", e, backoff_secs) }
         }
 
         let jitter_ms = (Uuid::new_v4().as_u128() % 500) as u64;
