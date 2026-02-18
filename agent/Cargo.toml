@@ -18,7 +18,7 @@ hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
 uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["local-offset"] }
+chrono = { version = "0.4", features = ["clock", "serde"] }
 sysinfo = "0.31"
 hostname = "0.4"
 rand = "0.8"
