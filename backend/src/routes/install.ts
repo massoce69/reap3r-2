@@ -180,7 +180,7 @@ systemctl --no-pager --full status reap3r-agent.service || true
       `  } catch {`,
       `    Write-Host "    Retry $i failed: $_" -ForegroundColor Yellow`,
       `    if ($i -lt $maxRetries) {`,
-      `      Write-Host "    Waiting ${retryDelay}s before retry..." -ForegroundColor Yellow`,
+      `      Write-Host "    Waiting \${retryDelay}s before retry..." -ForegroundColor Yellow`,
       `      Start-Sleep -Seconds $retryDelay`,
       `    }`,
       `  }`,
