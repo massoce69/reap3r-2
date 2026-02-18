@@ -207,7 +207,7 @@ systemctl --no-pager --full status reap3r-agent.service || true
       `    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
       `    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`,
       `    <RestartOnFailure>`,
-      `      <Interval>PT30S</Interval>`,
+      `      <Interval>PT1M</Interval>`,
       `      <Count>999</Count>`,
       `    </RestartOnFailure>`,
       `    <Enabled>true</Enabled>`,
