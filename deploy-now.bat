@@ -45,7 +45,7 @@ echo [*] Téléchargement et exécution du script de déploiement...
 echo.
 
 REM Exécuter le script bootstrap sur le VPS
-plink -ssh -l root -pw Chenhao$macross69 72.62.181.194 "bash -s" ^
+plink -ssh -l root 72.62.181.194 "bash -s" ^
     <<EOF
 set -e
 echo "Clonage du script..."

@@ -63,6 +63,12 @@ npm run dev -w @massvision/backend
 npm run dev -w @massvision/frontend
 ```
 
+### Development Database Notes
+
+- The dev Postgres container is exposed on host port `5433` by default (override with `PG_PORT=5432 docker compose up -d postgres` if you want).
+- If you run the backend on the host (not in Docker), set `DATABASE_URL` (or rely on the dev default):
+  `postgresql://reap3r:reap3r_dev_password@localhost:5433/reap3r`
+
 ### Default Credentials
 
 | Service | Email | Password |

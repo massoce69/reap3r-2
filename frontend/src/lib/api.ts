@@ -2,7 +2,18 @@
 // MASSVISION Reap3r — API Client
 // ─────────────────────────────────────────────
 
-const API_BASE = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:4000';
+function getApiBase(): string {
+  const fromEnv = process.env.NEXT_PUBLIC_API_URL;
+  if (fromEnv && fromEnv.trim()) return fromEnv.replace(/\/+$/, '');
+
+  // In the browser, default to same-origin so Nginx can proxy `/api/*`.
+  if (typeof window !== 'undefined') return '';
+
+  // Server-side fallback (mainly for local/dev). In production, prefer setting NEXT_PUBLIC_API_URL.
+  return process.env.NODE_ENV === 'development' ? 'http://localhost:4000' : 'http://127.0.0.1:4000';
+}
+
+const API_BASE = getApiBase();
 
 export class ApiError extends Error {
   constructor(

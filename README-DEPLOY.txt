@@ -6,7 +6,7 @@ VPS INFO
 ─────────────────────────────────────────────────────────────────
 Server:     72.62.181.194 
 User:       root
-Password:   Chenhao$macross69
+SSH:        Configure key auth (no password stored in repo)
 
 DEPLOYMENT METHODS (Choose One)
 ─────────────────────────────────────────────────────────────────
@@ -43,7 +43,7 @@ Before deploying, update these scripts with YOUR GitHub URL:
 ─────────────────────────────────────────────────────────────────
 1. SSH into VPS:
    ssh root@72.62.181.194
-   (Enter password: Chenhao$macross69)
+   (SSH key recommended)
 
 2. Run deployment script:
    bash <(curl -sSL https://raw.githubusercontent.com/yourusername/massvision-reap3r/main/install-prod.sh)

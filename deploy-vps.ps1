@@ -1,10 +1,10 @@
 # Script de Déploiement MASSVISION Reap3r
-# Usage: .\deploy-vps.ps1 -VpsIP 72.62.181.194 -VpsUser root -VpsPassword "Chenhao$macross69"
+# Usage: .\deploy-vps.ps1 -VpsIP 72.62.181.194 -VpsUser root
+# Authentification: cle SSH recommandee (ne pas stocker de mots de passe dans les scripts)
 
 param(
     [string]$VpsIP = "72.62.181.194",
     [string]$VpsUser = "root",
-    [string]$VpsPassword = "Chenhao$macross69",
     [int]$VpsPort = 22,
     [string]$AppDir = "/app/massvision-reap3r"
 )
@@ -24,12 +24,12 @@ function Write-Log {
         [string]$Message,
         [string]$Level = "Info"
     )
-    $color = $colors[$Level] ?? "White"
+    $color = if ($colors.ContainsKey($Level)) { $colors[$Level] } else { "White" }
     $prefix = @{
-        Success = "✓"
-        Error   = "✗"
-        Warning = "⚠"
-        Info    = "→"
+        Success = "[OK]"
+        Error   = "[ERR]"
+        Warning = "[WARN]"
+        Info    = "[INFO]"
     }[$Level]
     Write-Host "$prefix $Message" -ForegroundColor $color
 }
@@ -42,10 +42,7 @@ function Invoke-SSHCommand {
     Write-Log "Exécution: $Command" "Info"
     
     # Essayer avec ssh intégré de Windows 10+
-    $result = & ssh -o "StrictHostKeyChecking=no" `
-                     -o "UserKnownHostsFile=/dev/null" `
-                     -o "PasswordAuthentication=yes" `
-                     -o "PubkeyAuthentication=no" `
+    $result = & ssh -o "StrictHostKeyChecking=accept-new" `
                      -p $VpsPort `
                      "$VpsUser@$VpsIP" `
                      $Command 2>&1
@@ -64,21 +61,38 @@ function Deploy-Backend {
     $script = @"
 #!/bin/bash
 set -e
-cd $AppDir/backend
+cd $AppDir
 
-# Variables d'environnement
-export DATABASE_URL="postgresql://reap3r:reap3r_secret@localhost:5432/reap3r"
-export JWT_SECRET="`$(openssl rand -base64 32)"
-export HMAC_SECRET="`$(openssl rand -base64 32)"
-export NODE_ENV=production
+ENV_FILE="$AppDir/backend/.env"
 
-# Build
-npm ci
-npm run build
+# Create once; do NOT rotate JWT/HMAC secrets on redeploy (would break sessions + agents).
+if [ ! -f "$ENV_FILE" ]; then
+  JWT_SECRET="$(openssl rand -base64 32)"
+  HMAC_SECRET="$(openssl rand -base64 32)"
+  cat > "$ENV_FILE" <<EOF
+NODE_ENV=production
+PORT=4000
+WS_PORT=4001
+API_BASE_URL=http://$($VpsIP)
+DATABASE_URL=postgresql://reap3r:reap3r_secret@localhost:5432/reap3r
+JWT_SECRET=$JWT_SECRET
+HMAC_SECRET=$HMAC_SECRET
+LOG_LEVEL=info
+EOF
+  chmod 600 "$ENV_FILE"
+fi
+
+set -a
+. "$ENV_FILE"
+set +a
+
+# Build (workspace root, so shared packages resolve correctly)
+npm ci --workspaces
+npm -w backend run build
 
 # Démarrer avec PM2
-pm2 stop reap3r-backend 2>/dev/null || true
-pm2 start "npm start" --name reap3r-backend --env production
+pm2 delete reap3r-backend 2>/dev/null || true
+pm2 start "npm -w backend start" --name reap3r-backend --env production
 pm2 save
 
 echo "Backend déployé"
@@ -94,15 +108,14 @@ function Deploy-Frontend {
     $script = @"
 #!/bin/bash
 set -e
-cd $AppDir/frontend
+cd $AppDir
 
-# Build
-NEXT_PUBLIC_API_URL="http://$($VpsIP)/api" npm ci
-NEXT_PUBLIC_API_URL="http://$($VpsIP)/api" npm run build
+# Build: leave API base empty to default to same-origin (/api proxied by Nginx).
+NEXT_PUBLIC_API_URL= npm -w frontend run build
 
 # Démarrer avec PM2
-pm2 stop reap3r-frontend 2>/dev/null || true
-pm2 start "npm start" --name reap3r-frontend --env production
+pm2 delete reap3r-frontend 2>/dev/null || true
+pm2 start "npm -w frontend start" --name reap3r-frontend --env production
 pm2 save
 
 echo "Frontend déployé"
@@ -172,12 +185,16 @@ function Setup-Nginx {
     Write-Log "Configuration de Nginx..." "Info"
     
     $nginxConfig = @"
-upstream backend {
-    server localhost:4000;
+upstream backend_http {
+    server 127.0.0.1:4000;
+}
+
+upstream backend_ws_agent {
+    server 127.0.0.1:4001;
 }
 
 upstream frontend {
-    server localhost:3000;
+    server 127.0.0.1:3000;
 }
 
 server {
@@ -186,7 +203,7 @@ server {
     client_max_body_size 100M;
 
     location /api/ {
-        proxy_pass http://backend;
+        proxy_pass http://backend_http;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -196,14 +213,28 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    location /ws {
-        proxy_pass http://backend;
+    # Agent WebSocket gateway (separate port)
+    location /ws/agent {
+        proxy_pass http://backend_ws_agent;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host \$host;
         proxy_set_header X-Real-IP \$remote_addr;
         proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
+    }
+
+    # UI WebSocket upgrade
+    location /ws {
+        proxy_pass http://backend_http;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host \$host;
+        proxy_set_header X-Real-IP \$remote_addr;
+        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
     location / {

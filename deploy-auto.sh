@@ -12,7 +12,7 @@ echo ""
 
 VPS_IP="72.62.181.194"
 VPS_USER="root"
-VPS_PASS="Chenhao\$macross69"
+
 
 echo "[*] Déploiement sur $VPS_IP..."
 echo ""
@@ -44,7 +44,8 @@ HMAC_SECRET=$(openssl rand -base64 32)
 LOG_LEVEL=info
 EOF
 cat > frontend/.env.local <<EOF
-NEXT_PUBLIC_API_URL=http://localhost:4000
+NEXT_PUBLIC_API_URL=
+NEXT_PUBLIC_WS_URL=
 EOF
 
 export DATABASE_URL="postgresql://reap3r:reap3r_secret@localhost:5432/reap3r"
@@ -73,11 +74,9 @@ pm2 list
 echo "Exécution du déploiement..."
 echo ""
 
-ssh -o StrictHostKeyChecking=no \
-    -o UserKnownHostsFile=/dev/null \
-    -o PasswordAuthentication=yes \
-    -o PubkeyAuthentication=no \
-    root@$VPS_IP "bash -s" <<< "$DEPLOY_SCRIPT"
+# Use SSH key auth (recommended). Do not bake passwords into scripts.
+ssh -o StrictHostKeyChecking=accept-new \
+    "$VPS_USER@$VPS_IP" "bash -s" <<< "$DEPLOY_SCRIPT"
 
 echo ""
 echo "Frontend: http://$VPS_IP"

@@ -29,6 +29,8 @@ import edrRoutes from './routes/edr.js';
 import adminRoutes from './routes/admin.js';
 import alertingRoutes from './routes/alerting.js';
 import apiKeyRoutes from './routes/api-keys.js';
+import agentBinaryRoutes from './routes/agent-binary.js';
+import installRoutes from './routes/install.js';
 
 // WebSocket
 import { setupAgentGateway } from './ws/agent-gateway.js';
@@ -73,20 +75,24 @@ async function main() {
   }
 
   // ── Routes ──
-  await fastify.register(healthRoutes, { prefix: '/api' });
-  await fastify.register(authRoutes, { prefix: '/api' });
-  await fastify.register(agentRoutes, { prefix: '/api' });
-  await fastify.register(jobRoutes, { prefix: '/api' });
-  await fastify.register(auditRoutes, { prefix: '/api' });
-  await fastify.register(enrollmentRoutes, { prefix: '/api' });
-  await fastify.register(companyRoutes, { prefix: '/api' });
-  await fastify.register(folderRoutes, { prefix: '/api' });
-  await fastify.register(vaultRoutes, { prefix: '/api' });
-  await fastify.register(chatRoutes, { prefix: '/api' });
-  await fastify.register(edrRoutes, { prefix: '/api' });
-  await fastify.register(adminRoutes, { prefix: '/api' });
-  await fastify.register(alertingRoutes, { prefix: '/api' });
-  await fastify.register(apiKeyRoutes, { prefix: '/api' });
+  // Route modules already mount under '/api/*' (except health, which also exposes '/health').
+  // Do not double-prefix them with '/api', otherwise endpoints become '/api/api/*'.
+  await fastify.register(healthRoutes);
+  await fastify.register(authRoutes);
+  await fastify.register(agentRoutes);
+  await fastify.register(jobRoutes);
+  await fastify.register(auditRoutes);
+  await fastify.register(enrollmentRoutes);
+  await fastify.register(companyRoutes);
+  await fastify.register(folderRoutes);
+  await fastify.register(vaultRoutes);
+  await fastify.register(chatRoutes);
+  await fastify.register(edrRoutes);
+  await fastify.register(adminRoutes);
+  await fastify.register(alertingRoutes);
+  await fastify.register(apiKeyRoutes);
+  await fastify.register(agentBinaryRoutes);
+  await fastify.register(installRoutes);
 
   // ── Agent Gateway (WS) ──
   setupAgentGateway(fastify);

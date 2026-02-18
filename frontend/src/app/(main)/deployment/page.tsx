@@ -72,8 +72,8 @@ export default function DeploymentPage() {
               <CommandBlock
                 label="Linux (one-liner)"
                 icon={<Terminal className="w-4 h-4" />}
-                command={commands.linux_oneliner}
-                onCopy={() => copyToClipboard(commands.linux_oneliner, 'linux')}
+                command={commands.linux_oneliner ?? commands.linux_bash}
+                onCopy={() => copyToClipboard(commands.linux_oneliner ?? commands.linux_bash, 'linux')}
                 copied={copiedField === 'linux'}
               />
             </div>
@@ -157,9 +157,11 @@ export default function DeploymentPage() {
                   <p className="text-xs text-reap3r-muted">EXE/MSI installer (signed)</p>
                 </div>
               </div>
-              <Button variant="secondary" size="sm" className="w-full mt-2" disabled>
-                <Download className="w-3 h-3" /> Download (coming soon)
-              </Button>
+              <a href="/api/agent-binary/download?os=windows&arch=x86_64" className="block mt-2">
+                <Button variant="secondary" size="sm" className="w-full">
+                  <Download className="w-3 h-3" /> Download
+                </Button>
+              </a>
             </div>
             <div className="border border-reap3r-border rounded-lg p-4">
               <div className="flex items-center gap-3 mb-2">
@@ -169,9 +171,11 @@ export default function DeploymentPage() {
                   <p className="text-xs text-reap3r-muted">Binary (sha256 + signature)</p>
                 </div>
               </div>
-              <Button variant="secondary" size="sm" className="w-full mt-2" disabled>
-                <Download className="w-3 h-3" /> Download (coming soon)
-              </Button>
+              <a href="/api/agent-binary/download?os=linux&arch=x86_64" className="block mt-2">
+                <Button variant="secondary" size="sm" className="w-full">
+                  <Download className="w-3 h-3" /> Download
+                </Button>
+              </a>
             </div>
           </div>
         </Card>

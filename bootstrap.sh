@@ -158,7 +158,8 @@ fi
 if [ ! -f "$APP_DIR/frontend/.env.local" ]; then
     log_info "Création de frontend/.env.local..."
     cat > "$APP_DIR/frontend/.env.local" <<EOF
-NEXT_PUBLIC_API_URL=http://localhost:4000
+# Leave empty to default to same-origin (Nginx proxies /api/* in production).
+NEXT_PUBLIC_API_URL=
 EOF
 else
     log_warn "frontend/.env.local existe déjà"
@@ -243,8 +244,12 @@ log_success "Services démarrés"
 log_info "Configuration de Nginx..."
 
 cat > /etc/nginx/sites-available/reap3r-prod <<'NGINXCONF'
-upstream backend {
-    server localhost:4000;
+upstream backend_http {
+    server 127.0.0.1:4000;
+}
+
+upstream backend_ws_agent {
+    server 127.0.0.1:4001;
 }
 
 upstream frontend {
@@ -258,7 +263,18 @@ server {
     client_max_body_size 100M;
 
     location /api/ {
-        proxy_pass http://backend;
+        proxy_pass http://backend_http;
+        proxy_http_version 1.1;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection "upgrade";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+
+    location /ws/agent {
+        proxy_pass http://backend_ws_agent;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
@@ -269,13 +285,14 @@ server {
     }
 
     location /ws {
-        proxy_pass http://backend;
+        proxy_pass http://backend_http;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
     }
 
     location / {

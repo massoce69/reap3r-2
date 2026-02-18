@@ -1,4 +1,4 @@
-param([string]$VpsPassword = "Chenhao`$macross69", [string]$VpsIp = "72.62.181.194")
+param([string]$VpsIp = "72.62.181.194")
 
 Write-Host "╔═════════════════════════════════════════╗" -ForegroundColor Cyan
 Write-Host "║ MASSVISION Reap3r - VPS Deployment ║" -ForegroundColor Cyan

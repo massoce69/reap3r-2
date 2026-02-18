@@ -79,7 +79,7 @@ ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIFLFggY/r3zEBFz3Q98dBB/3m2bR0b+aD73aHqRoLicz
 │ 5. From Windows PowerShell:                                            │
 │                                                                          │
 │    cd C:\Projects\massvision-reap3r                                    │
-│    powershell -ExecutionPolicy Bypass -File deploy-windows.ps1 -VpsPassword "Chenhao$macross69"
+│    powershell -ExecutionPolicy Bypass -File deploy-windows.ps1 -VpsIp "72.62.181.194" -VpsUser "root"
 │                                                                          │
 │ ⚠️  Security: Remember to disable password auth after deployment!       │
 │    (Set PasswordAuthentication no when deployment completes)             │

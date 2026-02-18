@@ -12,7 +12,13 @@ class RealtimeClient {
 
   connect(token: string) {
     this.token = token;
-    const wsBase = process.env.NEXT_PUBLIC_WS_URL || 'ws://localhost:4000';
+    const wsBase =
+      process.env.NEXT_PUBLIC_WS_URL?.trim() ||
+      (typeof window !== 'undefined'
+        ? `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`
+        : 'ws://127.0.0.1:4000');
+
+    // Default path is proxied by Nginx: `/ws/*` -> backend
     this.ws = new WebSocket(`${wsBase}/ws/ui?token=${token}`);
 
     this.ws.onmessage = (event) => {

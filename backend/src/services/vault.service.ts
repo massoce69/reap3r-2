@@ -83,11 +83,35 @@ export async function deleteSecret(orgId: string, id: string) {
   return (rowCount ?? 0) > 0;
 }
 
-export async function revealSecret(orgId: string, id: string): Promise<string | null> {
-  const { rows } = await query<{ encrypted_blob: Buffer }>(
-    `SELECT encrypted_blob FROM secrets WHERE org_id = $1 AND id = $2`, [orgId, id]
+export async function revealSecret(
+  orgId: string,
+  id: string,
+  userId?: string,
+  role?: string,
+): Promise<string | null> {
+  const { rows } = await query<{ encrypted_blob: Buffer; created_by: string | null }>(
+    `SELECT encrypted_blob, created_by FROM secrets WHERE org_id = $1 AND id = $2`, [orgId, id]
   );
   if (!rows[0]) return null;
+
+  // ACL: admin/super_admin bypass, creator bypass; otherwise check secret_permissions
+  if (userId && role && role !== 'super_admin' && role !== 'org_admin') {
+    const isCreator = rows[0].created_by === userId;
+    if (!isCreator) {
+      const perm = await query<{ id: string }>(
+        `SELECT id FROM secret_permissions
+         WHERE secret_id = $1 AND principal_type = 'user' AND principal_id = $2 AND 'reveal' = ANY(rights)
+         UNION ALL
+         SELECT sp.id FROM secret_permissions sp
+           JOIN team_members tm ON sp.principal_type = 'team' AND sp.principal_id = tm.team_id::text
+         WHERE sp.secret_id = $1 AND tm.user_id = $3 AND 'reveal' = ANY(sp.rights)
+         LIMIT 1`,
+        [id, userId, userId]
+      );
+      if ((perm.rowCount ?? 0) === 0) return null; // no permission → act as not found
+    }
+  }
+
   return decryptSecret(rows[0].encrypted_blob);
 }
 

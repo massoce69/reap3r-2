@@ -6,7 +6,6 @@ color 0f
 
 set VPS_IP=72.62.181.194
 set VPS_USER=root
-set PWD=Chenhao.macross69
 
 echo.
 echo =========================================================
@@ -15,14 +14,11 @@ echo =========================================================
 echo.
 echo Cette méthode envoie DIRECTEMENT vos fichiers au VPS via SSH.
 echo.
-echo *********************************************************
-echo * MOT DE PASSE A COPIER : %PWD%
-echo *********************************************************
+echo Utilisez une cle SSH (recommande). Ce script n'embarque aucun mot de passe.
 echo.
 echo [1] Compression et Envoi des fichiers...
 echo     (Cela peut prendre une minute...)
 echo.
-echo VEUILLEZ COLLER LE MOT DE PASSE QUAND DEMANDE (Clic Droit)
 echo.
 
 tar --exclude node_modules --exclude .next --exclude .git --exclude .vscode -cf - . | ssh -o StrictHostKeyChecking=no %VPS_USER%@%VPS_IP% "mkdir -p /app/massvision-reap3r && tar xf - -C /app/massvision-reap3r && cd /app/massvision-reap3r && chmod +x install-prod.sh && bash install-prod.sh"
@@ -30,7 +26,7 @@ tar --exclude node_modules --exclude .next --exclude .git --exclude .vscode -cf 
 if %ERRORLEVEL% NEQ 0 (
     echo.
     echo [ERREUR] Echec de la connexion ou du déploiement.
-    echo Verifiez le mot de passe.
+    echo Verifiez la connexion SSH (cle) et les droits.
     pause
     exit /b 1
 )

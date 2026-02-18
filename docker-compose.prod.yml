@@ -38,6 +38,7 @@ services:
       NODE_ENV: production
       LOG_LEVEL: info
       CORS_ORIGIN: ${CORS_ORIGIN:-https://reap3r.example.com}
+    command: ["sh", "-c", "node backend/dist/db/migrate.js && node backend/dist/index.js"]
     networks:
       - internal
       - web
@@ -58,6 +59,7 @@ services:
     environment:
       NEXT_PUBLIC_API_URL: ${API_URL:-https://reap3r.example.com}
       NEXT_PUBLIC_WS_URL: ${WS_URL:-wss://reap3r.example.com}
+      HOSTNAME: 0.0.0.0
     networks:
       - web
     depends_on:

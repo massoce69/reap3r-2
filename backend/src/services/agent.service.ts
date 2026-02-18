@@ -2,13 +2,14 @@
 // MASSVISION Reap3r — Agent Service
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
+import crypto from 'crypto';
 
 /* ── Enroll ── */
 export async function validateEnrollmentToken(fastify: FastifyInstance, token: string) {
   const { rows } = await fastify.pg.query(
     `SELECT * FROM enrollment_tokens
      WHERE token = $1 AND revoked = false AND (expires_at IS NULL OR expires_at > now())
-       AND (max_uses IS NULL OR uses_count < max_uses)`,
+       AND (COALESCE(max_uses, 0) = 0 OR use_count < COALESCE(max_uses, 0))`,
     [token],
   );
   return rows[0] ?? null;
@@ -19,29 +20,43 @@ export async function enrollAgent(
   data: {
     hostname: string;
     os: string;
+    os_version?: string | null;
     arch: string;
     agent_version: string;
     token_id: string;
     org_id: string;
+    site_id: string | null;
     company_id: string | null;
     folder_id: string | null;
-    ip_address: string | null;
+    last_ip: string | null;
   },
 ) {
   const client = await fastify.pg.connect();
   try {
     await client.query('BEGIN');
 
+    const agentSecret = crypto.randomBytes(32).toString('hex');
     const { rows } = await client.query(
-      `INSERT INTO agents (hostname, os, arch, agent_version, org_id, company_id, ip_address, status, enrolled_via)
-       VALUES ($1, $2, $3, $4, $5, $6, $7, 'online', $8)
+      `INSERT INTO agents (hostname, os, os_version, arch, agent_version, org_id, site_id, company_id, status, agent_secret, enrolled_at, last_seen_at, last_ip)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'online', $9, now(), now(), $10)
        RETURNING *`,
-      [data.hostname, data.os, data.arch, data.agent_version, data.org_id, data.company_id, data.ip_address, data.token_id],
+      [
+        data.hostname,
+        data.os,
+        data.os_version ?? '',
+        data.arch,
+        data.agent_version,
+        data.org_id,
+        data.site_id,
+        data.company_id,
+        agentSecret,
+        data.last_ip,
+      ],
     );
     const agent = rows[0];
 
     // Increment token usage
-    await client.query(`UPDATE enrollment_tokens SET uses_count = uses_count + 1 WHERE id = $1`, [data.token_id]);
+    await client.query(`UPDATE enrollment_tokens SET use_count = use_count + 1 WHERE id = $1`, [data.token_id]);
 
     // Add to folder if specified
     if (data.folder_id) {
@@ -148,13 +163,13 @@ export async function updateAgentStatus(fastify: FastifyInstance, id: string, st
 export async function heartbeat(
   fastify: FastifyInstance,
   agentId: string,
-  data: { ip_address?: string; agent_version?: string; cpu_percent?: number; mem_percent?: number; disk_percent?: number },
+  data: { last_ip?: string; agent_version?: string; cpu_percent?: number; mem_percent?: number; disk_percent?: number },
 ) {
   const fields = ['last_seen_at = now()', "status = 'online'"];
   const params: unknown[] = [];
   let idx = 1;
 
-  if (data.ip_address) { fields.push(`ip_address = $${idx++}`); params.push(data.ip_address); }
+  if (data.last_ip) { fields.push(`last_ip = $${idx++}`); params.push(data.last_ip); }
   if (data.agent_version) { fields.push(`agent_version = $${idx++}`); params.push(data.agent_version); }
   if (data.cpu_percent !== undefined) { fields.push(`cpu_percent = $${idx++}`); params.push(data.cpu_percent); }
   if (data.mem_percent !== undefined) { fields.push(`mem_percent = $${idx++}`); params.push(data.mem_percent); }
@@ -165,8 +180,28 @@ export async function heartbeat(
 }
 
 /* ── Capabilities ── */
-export async function updateCapabilities(fastify: FastifyInstance, agentId: string, capabilities: Record<string, unknown>) {
-  await fastify.pg.query(`UPDATE agents SET capabilities = $2 WHERE id = $1`, [agentId, JSON.stringify(capabilities)]);
+export async function updateCapabilities(fastify: FastifyInstance, agentId: string, payload: Record<string, unknown>) {
+  const raw = (payload as any)?.capabilities;
+  const caps: string[] = Array.isArray(raw) ? raw.map((c) => String(c)).filter(Boolean) : [];
+
+  const client = await fastify.pg.connect();
+  try {
+    await client.query('BEGIN');
+    await client.query(`DELETE FROM agent_capabilities WHERE agent_id = $1`, [agentId]);
+    for (const cap of caps) {
+      await client.query(
+        `INSERT INTO agent_capabilities (agent_id, capability) VALUES ($1, $2)
+         ON CONFLICT (agent_id, capability) DO UPDATE SET updated_at = now()`,
+        [agentId, cap],
+      );
+    }
+    await client.query('COMMIT');
+  } catch (e) {
+    await client.query('ROLLBACK');
+    throw e;
+  } finally {
+    client.release();
+  }
 }
 
 /* ── Mark offline ── */

@@ -1,5 +1,5 @@
 # MASSVISION Reap3r - Windows Deployment Script
-# Usage: powershell -ExecutionPolicy Bypass -File deploy-windows.ps1 -VpsPassword "Chenhao$macross69"
+# Usage: powershell -ExecutionPolicy Bypass -File deploy-windows.ps1 -VpsIp "72.62.181.194" -VpsUser "root"
 
 param(
     [string]$VpsIp = "72.62.181.194",

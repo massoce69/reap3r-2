@@ -7,6 +7,26 @@ import { Permission, CreateEnrollmentTokenSchema } from '@massvision/shared';
 import { createAuditLog } from '../services/audit.service.js';
 import { parseUUID, parseBody } from '../lib/validate.js';
 
+function firstHeader(v: unknown): string | undefined {
+  if (!v) return undefined;
+  if (Array.isArray(v)) return String(v[0] ?? '');
+  return String(v);
+}
+
+function publicBaseUrl(request: any): string {
+  const fromEnv = process.env.API_BASE_URL;
+  if (fromEnv && fromEnv.trim()) return fromEnv.replace(/\/+$/, '');
+
+  const proto = (firstHeader(request.headers['x-forwarded-proto']) || request.protocol || 'http')
+    .split(',')[0]
+    .trim();
+  const host = (firstHeader(request.headers['x-forwarded-host']) || firstHeader(request.headers.host) || '')
+    .split(',')[0]
+    .trim();
+  const base = host ? `${proto}://${host}` : 'http://localhost:4000';
+  return base.replace(/\/+$/, '');
+}
+
 export default async function enrollmentRoutes(fastify: FastifyInstance) {
   // ── List tokens ──
   fastify.get('/api/enrollment/tokens', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.TokenList)] }, async (request) => {
@@ -41,7 +61,7 @@ export default async function enrollmentRoutes(fastify: FastifyInstance) {
       [
         token, body.name, request.currentUser.org_id,
         body.site_id ?? null, body.company_id ?? null, body.folder_id ?? null,
-        body.max_uses ?? null, body.expires_at ?? null, request.currentUser.id,
+        body.max_uses ?? 0, body.expires_at ?? null, request.currentUser.id,
       ],
     );
     await createAuditLog(fastify, {
@@ -91,11 +111,16 @@ export default async function enrollmentRoutes(fastify: FastifyInstance) {
     );
     if (rows.length === 0) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
     const t = rows[0].token;
-    const apiBase = process.env.API_BASE_URL || 'https://your-server.massvision.io';
+    const apiBase = publicBaseUrl(request);
+    const wsBase = apiBase.replace(/^http(s?):\/\//i, 'ws$1://');
     return {
-      windows_powershell: `$token="${t}"; Invoke-WebRequest -Uri "${apiBase}/install/windows?token=$token" -OutFile reap3r-installer.exe; Start-Process .\\reap3r-installer.exe -ArgumentList "--token $token --server ${apiBase}" -Wait`,
-      linux_bash: `curl -sSL "${apiBase}/install/linux?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
-      macos_bash: `curl -sSL "${apiBase}/install/macos?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
+      windows_powershell: `$token="${t}"; $server="${apiBase}"; Invoke-WebRequest -Uri "$server/api/install/windows?token=$token" -OutFile reap3r-install.ps1; powershell -ExecutionPolicy Bypass -File .\\reap3r-install.ps1 -Token $token -Server $server`,
+      linux_oneliner: `curl -fsSL "${apiBase}/api/install/linux?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
+      macos_oneliner: `curl -fsSL "${apiBase}/api/install/macos?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
+
+      // Backward-compatible keys for older UIs.
+      linux_bash: `curl -fsSL "${apiBase}/api/install/linux?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
+      macos_bash: `curl -fsSL "${apiBase}/api/install/macos?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
     };
   });
 }

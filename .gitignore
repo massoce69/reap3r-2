@@ -3,6 +3,8 @@ dist/
 .next/
 target/
 *.log
+*.tsbuildinfo
+fix_admin_pass.sql
 .env
 .env.local
 *.pem

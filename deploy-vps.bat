@@ -6,7 +6,6 @@ setlocal enabledelayedexpansion
 
 set VPS_IP=72.62.181.194
 set VPS_USER=root
-set VPS_PASS=Chenhao$macross69
 set VPS_PORT=22
 
 set DEPLOY_DIR=C:\Projects\massvision-reap3r
@@ -76,7 +75,8 @@ echo HMAC_SECRET=$(openssl rand -base64 32^)
 echo EOF
 echo.
 echo cat ^> frontend/.env.local ^<^< EOF
-echo NEXT_PUBLIC_API_URL=http://localhost:4000
+echo NEXT_PUBLIC_API_URL=
+echo NEXT_PUBLIC_WS_URL=
 echo EOF
 echo.
 echo # Créer la base de données
@@ -116,21 +116,15 @@ if !errorlevel! equ 0 (
     REM Cette approche nécessite une clé SSH configurée
     plink -ssh -l !VPS_USER! -P !VPS_PORT! !VPS_IP! -m !TEMP_SCRIPT!
 ) else (
-    where sshpass >nul 2>&1
-    if !errorlevel! equ 0 (
-        echo Utilisation de sshpass...
-        sshpass -p "!VPS_PASS!" ssh -o StrictHostKeyChecking=no -P !VPS_PORT! !VPS_USER!@!VPS_IP! "bash -" ^< !TEMP_SCRIPT!
-    ) else (
-        echo.
-        echo ERREUR: Installez Putty (plink^) ou sshpass pour continuer.
-        echo.
-        echo Pour Windows:
-        echo   - Installer Git Bash qui inclut ssh
-        echo   - Ou installer Putty: https://www.putty.org/
-        echo.
-        pause
-        exit /b 1
-    )
+    echo.
+    echo ERREUR: Plink introuvable. Utilisez SSH avec une cle (recommande).
+    echo.
+    echo Pour Windows:
+    echo   - Installer Git Bash (ssh)
+    echo   - Puis: ssh !VPS_USER!@!VPS_IP! "bash -s" ^< install-prod.sh
+    echo.
+    pause
+    exit /b 1
 )
 
 echo.

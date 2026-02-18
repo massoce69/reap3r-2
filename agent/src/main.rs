@@ -379,6 +379,12 @@ async fn execute_process_action(payload: &serde_json::Value) -> Result<serde_jso
             let mut sys = System::new_all();
             sys.refresh_all();
             let mut procs: Vec<serde_json::Value> = sys.processes().values().map(|p| {
+                let cmd = p
+                    .cmd()
+                    .iter()
+                    .map(|s| s.to_string_lossy())
+                    .collect::<Vec<_>>()
+                    .join(" ");
                 serde_json::json!({
                     "pid": p.pid().as_u32(),
                     "name": p.name().to_string_lossy(),
@@ -386,7 +392,7 @@ async fn execute_process_action(payload: &serde_json::Value) -> Result<serde_jso
                     "memory_bytes": p.memory(),
                     "status": format!("{:?}", p.status()),
                     "start_time": p.start_time(),
-                    "cmd": p.cmd().join(" "),
+                    "cmd": cmd,
                     "exe": p.exe().map(|e| e.to_string_lossy().to_string()),
                 })
             }).collect();
@@ -531,7 +537,12 @@ fn check_security_events() -> Vec<serde_json::Value> {
     for (pid, process) in sys.processes() {
         let name = process.name().to_string_lossy().to_lowercase();
         let exe = process.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
-        let cmd = process.cmd().join(" ");
+        let cmd = process
+            .cmd()
+            .iter()
+            .map(|s| s.to_string_lossy())
+            .collect::<Vec<_>>()
+            .join(" ");
 
         // Check suspicious process names
         for s in &suspicious_names {
@@ -684,7 +695,7 @@ async fn main() {
 
 async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let url = url::Url::parse(&args.server)?;
-    let (ws_stream, _) = connect_async(url).await?;
+    let (ws_stream, _) = connect_async(url.as_str()).await?;
     let (mut write, mut read) = ws_stream.split();
 
     info!("Connected to server");
@@ -725,24 +736,36 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             let resp: serde_json::Value = serde_json::from_str(&text)?;
             if resp["type"] == "enroll_response" {
                 let payload = &resp["payload"];
-                if payload["success"].as_bool() == Some(true) {
-                    let id = payload["agent_id"].as_str().unwrap().to_string();
-                    let secret = payload["agent_secret"].as_str().unwrap().to_string();
-                    info!(agent_id = %id, "Enrollment successful!");
-                    // Persist agent_id + secret to config file
-                    if let Err(e) = save_config(&AgentConfig {
-                        agent_id: id.clone(),
-                        agent_secret: secret.clone(),
-                        server: args.server.clone(),
-                        enrolled_at: now_ms(),
-                    }) {
-                        warn!(error = %e, "Failed to save agent config — agent will need re-enrollment on next restart");
-                    }
-                    (id, secret)
-                } else {
-                    let err = payload["error"].as_str().unwrap_or("Unknown error");
+
+                if let Some(err) = payload["error"].as_str() {
                     return Err(format!("Enrollment failed: {}", err).into());
                 }
+
+                // Backend variants:
+                // - { success:true, agent_id, agent_secret }
+                // - { agent_id, hmac_key, ... }   (global HMAC key)
+                let id = payload["agent_id"]
+                    .as_str()
+                    .ok_or("Enrollment response missing agent_id")?
+                    .to_string();
+
+                let secret = payload["agent_secret"]
+                    .as_str()
+                    .or_else(|| payload["hmac_key"].as_str())
+                    .ok_or("Enrollment response missing agent_secret/hmac_key")?
+                    .to_string();
+
+                info!(agent_id = %id, "Enrollment successful!");
+                // Persist agent_id + secret to config file
+                if let Err(e) = save_config(&AgentConfig {
+                    agent_id: id.clone(),
+                    agent_secret: secret.clone(),
+                    server: args.server.clone(),
+                    enrolled_at: now_ms(),
+                }) {
+                    warn!(error = %e, "Failed to save agent config - agent will need re-enrollment on next restart");
+                }
+                (id, secret)
             } else {
                 return Err("Unexpected response during enrollment".into());
             }

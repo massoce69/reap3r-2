@@ -10,7 +10,8 @@
     "lint": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "db:migrate": "tsx src/db/migrate.ts"
+    "db:migrate": "tsx src/db/migrate.ts",
+    "db:reset-admin": "tsx src/scripts/reset-admin.ts"
   },
   "dependencies": {
     "@massvision/shared": "*",

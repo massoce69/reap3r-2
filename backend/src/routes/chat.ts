@@ -45,7 +45,7 @@ export default async function chatRoutes(fastify: FastifyInstance) {
   }, async (request) => {
     const { id } = request.params as { id: string };
     const q = request.query as any;
-    return svc.listMessages(id, { page: Number(q.page) || 1, limit: Number(q.limit) || 50 });
+    return svc.listMessages(id, request.currentUser.id, { page: Number(q.page) || 1, limit: Number(q.limit) || 50 });
   });
 
   // POST /api/chat/channels/:id/messages

@@ -69,7 +69,7 @@ export default async function vaultRoutes(fastify: FastifyInstance) {
     preHandler: [fastify.requirePermission(Permission.SecretReveal)],
   }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const value = await svc.revealSecret(request.currentUser.org_id, id);
+    const value = await svc.revealSecret(request.currentUser.org_id, id, request.currentUser.id, request.currentUser.role);
     if (value === null) return reply.status(404).send({ error: 'Not found' });
     await svc.logSecretAccess(id, request.currentUser.id, 'view', request.ip, request.headers['user-agent'] ?? null);
     await request.audit({ action: 'secret_reveal', entity_type: 'secret', entity_id: id });
@@ -81,7 +81,7 @@ export default async function vaultRoutes(fastify: FastifyInstance) {
     preHandler: [fastify.requirePermission(Permission.SecretUse)],
   }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const value = await svc.revealSecret(request.currentUser.org_id, id);
+    const value = await svc.revealSecret(request.currentUser.org_id, id, request.currentUser.id, request.currentUser.role);
     if (value === null) return reply.status(404).send({ error: 'Not found' });
     await svc.logSecretAccess(id, request.currentUser.id, 'use', request.ip, request.headers['user-agent'] ?? null);
     await request.audit({ action: 'secret_use', entity_type: 'secret', entity_id: id });

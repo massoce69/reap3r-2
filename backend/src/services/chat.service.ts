@@ -63,6 +63,18 @@ export async function getChannelMembers(channelId: string) {
 }
 
 export async function createMessage(channelId: string, userId: string, body: string) {
+  // Membership check: user must be member of channel OR channel must be 'general' type
+  const memberCheck = await query<{ ok: number }>(
+    `SELECT 1 AS ok FROM channel_members WHERE channel_id = $1 AND user_id = $2
+     UNION ALL
+     SELECT 1 AS ok FROM channels WHERE id = $1 AND type = 'general'
+     LIMIT 1`,
+    [channelId, userId]
+  );
+  if ((memberCheck.rowCount ?? 0) === 0) {
+    throw Object.assign(new Error('Not a member of this channel'), { statusCode: 403 });
+  }
+
   const { rows } = await query<{ id: string; created_at: string }>(
     `INSERT INTO messages (channel_id, user_id, body) VALUES ($1,$2,$3) RETURNING id, created_at`,
     [channelId, userId, body]
@@ -72,7 +84,19 @@ export async function createMessage(channelId: string, userId: string, body: str
   return rows[0];
 }
 
-export async function listMessages(channelId: string, params: { page: number; limit: number }) {
+export async function listMessages(channelId: string, userId: string, params: { page: number; limit: number }) {
+  // Membership check: user must be member or channel must be general
+  const memberCheck = await query<{ ok: number }>(
+    `SELECT 1 AS ok FROM channel_members WHERE channel_id = $1 AND user_id = $2
+     UNION ALL
+     SELECT 1 AS ok FROM channels WHERE id = $1 AND type = 'general'
+     LIMIT 1`,
+    [channelId, userId]
+  );
+  if ((memberCheck.rowCount ?? 0) === 0) {
+    throw Object.assign(new Error('Not a member of this channel'), { statusCode: 403 });
+  }
+
   const offset = (params.page - 1) * params.limit;
   const [dataRes, countRes] = await Promise.all([
     query(

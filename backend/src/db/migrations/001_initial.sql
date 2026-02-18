@@ -207,7 +207,8 @@ CREATE TABLE artifacts (
 CREATE INDEX idx_artifacts_org ON artifacts(org_id);
 
 -- ── Seed default org + admin user ──
--- Password: Reap3r@Admin2024 (bcrypt hash)
+-- Password: Admin123!@# (bcrypt hash, 12 rounds)
+-- To regenerate: node -e "require('bcrypt').hash('Admin123!@#',12).then(h=>console.log(h))"
 INSERT INTO orgs (id, name, slug) VALUES
   ('00000000-0000-0000-0000-000000000001', 'Default Organization', 'default');
 
