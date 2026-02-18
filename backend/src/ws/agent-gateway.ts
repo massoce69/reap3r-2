@@ -463,7 +463,15 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
           case MessageType.JobAck: {
             const p = msg.payload;
-            const newStatus = p.status === 'running' ? 'running' : 'failed';
+            // Agent sends status: "running" | "rejected" | undefined
+            // Map to backend job status: "running" | "failed"
+            let newStatus: 'running' | 'failed' = 'failed';
+            if (p.status === 'running') {
+              newStatus = 'running';
+            } else if (p.status !== 'rejected') {
+              // If no status or unknown, log warning but assume failed
+              fastify.log.warn({ job_id: p.job_id, agent_status: p.status }, 'JobAck missing/invalid status');
+            }
             await jobService.updateJobStatus(fastify, p.job_id, newStatus, p.reason ? { reason: p.reason } : undefined);
             fastify.broadcastToUI('job:status', { job_id: p.job_id, status: newStatus });
             break;

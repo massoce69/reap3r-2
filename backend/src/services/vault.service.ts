@@ -9,7 +9,11 @@ import { config } from '../config.js';
 const ALGO = 'aes-256-gcm';
 
 function getMasterKey(): Buffer {
-  const key = process.env.VAULT_MASTER_KEY || config.hmac.secret;
+  // VAULT_MASTER_KEY: required in prod, fallback to HMAC_SECRET in dev with warning
+  const key = process.env.VAULT_MASTER_KEY || config.vault.masterKey || config.hmac.secret;
+  if (!process.env.VAULT_MASTER_KEY && config.nodeEnv === 'production') {
+    throw new Error('[FATAL] VAULT_MASTER_KEY not found; secrets cannot be decrypted. Set VAULT_MASTER_KEY env var.');
+  }
   return crypto.createHash('sha256').update(key).digest();
 }
 

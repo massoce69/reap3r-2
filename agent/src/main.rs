@@ -233,20 +233,23 @@ async fn handle_job(
     job: &serde_json::Value,
     agent_id: &str,
     secret: &str,
-) -> String {
+) -> (String, String) {
     let job_id = job["id"].as_str().unwrap_or("");
     let job_type = job["type"].as_str().unwrap_or("");
     let payload = &job["payload"];
 
     info!(job_id, job_type, "Executing job");
 
-    // Send ACK
+    // Send ACK with "running" status
     let ack = build_message(
         agent_id,
         "job_ack",
-        serde_json::json!({ "job_id": job_id }),
+        serde_json::json!({ "job_id": job_id, "status": "running" }),
         secret,
     );
+
+    // Start timer for duration_ms
+    let start_time = std::time::Instant::now();
 
     // Execute based on type
     let result = match job_type {
@@ -268,31 +271,53 @@ async fn handle_job(
         _ => Err(format!("Unsupported job type: {}", job_type)),
     };
 
+    let duration_ms = start_time.elapsed().as_millis() as u64;
+
+    // Build result message with proper schema
     let result_msg = match result {
-        Ok(data) => build_message(
-            agent_id,
-            "job_result",
-            serde_json::json!({
-                "job_id": job_id,
-                "success": true,
-                "data": data,
-            }),
-            secret,
-        ),
-        Err(err) => build_message(
-            agent_id,
-            "job_result",
-            serde_json::json!({
-                "job_id": job_id,
-                "success": false,
-                "error": err,
-            }),
-            secret,
-        ),
+        Ok(data) => {
+            // Extract exit_code, stdout, stderr from execution results (if script)
+            let (exit_code, stdout, stderr) = if let Some(obj) = data.as_object() {
+                (
+                    obj.get("exit_code").and_then(|v| v.as_i64()).map(|v| v as i32),
+                    obj.get("stdout").and_then(|v| v.as_str()).map(String::from),
+                    obj.get("stderr").and_then(|v| v.as_str()).map(String::from),
+                )
+            } else {
+                (None, None, None)
+            };
+
+            build_message(
+                agent_id,
+                "job_result",
+                serde_json::json!({
+                    "job_id": job_id,
+                    "status": "success",
+                    "exit_code": exit_code.unwrap_or(0),
+                    "stdout": stdout.unwrap_or_default(),
+                    "stderr": stderr.unwrap_or_default(),
+                    "duration_ms": duration_ms,
+                }),
+                secret,
+            )
+        }
+        Err(err) => {
+            build_message(
+                agent_id,
+                "job_result",
+                serde_json::json!({
+                    "job_id": job_id,
+                    "status": "failed",
+                    "error": err,
+                    "duration_ms": duration_ms,
+                }),
+                secret,
+            )
+        }
     };
 
-    // Return ACK first, result will be sent separately
-    ack
+    // Return both ACK and result
+    (ack, result_msg)
 }
 
 // ── Inventory Collection ──────────────────────────────────
@@ -873,21 +898,17 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                         let msg_type = data["type"].as_str().unwrap_or("");
 
                         if msg_type == "job_assign" {
-                            let job = &data["job"];
-                            let ack = handle_job(job, &agent_id_loop, &secret_loop).await;
-                            tx_jobs.send(ack).await.ok();
-
-                            // Execute and send result
-                            let result_msg = build_message(
-                                &agent_id_loop,
-                                "job_result",
-                                serde_json::json!({
-                                    "job_id": job["id"],
-                                    "success": true,
-                                    "data": {},
-                                }),
-                                &secret_loop,
-                            );
+                            // Backend sends job in payload field (protocol standard)
+                            let job = &data["payload"];
+                            if job.is_null() {
+                                warn!("Received job_assign with no payload, ignoring");
+                                continue;
+                            }
+                            
+                            let (ack_msg, result_msg) = handle_job(job, &agent_id_loop, &secret_loop).await;
+                            // Send ACK first
+                            tx_jobs.send(ack_msg).await.ok();
+                            // Then send result
                             tx_jobs.send(result_msg).await.ok();
                         }
                     }

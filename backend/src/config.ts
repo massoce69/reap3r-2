@@ -69,4 +69,16 @@ export const config = {
     pass: env('SMTP_PASS', ''),
     from: env('SMTP_FROM', 'noreply@massvision.local'),
   },
+
+  // Vault
+  vault: {
+    // VAULT_MASTER_KEY: required in production, dev falls back to HMAC_SECRET (but log warning)
+    masterKey: process.env.VAULT_MASTER_KEY ?? (nodeEnv === 'production' ? (() => { throw new Error('VAULT_MASTER_KEY required in production'); })() : undefined),
+  },
 } as const;
+
+// Validation
+if (nodeEnv === 'production' && !process.env.VAULT_MASTER_KEY) {
+  // Already checked above, but be explicit
+  throw new Error('[FATAL] VAULT_MASTER_KEY must be set in production for secret decryption');
+}
