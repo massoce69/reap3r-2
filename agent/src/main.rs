@@ -8,7 +8,9 @@ use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
+use std::io::Write as IoWrite;
 use std::path::PathBuf;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
@@ -18,13 +20,79 @@ use uuid::Uuid;
 type HmacSha256 = Hmac<Sha256>;
 
 const MAX_JOB_HISTORY: usize = 256;
+const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MB rotate threshold
+
+// ── Global file logger ────────────────────────────────────
+
+/// A simple append-only file logger shared across threads.
+struct FileLogger {
+    path: PathBuf,
+    file: Mutex<std::fs::File>,
+}
+
+impl FileLogger {
+    fn open(path: &PathBuf) -> Option<Arc<Self>> {
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).ok()?;
+        }
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .ok()?;
+        Some(Arc::new(Self {
+            path: path.clone(),
+            file: Mutex::new(file),
+        }))
+    }
+
+    fn log(&self, level: &str, msg: &str) {
+        let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S%.3f");
+        let line = format!("[{ts}] [{level:5}] {msg}\n");
+        if let Ok(mut f) = self.file.lock() {
+            let _ = f.write_all(line.as_bytes());
+        }
+        // Rotate if oversized (best-effort)
+        if let Ok(meta) = std::fs::metadata(&self.path) {
+            if meta.len() > LOG_MAX_BYTES {
+                // Rename to .1 and re-open
+                let rotated = self.path.with_extension("log.1");
+                let _ = std::fs::rename(&self.path, &rotated);
+                if let Ok(new_file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(&self.path)
+                {
+                    if let Ok(mut guard) = self.file.lock() {
+                        *guard = new_file;
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// Module-level optional file logger, set once during startup.
+static FILE_LOGGER: std::sync::OnceLock<Option<Arc<FileLogger>>> = std::sync::OnceLock::new();
+
+fn flog(level: &str, msg: &str) {
+    if let Some(Some(logger)) = FILE_LOGGER.get() {
+        logger.log(level, msg);
+    }
+}
+
+macro_rules! finfo  { ($($arg:tt)*) => { let s = format!($($arg)*); info!("{}", s);  flog("INFO",  &s); } }
+macro_rules! fwarn  { ($($arg:tt)*) => { let s = format!($($arg)*); warn!("{}", s);  flog("WARN",  &s); } }
+macro_rules! ferror { ($($arg:tt)*) => { let s = format!($($arg)*); error!("{}", s); flog("ERROR", &s); } }
+
+// ── CLI Args ──────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
 #[command(name = "reap3r-agent", version, about = "MASSVISION Reap3r Agent")]
 struct Args {
     /// Server WebSocket URL (e.g., wss://reap3r.example.com/ws/agent)
     #[arg(long, env = "REAP3R_SERVER")]
-    server: String,
+    server: Option<String>,
 
     /// Enrollment token (for initial enrollment)
     #[arg(long, env = "REAP3R_TOKEN")]
@@ -41,6 +109,22 @@ struct Args {
     /// Heartbeat interval in seconds
     #[arg(long, default_value = "30", env = "REAP3R_HEARTBEAT_INTERVAL")]
     heartbeat_interval: u64,
+
+    /// Print diagnostic information (OS, paths, connectivity) and exit
+    #[arg(long)]
+    diagnose: bool,
+
+    /// Print current loaded configuration and exit
+    #[arg(long)]
+    print_config: bool,
+
+    /// Allow invalid/self-signed TLS certificates (DEV MODE ONLY — never use in production)
+    #[arg(long, env = "REAP3R_INSECURE_TLS")]
+    insecure_tls: bool,
+
+    /// Custom log file path (overrides automatic detection)
+    #[arg(long, env = "REAP3R_LOG_FILE")]
+    log_file: Option<PathBuf>,
 }
 
 
@@ -54,15 +138,41 @@ struct AgentConfig {
     enrolled_at: u64,
 }
 
+/// Returns the primary config/data directory.
+/// - Windows (admin/SYSTEM): %ProgramData%\Reap3r
+/// - Windows (user):         %LocalAppData%\Reap3r  (fallback)
+/// - Linux/macOS:            /etc/reap3r
 fn config_dir() -> PathBuf {
     if cfg!(target_os = "windows") {
-        // %ProgramData%\Reap3r
-        let pd = std::env::var("ProgramData").unwrap_or_else(|_| "C:\\ProgramData".to_string());
-        PathBuf::from(pd).join("Reap3r")
+        // Try %ProgramData% first (service / admin mode)
+        if let Ok(pd) = std::env::var("ProgramData") {
+            let p = PathBuf::from(pd).join("Reap3r");
+            // Quick write-access probe
+            if std::fs::create_dir_all(&p).is_ok() {
+                let probe = p.join(".probe");
+                if std::fs::write(&probe, b"x").is_ok() {
+                    let _ = std::fs::remove_file(probe);
+                    return p;
+                }
+            }
+        }
+        // Fallback: %LocalAppData%\Reap3r (user mode)
+        let local = std::env::var("LocalAppData")
+            .unwrap_or_else(|_| "C:\\Users\\Default\\AppData\\Local".to_string());
+        PathBuf::from(local).join("Reap3r")
     } else {
-        // /etc/reap3r
         PathBuf::from("/etc/reap3r")
     }
+}
+
+/// Returns the log directory.
+fn log_dir() -> PathBuf {
+    config_dir().join("logs")
+}
+
+/// Returns the default log file path.
+fn default_log_path() -> PathBuf {
+    log_dir().join("agent.log")
 }
 
 fn config_path() -> PathBuf {
@@ -131,10 +241,19 @@ impl AgentRuntimeState {
 
 fn save_config(cfg: &AgentConfig) -> Result<(), String> {
     let dir = config_dir();
-    std::fs::create_dir_all(&dir).map_err(|e| format!("Cannot create config dir {:?}: {}", dir, e))?;
+    std::fs::create_dir_all(&dir).map_err(|e| {
+        // Emit to file log and stderr before returning
+        let msg = format!("Cannot create config dir {:?}: {}", dir, e);
+        flog("ERROR", &msg);
+        msg
+    })?;
     let json = serde_json::to_string_pretty(cfg).map_err(|e| format!("Serialize: {}", e))?;
     let path = config_path();
-    std::fs::write(&path, &json).map_err(|e| format!("Cannot write {:?}: {}", path, e))?;
+    std::fs::write(&path, &json).map_err(|e| {
+        let msg = format!("Cannot write config {:?}: {}", path, e);
+        flog("ERROR", &msg);
+        msg
+    })?;
 
     // Restrict permissions on Unix
     #[cfg(unix)]
@@ -144,8 +263,104 @@ fn save_config(cfg: &AgentConfig) -> Result<(), String> {
         std::fs::set_permissions(&path, perms).ok();
     }
 
-    info!(path = %path.display(), "Agent config saved");
+    finfo!("Agent config saved to {}", path.display());
     Ok(())
+}
+
+/// Run --diagnose mode: print OS info, paths, connectivity, and exit.
+async fn run_diagnostics(args: &Args) {
+    let (hostname, os, arch, os_ver) = get_system_info();
+    let cfg_dir  = config_dir();
+    let log_path = args.log_file.clone().unwrap_or_else(default_log_path);
+    let cfg_path = config_path();
+
+    println!("═══════════════════════════════════════════");
+    println!("  Reap3r Agent — Diagnostic Report");
+    println!("  {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z"));
+    println!("═══════════════════════════════════════════");
+    println!();
+    println!("[ System ]");
+    println!("  Hostname  : {}", hostname);
+    println!("  OS        : {} ({}) {}", os, arch, os_ver);
+
+    // Admin check
+    let is_admin = {
+        #[cfg(target_os = "windows")]
+        { std::process::Command::new("net").args(["session"]).output().map(|o| o.status.success()).unwrap_or(false) }
+        #[cfg(not(target_os = "windows"))]
+        { std::process::Command::new("id").arg("-u").output().map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0").unwrap_or(false) }
+    };
+    println!("  Admin     : {}", if is_admin { "YES" } else { "no (user mode)" });
+    println!();
+    println!("[ Paths ]");
+    println!("  Config dir: {}", cfg_dir.display());
+    println!("  Config file: {} [{}]", cfg_path.display(),
+        if cfg_path.exists() { "EXISTS" } else { "missing" });
+    println!("  Log file  : {}", log_path.display());
+
+    // Writable check
+    let writable = std::fs::create_dir_all(&cfg_dir).is_ok() && {
+        let probe = cfg_dir.join(".probe");
+        let ok = std::fs::write(&probe, b"x").is_ok();
+        let _ = std::fs::remove_file(&probe);
+        ok
+    };
+    println!("  Config writable: {}", if writable { "YES" } else { "NO — use --log-file / run as admin" });
+    println!();
+    println!("[ Saved Config ]");
+    match load_config() {
+        Some(cfg) => {
+            println!("  agent_id   : {}", cfg.agent_id);
+            println!("  server     : {}", cfg.server);
+            let ts = chrono::DateTime::<chrono::Utc>::from_timestamp_millis(cfg.enrolled_at as i64)
+                .map(|d| d.to_rfc3339())
+                .unwrap_or_else(|| "?".to_string());
+            println!("  enrolled_at: {}", ts);
+        }
+        None => println!("  (no saved config)"),
+    }
+    println!();
+    println!("[ Connection ]");
+    let server_url = args.server.clone()
+        .or_else(|| load_config().map(|c| c.server))
+        .unwrap_or_else(|| "(not configured)".to_string());
+    println!("  Server URL : {}", server_url);
+
+    if !server_url.starts_with("ws://") && !server_url.starts_with("wss://") {
+        println!("  [ERROR] URL must start with ws:// or wss://");
+    } else {
+        // DNS lookup
+        let host = url::Url::parse(&server_url)
+            .ok()
+            .and_then(|u| u.host_str().map(|h| h.to_string()))
+            .unwrap_or_default();
+        if !host.is_empty() {
+            use std::net::ToSocketAddrs;
+            let addr = format!("{}:443", host);
+            match addr.to_socket_addrs() {
+                Ok(mut addrs) => {
+                    if let Some(a) = addrs.next() {
+                        println!("  DNS resolve : {} → {}", host, a.ip());
+                    }
+                }
+                Err(e) => println!("  DNS resolve : {} FAILED — {}", host, e),
+            }
+        }
+        // Try WS connect
+        print!("  WS connect  : attempting...");
+        let _ = std::io::stdout().flush();
+        match tokio::time::timeout(
+            Duration::from_secs(5),
+            connect_async(&server_url),
+        ).await {
+            Ok(Ok(_)) => println!(" OK"),
+            Ok(Err(e)) => println!(" FAILED — {}", e),
+            Err(_) => println!(" TIMEOUT (5s)"),
+        }
+    }
+    println!();
+    println!("═══════════════════════════════════════════");
+    flog("INFO", "Diagnostic run complete");
 }
 
 fn load_config() -> Option<AgentConfig> {
@@ -153,11 +368,11 @@ fn load_config() -> Option<AgentConfig> {
     match std::fs::read_to_string(&path) {
         Ok(data) => match serde_json::from_str::<AgentConfig>(&data) {
             Ok(cfg) => {
-                info!(agent_id = %cfg.agent_id, path = %path.display(), "Loaded saved agent config");
+                finfo!("Loaded saved agent config: agent_id={} path={}", cfg.agent_id, path.display());
                 Some(cfg)
             }
             Err(e) => {
-                warn!(error = %e, "Corrupt agent config, ignoring");
+                fwarn!("Corrupt agent config ({}), ignoring: {}", path.display(), e);
                 None
             }
         },
@@ -798,51 +1013,131 @@ async fn execute_system_command(action: &str, delay_secs: u64) -> Result<serde_j
 
 #[tokio::main]
 async fn main() {
+    // ── 1. Init tracing (stdout) ──────────────────────────
     tracing_subscriber::fmt()
         .with_target(false)
-        .with_ansi(true)
+        .with_ansi(cfg!(not(target_os = "windows")))
         .json()
         .init();
 
     let args = Args::parse();
-    info!("MASSVISION Reap3r Agent starting...");
-    info!(server = %args.server, "Connecting to server");
 
+    // ── 2. Init file logger ───────────────────────────────
+    let log_path = args.log_file.clone().unwrap_or_else(default_log_path);
+    let _ = FILE_LOGGER.set(FileLogger::open(&log_path));
+
+    finfo!("═════════════════════════════════════════════════");
+    finfo!("MASSVISION Reap3r Agent v{} starting", env!("CARGO_PKG_VERSION"));
+    finfo!("Log file: {}", log_path.display());
+    finfo!("PID: {}", std::process::id());
+
+    // ── 3. URL validation ─────────────────────────────────
+    // Do this before anything else so errors are visible in the log.
+    let server_url = args.server.clone().or_else(|| load_config().map(|c| c.server));
+    if let Some(ref url) = server_url {
+        if !url.starts_with("ws://") && !url.starts_with("wss://") {
+            let msg = format!(
+                "FATAL: Invalid server URL '{}'. Must start with ws:// or wss://. \
+                 Use: reap3r-agent.exe --server wss://YOUR_SERVER/ws/agent --token YOUR_TOKEN",
+                url
+            );
+            ferror!("{}", msg);
+            eprintln!("{}", msg);
+            std::process::exit(1);
+        }
+        if cfg!(not(debug_assertions)) && url.starts_with("ws://") {
+            fwarn!("WARNING: Using plain ws:// (unencrypted). Production deployments should use wss://");
+        }
+    }
+
+    // ── 4. Dev-only insecure TLS guard ───────────────────
+    if args.insecure_tls && cfg!(not(debug_assertions)) {
+        let msg = "FATAL: --insecure-tls is only allowed in debug builds. \
+                   Refusing to start in release mode.";
+        ferror!("{}", msg);
+        eprintln!("{}", msg);
+        std::process::exit(1);
+    }
+    if args.insecure_tls {
+        fwarn!("WARNING: --insecure-tls active — TLS certificate validation is DISABLED");
+    }
+
+    // ── 5. --diagnose mode ────────────────────────────────
+    if args.diagnose {
+        run_diagnostics(&args).await;
+        std::process::exit(0);
+    }
+
+    // ── 6. --print-config mode ────────────────────────────
+    if args.print_config {
+        match load_config() {
+            Some(cfg) => {
+                println!("Loaded config from: {}", config_path().display());
+                println!("{}", serde_json::to_string_pretty(&cfg).unwrap_or_default());
+            }
+            None => println!("No saved config at: {}", config_path().display()),
+        }
+        std::process::exit(0);
+    }
+
+    // ── 7. Require server (from args or saved config) ─────
+    let server = match args.server.clone().or_else(|| load_config().map(|c| c.server)) {
+        Some(s) => s,
+        None => {
+            let msg = "FATAL: No server URL provided and no saved config found.\n\
+                       Use: reap3r-agent.exe --server wss://YOUR_SERVER/ws/agent --token YOUR_TOKEN\n\
+                       Or run with --diagnose to see what is configured.";
+            ferror!("{}", msg);
+            eprintln!("{}", msg);
+            std::process::exit(2);
+        }
+    };
+
+    finfo!("Connecting to server: {}", server);
     let mut state = AgentRuntimeState::load();
     let mut backoff_secs: u64 = 1;
 
     loop {
-        let res = run_agent(&args, &mut state).await;
+        let res = run_agent(&args, &server, &mut state).await;
         match &res {
-            Ok(()) => warn!("Connection closed. Reconnecting..."),
-            Err(e) => error!(error = %e, "Agent error. Reconnecting..."),
+            Ok(()) => fwarn!("Connection closed cleanly. Reconnecting in {}s...", backoff_secs),
+            Err(e) => ferror!("Agent error: {}. Reconnecting in {}s...", e, backoff_secs),
         }
 
-        // Exponential backoff with jitter (max 60s). Reset on a clean session close.
-        let jitter_ms = (Uuid::new_v4().as_u128() % 500) as u64; // 0..499ms
+        let jitter_ms = (Uuid::new_v4().as_u128() % 500) as u64;
         tokio::time::sleep(Duration::from_millis(backoff_secs * 1000 + jitter_ms)).await;
         backoff_secs = if res.is_ok() { 1 } else { (backoff_secs * 2).min(60) };
     }
 }
 
-async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box<dyn std::error::Error>> {
-    let url = url::Url::parse(&args.server)?;
-    let (ws_stream, _) = connect_async(url.as_str()).await?;
-    let (mut write, mut read) = ws_stream.split();
+async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> Result<(), Box<dyn std::error::Error>> {
+    let url = url::Url::parse(server)?;
+    finfo!("Connecting to {}", url.as_str());
 
-    info!("Connected to server");
+    let (ws_stream, _) = connect_async(url.as_str()).await.map_err(|e| {
+        let msg = format!("WebSocket connection failed to {}: {}", url, e);
+        ferror!("{}", msg);
+        // Friendly hint for common TLS errors
+        let emsg = e.to_string().to_lowercase();
+        if emsg.contains("certificate") || emsg.contains("tls") || emsg.contains("ssl") {
+            ferror!("TLS hint: if using a self-signed cert, check your server certificate. \
+                     For dev only: run with --insecure-tls");
+        }
+        msg
+    })?;
+
+    let (mut write, mut read) = ws_stream.split();
+    finfo!("Connected to server OK");
 
     let (hostname, os, arch, os_version) = get_system_info();
 
     // Determine if we need to enroll or reconnect
     let (agent_id, hmac_key) = if let (Some(id), Some(key)) = (&args.agent_id, &args.hmac_key) {
-        info!(agent_id = %id, "Reconnecting with CLI-provided identity");
+        finfo!("Reconnecting with CLI-provided identity: agent_id={}", id);
         (id.clone(), key.clone())
     } else if let Some(token) = &args.token {
-        // If a token is provided, force enrollment. This prevents "stuck" installs where a
-        // previously saved (agent_id,hmac_key) pair no longer matches the backend secret.
-        info!("Enrolling with token...");
-        // Send enrollment
+        // Token provided → force enrollment.
+        finfo!("Enrolling with token (first seen or forced re-enroll)...");
         let enroll_msg = serde_json::json!({
             "agentId": "00000000-0000-0000-0000-000000000000",
             "ts": now_ms(),
@@ -868,7 +1163,9 @@ async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box
                 let payload = &resp["payload"];
 
                 if let Some(err) = payload["error"].as_str() {
-                    return Err(format!("Enrollment failed: {}", err).into());
+                    let msg = format!("Enrollment FAILED: {}", err);
+                    ferror!("{}", msg);
+                    return Err(msg.into());
                 }
 
                 let id = payload["agent_id"]
@@ -878,32 +1175,36 @@ async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box
 
                 let key = payload["hmac_key"]
                     .as_str()
-                    .ok_or("Enrollment response missing hmac_key")?
+                    .or_else(|| payload["agent_secret"].as_str())
+                    .ok_or("Enrollment response missing hmac_key/agent_secret")?
                     .to_string();
 
-                info!(agent_id = %id, "Enrolled OK");
+                finfo!("Enrolled OK — agent_id={}", id);
                 // Persist agent_id + hmac_key to config file
                 if let Err(e) = save_config(&AgentConfig {
                     agent_id: id.clone(),
                     hmac_key: key.clone(),
-                    server: args.server.clone(),
+                    server: server.to_string(),
                     enrolled_at: now_ms(),
                 }) {
-                    warn!(error = %e, "Failed to save agent config - agent will need re-enrollment on next restart");
+                    fwarn!("Failed to save agent config — will need re-enrollment on restart: {}", e);
                 }
                 (id, key)
             } else {
-                return Err("Unexpected response during enrollment".into());
+                return Err("Unexpected response type during enrollment".into());
             }
         } else {
             return Err("No response from server during enrollment".into());
         }
     } else if let Some(saved) = load_config() {
-        // Auto-reconnect with persisted credentials
-        info!(agent_id = %saved.agent_id, "Reconnecting with saved config");
+        finfo!("Reconnecting with saved config: agent_id={}", saved.agent_id);
         (saved.agent_id, saved.hmac_key)
     } else {
-        return Err("No agent_id/hmac_key or enrollment token provided".into());
+        let msg = "No credentials available: provide --server and --token for first enroll, \
+                   or ensure agent.conf exists from a previous enrollment.\n\
+                   Usage: reap3r-agent.exe --server wss://SERVER/ws/agent --token TOKEN";
+        ferror!("{}", msg);
+        return Err(msg.into());
     };
 
     // Send capabilities
@@ -917,6 +1218,7 @@ async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box
         &hmac_key,
     );
     write.send(Message::Text(caps_msg)).await?;
+    finfo!("Capabilities sent");
 
     // Spawn heartbeat task
     let agent_id_hb = agent_id.clone();
@@ -949,6 +1251,8 @@ async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box
                 }),
                 &key_hb,
             );
+            flog("INFO", &format!("Heartbeat sent (cpu={}% mem={}% disk={}%)",
+                metrics["cpu_percent"].as_u64().unwrap_or(0), memory_percent, disk_percent));
             if tx_hb.send(hb).await.is_err() {
                 break;
             }
@@ -1010,23 +1314,24 @@ async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box
 
                         if msg_type == "job_assign" {
                             if !verify_sig(&data, &key_loop) {
-                                warn!("Received job_assign with invalid signature, ignoring");
+                                fwarn!("Received job_assign with invalid signature, ignoring");
                                 continue;
                             }
                             // Backend sends job in payload field (protocol standard)
                             let job = &data["payload"];
                             if job.is_null() {
-                                warn!("Received job_assign with no payload, ignoring");
+                                fwarn!("Received job_assign with no payload, ignoring");
                                 continue;
                             }
 
                             let job_id = job["job_id"].as_str().unwrap_or("");
+                            let job_type = job["name"].as_str().unwrap_or("unknown");
                             if job_id.is_empty() {
-                                warn!("Received job_assign with missing job_id, ignoring");
+                                fwarn!("Received job_assign with missing job_id, ignoring");
                                 continue;
                             }
                             if state.has_job(job_id) {
-                                warn!(job_id, "Duplicate job_id received; rejecting (idempotence)");
+                                fwarn!("Duplicate job_id={} — rejecting (idempotence)", job_id);
                                 let rej = build_message(
                                     &agent_id_loop,
                                     "job_ack",
@@ -1036,13 +1341,15 @@ async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box
                                 tx_jobs.send(rej).await.ok();
                                 continue;
                             }
-                            
+
+                            finfo!("Job received: id={} type={}", job_id, job_type);
                             let (ack_msg, result_msg) = handle_job(job, &agent_id_loop, &key_loop).await;
                             // Send ACK first
                             tx_jobs.send(ack_msg).await.ok();
                             // Then send result
                             tx_jobs.send(result_msg).await.ok();
                             state.remember_job(job_id);
+                            finfo!("Job completed: id={} type={}", job_id, job_type);
                         }
                     }
                     Message::Ping(p) => {
