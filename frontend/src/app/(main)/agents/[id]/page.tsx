@@ -926,10 +926,11 @@ export default function AgentDetailPage() {
                   )}
                 </div>
               )}
-              {rdLoading && !rdFrame && (
+              {(rdLoading || (rdStreaming && !rdFrame)) && (
                 <div className="text-center py-16">
                   <Loader2 className="w-10 h-10 mx-auto text-reap3r-accent animate-spin mb-3" />
-                  <p className="text-sm text-gray-500">Connecting to remote screen...</p>
+                  <p className="text-sm text-gray-500">{rdLoading ? 'Creating stream job...' : 'Waiting for first frame from agent...'}</p>
+                  <p className="text-xs text-gray-600 mt-1">This may take a few seconds while the agent prepares the capture</p>
                 </div>
               )}
               {rdFrame && (

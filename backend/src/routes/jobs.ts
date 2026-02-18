@@ -2,11 +2,13 @@
 // MASSVISION Reap3r — Job Routes
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
-import { Permission, JobTypePermission, JobType, CreateJobSchema } from '@massvision/shared';
+import { Permission, JobTypePermission, JobType, CreateJobSchema, canonicalJsonStringify } from '@massvision/shared';
 import { RolePermissions, Role } from '@massvision/shared';
 import * as jobService from '../services/job.service.js';
 import { createAuditLog } from '../services/audit.service.js';
 import { parseUUID, parseBody, clampLimit } from '../lib/validate.js';
+import { createHmac, randomUUID } from 'crypto';
+import { config } from '../config.js';
 
 export default async function jobRoutes(fastify: FastifyInstance) {
   // ── List jobs ──
@@ -80,7 +82,37 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       details: { agent_id, job_type, reason }, ip_address: request.ip,
     });
 
-    // Agent gateway dispatches on the next heartbeat to keep the wire protocol strictly v1 (no ad-hoc messages).
+    // Proactive push: if the agent is online, dispatch the job immediately instead of
+    // waiting for the next heartbeat (up to 30s). This is critical for time-sensitive
+    // operations like remote_desktop_start.
+    try {
+      const agentWs = fastify.agentSockets?.get(agent_id);
+      if (agentWs && agentWs.readyState === 1) {
+        const jobPayload = {
+          job_id: job.id,
+          name: job_type,
+          args: payload ?? {},
+          timeout_sec: timeout_sec ?? 300,
+          created_at: new Date(job.created_at).toISOString(),
+        };
+        const envelope = {
+          type: 'job_assign' as const,
+          ts: Date.now(),
+          nonce: randomUUID(),
+          traceId: randomUUID(),
+          agentId: agent_id,
+          payload: jobPayload,
+        };
+        const sig = createHmac('sha256', config.hmac.secret)
+          .update(canonicalJsonStringify(envelope)).digest('hex');
+        agentWs.send(JSON.stringify({ ...envelope, sig }));
+        await jobService.updateJobStatus(fastify, job.id, 'dispatched');
+        fastify.log.info({ job_id: job.id, job_type }, 'Job pushed immediately to agent');
+      }
+    } catch (err) {
+      fastify.log.warn({ err }, 'Proactive job push failed (will fall back to heartbeat)');
+    }
+
     return reply.status(201).send(job);
   });
 
