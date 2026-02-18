@@ -25,6 +25,7 @@ export const config = {
   nodeEnv,
   port: envInt('PORT', 4000),
   wsPort: envInt('WS_PORT', 4001),
+  uiWsPort: envInt('UI_WS_PORT', 4002),
 
   // Database
   database: {

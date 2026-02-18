@@ -648,6 +648,7 @@ async fn handle_job(
             }
             "remote_desktop_stop" => {
                 RD_ACTIVE.store(false, Ordering::SeqCst);
+                rd_signal_stop();
                 finfo!("Remote desktop stopped by job");
                 Ok(serde_json::json!({ "exit_code": 0, "stdout": "Remote desktop stopped", "stderr": "" }))
             }
@@ -1063,31 +1064,239 @@ async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value
     }
 }
 
-// ── Remote Desktop (screenshot streaming via PowerShell) ──
+// ── Remote Desktop (screenshot streaming) ─────────────────
+//
+// When running as a Windows Service (Session 0), there is no desktop to capture.
+// We solve this by:
+//   1. Writing a PowerShell capture-loop script to disk
+//   2. Launching it in the interactive user's session via
+//      WTSGetActiveConsoleSessionId + WTSQueryUserToken + CreateProcessAsUserW
+//   3. The script writes frames (base64 JPEG) to a temp file
+//   4. The agent reads new frames from that file and sends them via WebSocket
+//   5. Stop signal is a flag file on disk
 
-/// The PowerShell script that captures a single screenshot and outputs base64 JPEG.
-/// Placeholders SCALE_FACTOR and QUALITY_VALUE are replaced at runtime.
-const RD_CAPTURE_PS: &str = r#"
+/// PowerShell capture-loop script.  Written to disk and launched in user session.
+/// Placeholders __SCALE__, __QUALITY__, __FPS__, __DIR__ are replaced at runtime.
+const RD_CAPTURE_LOOP_PS: &str = r#"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
-$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$w = [int][Math]::Round($s.Width * SCALE_FACTOR)
-$h = [int][Math]::Round($s.Height * SCALE_FACTOR)
-$bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
-$g = [System.Drawing.Graphics]::FromImage($bmp)
-$g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
-$resized = New-Object System.Drawing.Bitmap($w, $h)
-$g2 = [System.Drawing.Graphics]::FromImage($resized)
-$g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
-$g2.DrawImage($bmp, 0, 0, $w, $h)
-$ms = New-Object System.IO.MemoryStream
-$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
-$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
-$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]QUALITY_VALUE)
-$resized.Save($ms, $enc, $ep)
-[Convert]::ToBase64String($ms.ToArray())
-$g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()
+$dir = '__DIR__'
+$stop = "$dir\rd_stop.flag"
+Remove-Item $stop -ErrorAction SilentlyContinue
+$scale = [double]__SCALE__
+$quality = [int]__QUALITY__
+$fps = [int]__FPS__
+$interval = [int](1000 / $fps)
+$seq = 0
+while (-not (Test-Path $stop)) {
+    try {
+        $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+        $w = [int]($s.Width * $scale)
+        $h = [int]($s.Height * $scale)
+        $bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
+        $g = [System.Drawing.Graphics]::FromImage($bmp)
+        $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+        $resized = New-Object System.Drawing.Bitmap($w, $h)
+        $g2 = [System.Drawing.Graphics]::FromImage($resized)
+        $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+        $g2.DrawImage($bmp, 0, 0, $w, $h)
+        $ms = New-Object System.IO.MemoryStream
+        $enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+        $ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+        $ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]$quality)
+        $resized.Save($ms, $enc, $ep)
+        $b64 = [Convert]::ToBase64String($ms.ToArray())
+        $tmp = "$dir\rd_frame.tmp"
+        $out = "$dir\rd_frame.dat"
+        [System.IO.File]::WriteAllText($tmp, "$seq|$b64")
+        Move-Item $tmp $out -Force
+        $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()
+        $seq++
+    } catch { Start-Sleep -Milliseconds 200 }
+    Start-Sleep -Milliseconds $interval
+}
+Remove-Item "$dir\rd_frame.dat" -ErrorAction SilentlyContinue
+Remove-Item $stop -ErrorAction SilentlyContinue
 "#;
+
+// ── Windows FFI for launching a process in the interactive user session ───
+
+#[cfg(windows)]
+mod user_session {
+    use std::ptr;
+
+    type HANDLE = *mut std::ffi::c_void;
+    type DWORD = u32;
+    type BOOL = i32;
+    type WORD = u16;
+    type LPWSTR = *mut u16;
+
+    const CREATE_NO_WINDOW: DWORD = 0x0800_0000;
+    const CREATE_UNICODE_ENVIRONMENT: DWORD = 0x0000_0400;
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct STARTUPINFOW {
+        cb: DWORD,
+        lpReserved: LPWSTR,
+        lpDesktop: LPWSTR,
+        lpTitle: LPWSTR,
+        dwX: DWORD, dwY: DWORD, dwXSize: DWORD, dwYSize: DWORD,
+        dwXCountChars: DWORD, dwYCountChars: DWORD,
+        dwFillAttribute: DWORD,
+        dwFlags: DWORD,
+        wShowWindow: WORD,
+        cbReserved2: WORD,
+        lpReserved2: *mut u8,
+        hStdInput: HANDLE,
+        hStdOutput: HANDLE,
+        hStdError: HANDLE,
+    }
+
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct PROCESS_INFORMATION {
+        hProcess: HANDLE,
+        hThread: HANDLE,
+        dwProcessId: DWORD,
+        dwThreadId: DWORD,
+    }
+
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn WTSGetActiveConsoleSessionId() -> DWORD;
+        fn CloseHandle(hObject: HANDLE) -> BOOL;
+    }
+
+    #[link(name = "wtsapi32")]
+    extern "system" {
+        fn WTSQueryUserToken(SessionId: DWORD, phToken: *mut HANDLE) -> BOOL;
+    }
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn CreateProcessAsUserW(
+            hToken: HANDLE,
+            lpApplicationName: *const u16,
+            lpCommandLine: LPWSTR,
+            lpProcessAttributes: *const std::ffi::c_void,
+            lpThreadAttributes: *const std::ffi::c_void,
+            bInheritHandles: BOOL,
+            dwCreationFlags: DWORD,
+            lpEnvironment: *const std::ffi::c_void,
+            lpCurrentDirectory: *const u16,
+            lpStartupInfo: *const STARTUPINFOW,
+            lpProcessInformation: *mut PROCESS_INFORMATION,
+        ) -> BOOL;
+        fn DuplicateTokenEx(
+            hExistingToken: HANDLE,
+            dwDesiredAccess: DWORD,
+            lpTokenAttributes: *const std::ffi::c_void,
+            ImpersonationLevel: DWORD,  // SECURITY_IMPERSONATION_LEVEL
+            TokenType: DWORD,           // TOKEN_TYPE
+            phNewToken: *mut HANDLE,
+        ) -> BOOL;
+    }
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        use std::os::windows::ffi::OsStrExt;
+        std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
+    }
+
+    /// Launch a command in the active console user's session.
+    /// Requires SYSTEM privileges (service account).
+    /// Returns the child PID on success.
+    pub fn launch_in_user_session(command: &str) -> Result<u32, String> {
+        unsafe {
+            let session_id = WTSGetActiveConsoleSessionId();
+            if session_id == 0xFFFF_FFFF {
+                return Err("No active console session found".into());
+            }
+
+            let mut user_token: HANDLE = ptr::null_mut();
+            if WTSQueryUserToken(session_id, &mut user_token) == 0 {
+                return Err(format!(
+                    "WTSQueryUserToken failed for session {} (error {})",
+                    session_id,
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            // Duplicate as a primary token (TokenType=1 = TokenPrimary)
+            let mut dup_token: HANDLE = ptr::null_mut();
+            let dup_ok = DuplicateTokenEx(
+                user_token,
+                0x02000000,  // MAXIMUM_ALLOWED
+                ptr::null(),
+                2,  // SecurityImpersonation
+                1,  // TokenPrimary
+                &mut dup_token,
+            );
+            CloseHandle(user_token);
+            if dup_ok == 0 {
+                return Err(format!(
+                    "DuplicateTokenEx failed (error {})",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut cmd_wide = to_wide(command);
+            let desktop_wide = to_wide("winsta0\\default");
+
+            let mut si: STARTUPINFOW = std::mem::zeroed();
+            si.cb = std::mem::size_of::<STARTUPINFOW>() as DWORD;
+            si.lpDesktop = desktop_wide.as_ptr() as LPWSTR;
+
+            let mut pi: PROCESS_INFORMATION = std::mem::zeroed();
+
+            let result = CreateProcessAsUserW(
+                dup_token,
+                ptr::null(),
+                cmd_wide.as_mut_ptr(),
+                ptr::null(),
+                ptr::null(),
+                0,  // don't inherit handles
+                CREATE_NO_WINDOW | CREATE_UNICODE_ENVIRONMENT,
+                ptr::null(),
+                ptr::null(),
+                &si,
+                &mut pi,
+            );
+
+            CloseHandle(dup_token);
+
+            if result == 0 {
+                return Err(format!(
+                    "CreateProcessAsUserW failed (error {})",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let pid = pi.dwProcessId;
+            CloseHandle(pi.hProcess);
+            CloseHandle(pi.hThread);
+
+            Ok(pid)
+        }
+    }
+}
+
+fn rd_stop_flag_path() -> PathBuf {
+    config_dir().join("rd_stop.flag")
+}
+fn rd_frame_data_path() -> PathBuf {
+    config_dir().join("rd_frame.dat")
+}
+fn rd_script_path() -> PathBuf {
+    config_dir().join("rd_capture.ps1")
+}
+
+/// Write the stop flag so the capture process exits.
+fn rd_signal_stop() {
+    let _ = std::fs::write(rd_stop_flag_path(), "stop");
+    // Also clean up frame data
+    let _ = std::fs::remove_file(rd_frame_data_path());
+}
 
 async fn start_remote_desktop(
     payload: &serde_json::Value,
@@ -1105,80 +1314,123 @@ async fn start_remote_desktop(
 
     // Stop any existing session
     RD_ACTIVE.store(false, Ordering::SeqCst);
-    tokio::time::sleep(Duration::from_millis(200)).await;
+    rd_signal_stop();
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Clean up old files
+    let _ = std::fs::remove_file(rd_stop_flag_path());
+    let _ = std::fs::remove_file(rd_frame_data_path());
 
     // Start new session
     RD_ACTIVE.store(true, Ordering::SeqCst);
-
     let session_id = job_id.clone();
-    let frame_interval = Duration::from_millis(1000 / fps);
 
-    let script_template = RD_CAPTURE_PS
-        .replace("SCALE_FACTOR", &format!("{:.2}", scale))
-        .replace("QUALITY_VALUE", &format!("{}", quality));
+    // Write capture script to disk
+    let dir_str = config_dir().display().to_string().replace('\\', "\\\\");
+    let script_content = RD_CAPTURE_LOOP_PS
+        .replace("__DIR__", &dir_str)
+        .replace("__SCALE__", &format!("{:.2}", scale))
+        .replace("__QUALITY__", &format!("{}", quality))
+        .replace("__FPS__", &format!("{}", fps));
+
+    let script_path = rd_script_path();
+    std::fs::write(&script_path, &script_content).map_err(|e| format!("Write capture script: {}", e))?;
 
     finfo!(
         "Remote desktop started: session={} fps={} quality={} scale={:.0}%",
         session_id, fps, quality, scale * 100.0
     );
 
-    // Spawn background capture loop
-    tokio::spawn(async move {
-        let mut sequence: u64 = 0;
-
-        while RD_ACTIVE.load(Ordering::SeqCst) {
-            let frame_start = std::time::Instant::now();
-
-            // Capture screenshot via PowerShell
-            match tokio::process::Command::new("powershell")
-                .args(["-NoProfile", "-NonInteractive", "-Command", &script_template])
-                .output()
-                .await
-            {
-                Ok(output) if output.status.success() => {
-                    let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
-                    if b64.len() > 100 {
-                        // Send stream_output frame
-                        let msg = build_message(
-                            &agent_id,
-                            "stream_output",
-                            serde_json::json!({
-                                "session_id": session_id,
-                                "stream_type": "frame",
-                                "data": b64,
-                                "sequence": sequence,
-                            }),
-                            &secret,
-                        );
-                        if tx.send(msg).await.is_err() {
-                            fwarn!("RD: Failed to send frame, stopping");
-                            break;
-                        }
-                        if sequence % 10 == 0 {
-                            finfo!("RD: frame #{} sent ({} bytes)", sequence, b64.len());
-                        }
-                        sequence += 1;
-                    } else {
-                        let stderr = String::from_utf8_lossy(&output.stderr);
-                        fwarn!("RD: Empty capture (stdout={} bytes). stderr: {}", b64.len(), stderr.chars().take(300).collect::<String>());
-                    }
-                }
-                Ok(output) => {
-                    let stderr = String::from_utf8_lossy(&output.stderr);
-                    fwarn!("RD: PowerShell exit code {:?}. stderr: {}", output.status.code(), stderr.chars().take(300).collect::<String>());
-                }
-                Err(e) => {
-                    fwarn!("RD: Failed to run PowerShell: {}", e);
-                }
-            }
-
-            // Wait for next frame interval (minus time already spent capturing)
-            let elapsed = frame_start.elapsed();
-            if elapsed < frame_interval {
-                tokio::time::sleep(frame_interval - elapsed).await;
+    // Launch capture process
+    #[cfg(windows)]
+    {
+        let cmd = format!(
+            "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File \"{}\"",
+            script_path.display()
+        );
+        match user_session::launch_in_user_session(&cmd) {
+            Ok(pid) => finfo!("RD: Capture process launched in user session (PID {})", pid),
+            Err(e) => {
+                fwarn!("RD: Cannot launch in user session: {}. Falling back to local session.", e);
+                // Fallback: run locally (works when agent is NOT a service)
+                let _ = tokio::process::Command::new("powershell")
+                    .args(["-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-NoProfile", "-File", &script_path.display().to_string()])
+                    .spawn();
             }
         }
+    }
+    #[cfg(not(windows))]
+    {
+        // Linux/macOS: just run locally (no session isolation issue)
+        let _ = tokio::process::Command::new("powershell")
+            .args(["-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-NoProfile", "-File", &script_path.display().to_string()])
+            .spawn();
+    }
 
+    // Give the capture process time to start and produce the first frame
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // Spawn background frame-reader loop
+    let frame_path = rd_frame_data_path();
+    let check_interval = Duration::from_millis((1000 / fps).max(100) / 2); // poll at 2× fps
+
+    tokio::spawn(async move {
+        let mut sequence: u64 = 0;
+        let mut last_seq: i64 = -1;
+        let mut empty_count: u64 = 0;
+
+        while RD_ACTIVE.load(Ordering::SeqCst) {
+            // Read frame data file
+            match tokio::fs::read_to_string(&frame_path).await {
+                Ok(data) if data.contains('|') => {
+                    if let Some((seq_str, b64)) = data.split_once('|') {
+                        if let Ok(file_seq) = seq_str.trim().parse::<i64>() {
+                            if file_seq > last_seq && b64.len() > 100 {
+                                last_seq = file_seq;
+                                empty_count = 0;
+
+                                let msg = build_message(
+                                    &agent_id,
+                                    "stream_output",
+                                    serde_json::json!({
+                                        "session_id": session_id,
+                                        "stream_type": "frame",
+                                        "data": b64.trim(),
+                                        "sequence": sequence,
+                                    }),
+                                    &secret,
+                                );
+                                if tx.send(msg).await.is_err() {
+                                    fwarn!("RD: WS send failed, stopping");
+                                    break;
+                                }
+                                if sequence % 10 == 0 {
+                                    finfo!("RD: frame #{} sent ({} bytes, file_seq={})", sequence, b64.len(), file_seq);
+                                }
+                                sequence += 1;
+                            }
+                        }
+                    }
+                }
+                Ok(_) => {
+                    empty_count += 1;
+                    if empty_count == 20 {
+                        fwarn!("RD: No valid frames after 20 reads, capture may have failed");
+                    }
+                }
+                Err(_) => {
+                    empty_count += 1;
+                    if empty_count == 30 {
+                        fwarn!("RD: Frame file not appearing, capture process may not have started");
+                    }
+                }
+            }
+
+            tokio::time::sleep(check_interval).await;
+        }
+
+        // Signal capture process to stop
+        rd_signal_stop();
         RD_ACTIVE.store(false, Ordering::SeqCst);
         finfo!("Remote desktop session ended: session={}", session_id);
     });

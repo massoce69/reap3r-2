@@ -470,33 +470,32 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     });
   });
 
-  // UI WS (same HTTP server, path /ws/ui)
-  const uiWss = new WebSocketServer({ noServer: true });
-  const httpServer = fastify.server;
+  // UI WS — dedicated port so it works regardless of PM2 mode (cluster/fork)
+  const uiWss = new WebSocketServer({ port: config.uiWsPort, path: '/ws/ui' });
+  const uiAddr: any = uiWss.address();
+  const uiActualPort = typeof uiAddr === 'object' && uiAddr ? Number(uiAddr.port) : config.uiWsPort;
+  fastify.log.info(`UI WS gateway listening on port ${uiActualPort}`);
 
-  httpServer.on('upgrade', (request: any, socket: any, head: any) => {
-    const url = new URL(request.url, `http://${request.headers.host}`);
-    if (url.pathname !== '/ws/ui') return;
-
+  uiWss.on('connection', (ws: WS, request: any) => {
+    const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
     const token = url.searchParams.get('token');
     if (!token) {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
+      ws.close(4001, 'No token');
       return;
     }
     try {
       (fastify as any).jwt.verify(token);
     } catch {
-      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-      socket.destroy();
+      ws.close(4001, 'Invalid token');
       return;
     }
-
-    uiWss.handleUpgrade(request, socket, head, (ws: WS) => {
-      uiSockets.add(ws);
-      ws.on('close', () => uiSockets.delete(ws));
-      ws.on('error', () => uiSockets.delete(ws));
+    uiSockets.add(ws);
+    fastify.log.info({ uiClients: uiSockets.size }, 'UI WS client connected');
+    ws.on('close', () => {
+      uiSockets.delete(ws);
+      fastify.log.info({ uiClients: uiSockets.size }, 'UI WS client disconnected');
     });
+    ws.on('error', () => uiSockets.delete(ws));
   });
 
   // Cleanup.
