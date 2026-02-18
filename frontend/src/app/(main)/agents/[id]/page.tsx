@@ -13,9 +13,10 @@ import {
   Package, Activity, RefreshCw, ChevronDown, ChevronRight,
   Server, MemoryStick, Wifi, Layers, Loader2, Square,
   Send, AlertCircle, CheckCircle, XCircle, Copy, Check,
+  ScreenShare, Maximize2, Minimize2, Camera, MousePointer,
 } from 'lucide-react';
 
-type Tab = 'overview' | 'terminal' | 'inventory' | 'metrics' | 'jobs';
+type Tab = 'overview' | 'terminal' | 'remote-desktop' | 'inventory' | 'metrics' | 'jobs';
 
 export default function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -45,6 +46,17 @@ export default function AgentDetailPage() {
   const termInputRef = useRef<HTMLInputElement>(null);
   // Script execution result
   const [lastScriptResult, setLastScriptResult] = useState<any>(null);
+
+  // Remote desktop state
+  const [rdFrame, setRdFrame] = useState<string | null>(null);
+  const [rdLoading, setRdLoading] = useState(false);
+  const [rdAutoRefresh, setRdAutoRefresh] = useState(false);
+  const [rdQuality, setRdQuality] = useState(50);
+  const [rdScale, setRdScale] = useState(70);
+  const [rdError, setRdError] = useState<string | null>(null);
+  const [rdFullscreen, setRdFullscreen] = useState(false);
+  const rdContainerRef = useRef<HTMLDivElement>(null);
+  const rdIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const userPerms = user ? RolePermissions[user.role as keyof typeof RolePermissions] ?? [] : [];
   const canRunScript = userPerms.includes(Permission.JobRunScript);
@@ -189,6 +201,80 @@ export default function AgentDetailPage() {
     termEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [termHistory]);
 
+  // ── Remote Desktop: screenshot capture via PowerShell ──
+  const SCREENSHOT_SCRIPT = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $w=[Math]::Round($s.Width*SCALE_FACTOR); $h=[Math]::Round($s.Height*SCALE_FACTOR); $bmp=New-Object System.Drawing.Bitmap($s.Width,$s.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size); $resized=New-Object System.Drawing.Bitmap($w,$h); $g2=[System.Drawing.Graphics]::FromImage($resized); $g2.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $g2.DrawImage($bmp,0,0,$w,$h); $ms=New-Object System.IO.MemoryStream; $enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{$_.MimeType -eq 'image/jpeg'}; $ep=New-Object System.Drawing.Imaging.EncoderParameters(1); $ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,QUALITY_VALUE); $resized.Save($ms,$enc,$ep); [Convert]::ToBase64String($ms.ToArray()); $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()`;
+
+  const captureScreenshot = async () => {
+    if (!agent || rdLoading) return;
+    setRdLoading(true);
+    setRdError(null);
+    try {
+      const scriptText = SCREENSHOT_SCRIPT
+        .replace('SCALE_FACTOR', String(rdScale / 100))
+        .replace('QUALITY_VALUE', String(rdQuality));
+      const job = await api.jobs.create({
+        agent_id: agent.id,
+        type: JobType.RunScript,
+        payload: { interpreter: 'powershell', script: scriptText, timeout_secs: 30, stream_output: false },
+        reason: 'Remote Desktop screenshot',
+      });
+      const jobId = job.id ?? job.job_id;
+      // Poll for result
+      let attempts = 0;
+      const poll = async () => {
+        if (attempts >= 30) { // 60s max
+          setRdError('Screenshot timeout');
+          setRdLoading(false);
+          return;
+        }
+        attempts++;
+        try {
+          const j = await api.jobs.get(jobId);
+          if (j.status === 'completed') {
+            const b64 = j.result?.stdout ?? j.stdout ?? '';
+            if (b64 && b64.length > 100) {
+              setRdFrame(`data:image/jpeg;base64,${b64.trim()}`);
+              setRdError(null);
+            } else {
+              setRdError('Empty screenshot data');
+            }
+            setRdLoading(false);
+            return;
+          }
+          if (j.status === 'failed') {
+            setRdError(j.result?.stderr ?? j.stderr ?? 'Screenshot failed');
+            setRdLoading(false);
+            return;
+          }
+        } catch { /* retry */ }
+        setTimeout(poll, 2000);
+      };
+      setTimeout(poll, 1500);
+    } catch (err: any) {
+      setRdError(err?.message ?? 'Failed to capture screenshot');
+      setRdLoading(false);
+    }
+  };
+
+  // Auto-refresh remote desktop
+  useEffect(() => {
+    if (rdAutoRefresh && tab === 'remote-desktop' && isOnline) {
+      rdIntervalRef.current = setInterval(() => {
+        if (!rdLoading) captureScreenshot();
+      }, 3000);
+    }
+    return () => {
+      if (rdIntervalRef.current) clearInterval(rdIntervalRef.current);
+    };
+  }, [rdAutoRefresh, tab, isOnline, rdLoading]);
+
+  // Stop auto-refresh when leaving tab
+  useEffect(() => {
+    if (tab !== 'remote-desktop') {
+      setRdAutoRefresh(false);
+    }
+  }, [tab]);
+
   const collectInventoryNow = async () => {
     if (!id) return;
     try {
@@ -222,6 +308,7 @@ export default function AgentDetailPage() {
   const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
     { key: 'overview', label: 'Overview', icon: <Monitor className="w-4 h-4" /> },
     { key: 'terminal', label: 'Terminal', icon: <Terminal className="w-4 h-4" /> },
+    { key: 'remote-desktop', label: 'Remote Desktop', icon: <ScreenShare className="w-4 h-4" /> },
     { key: 'inventory', label: 'Inventory', icon: <Package className="w-4 h-4" /> },
     { key: 'metrics', label: 'Metrics', icon: <Activity className="w-4 h-4" /> },
     { key: 'jobs', label: 'Jobs', icon: <Layers className="w-4 h-4" /> },
@@ -353,6 +440,9 @@ export default function AgentDetailPage() {
                 <ActionButton icon={<Shield className="w-4 h-4" />} label="Remote Shell"
                   disabled={!isOnline || !hasCapability('remote_shell')}
                   onClick={() => setTab('terminal')} />
+                <ActionButton icon={<ScreenShare className="w-4 h-4" />} label="Remote Desktop"
+                  disabled={!isOnline || !hasCapability('remote_desktop')}
+                  onClick={() => { setTab('remote-desktop'); setTimeout(captureScreenshot, 300); }} />
               </div>
             </Card>
           </div>
@@ -479,6 +569,125 @@ export default function AgentDetailPage() {
               </div>
             )}
           </Card>
+        )}
+
+        {tab === 'remote-desktop' && (
+          <div ref={rdContainerRef} className={rdFullscreen ? 'fixed inset-0 z-50 bg-black flex flex-col' : ''}>
+            {/* Toolbar */}
+            <div className={`flex items-center justify-between gap-2 ${rdFullscreen ? 'px-4 py-2 bg-gray-900 border-b border-gray-700' : 'mb-3'}`}>
+              <div className="flex items-center gap-2">
+                <h3 className="text-sm font-semibold text-reap3r-text flex items-center gap-2">
+                  <ScreenShare className="w-4 h-4" /> Remote Desktop — {agent.hostname}
+                </h3>
+                {rdLoading && <Loader2 className="w-4 h-4 text-reap3r-accent animate-spin" />}
+              </div>
+              <div className="flex items-center gap-2">
+                {/* Quality */}
+                <label className="text-[10px] text-reap3r-muted flex items-center gap-1">
+                  Quality
+                  <select value={rdQuality} onChange={e => setRdQuality(Number(e.target.value))}
+                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text">
+                    <option value={30}>Low</option>
+                    <option value={50}>Medium</option>
+                    <option value={70}>High</option>
+                    <option value={90}>Ultra</option>
+                  </select>
+                </label>
+                {/* Scale */}
+                <label className="text-[10px] text-reap3r-muted flex items-center gap-1">
+                  Scale
+                  <select value={rdScale} onChange={e => setRdScale(Number(e.target.value))}
+                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text">
+                    <option value={40}>40%</option>
+                    <option value={55}>55%</option>
+                    <option value={70}>70%</option>
+                    <option value={85}>85%</option>
+                    <option value={100}>100%</option>
+                  </select>
+                </label>
+                {/* Capture button */}
+                <Button size="sm" onClick={captureScreenshot} disabled={!isOnline || rdLoading}>
+                  <Camera className="w-4 h-4" /> {rdFrame ? 'Refresh' : 'Capture'}
+                </Button>
+                {/* Auto-refresh toggle */}
+                <button
+                  onClick={() => setRdAutoRefresh(p => !p)}
+                  disabled={!isOnline}
+                  className={`px-2 py-1 text-xs rounded-lg border transition-colors ${
+                    rdAutoRefresh
+                      ? 'bg-green-500/10 text-green-400 border-green-500/30'
+                      : 'bg-reap3r-surface text-reap3r-muted border-reap3r-border hover:text-reap3r-text'
+                  } disabled:opacity-50`}
+                >
+                  {rdAutoRefresh ? 'Live ON' : 'Live OFF'}
+                </button>
+                {/* Fullscreen toggle */}
+                <button onClick={() => setRdFullscreen(p => !p)}
+                  className="p-1 text-reap3r-muted hover:text-reap3r-text transition-colors">
+                  {rdFullscreen ? <Minimize2 className="w-4 h-4" /> : <Maximize2 className="w-4 h-4" />}
+                </button>
+              </div>
+            </div>
+
+            {/* Error */}
+            {rdError && (
+              <div className={`bg-red-500/5 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400 flex items-center gap-2 ${rdFullscreen ? 'mx-4' : 'mb-3'}`}>
+                <AlertCircle className="w-4 h-4" /> {rdError}
+              </div>
+            )}
+
+            {!isOnline && (
+              <div className={`bg-reap3r-warning/5 border border-reap3r-warning/20 rounded-lg px-3 py-2 text-xs text-reap3r-warning flex items-center gap-2 ${rdFullscreen ? 'mx-4' : 'mb-3'}`}>
+                <AlertCircle className="w-4 h-4" /> Agent is offline. Remote desktop is unavailable.
+              </div>
+            )}
+
+            {/* Screenshot Display */}
+            <div className={`bg-[#0d1117] border border-reap3r-border rounded-lg overflow-hidden flex items-center justify-center ${
+              rdFullscreen ? 'flex-1 mx-4 mb-4 mt-2' : 'min-h-[400px]'
+            }`}>
+              {!rdFrame && !rdLoading && (
+                <div className="text-center py-16">
+                  <ScreenShare className="w-12 h-12 mx-auto text-gray-600 mb-3" />
+                  <p className="text-sm text-gray-500 mb-4">Click &quot;Capture&quot; to take a screenshot of the remote desktop</p>
+                  {isOnline && (
+                    <Button onClick={captureScreenshot} size="sm">
+                      <Camera className="w-4 h-4" /> Capture Screen
+                    </Button>
+                  )}
+                </div>
+              )}
+              {rdLoading && !rdFrame && (
+                <div className="text-center py-16">
+                  <Loader2 className="w-10 h-10 mx-auto text-reap3r-accent animate-spin mb-3" />
+                  <p className="text-sm text-gray-500">Capturing remote screen...</p>
+                </div>
+              )}
+              {rdFrame && (
+                <img
+                  src={rdFrame}
+                  alt="Remote Desktop"
+                  className="max-w-full max-h-full object-contain cursor-crosshair"
+                  draggable={false}
+                />
+              )}
+            </div>
+
+            {/* Status bar */}
+            {rdFrame && (
+              <div className={`flex items-center gap-3 mt-2 text-[10px] text-reap3r-muted ${rdFullscreen ? 'px-4 pb-2' : ''}`}>
+                <span className="flex items-center gap-1">
+                  <Camera className="w-3 h-3" /> Quality: {rdQuality}% &middot; Scale: {rdScale}%
+                </span>
+                {rdAutoRefresh && (
+                  <span className="flex items-center gap-1">
+                    <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> Auto-refreshing every 3s
+                  </span>
+                )}
+                <span className="ml-auto">Agent: {agent.os === 'windows' ? 'Windows' : agent.os}</span>
+              </div>
+            )}
+          </div>
         )}
 
         {tab === 'inventory' && (
