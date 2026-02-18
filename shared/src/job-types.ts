@@ -24,6 +24,7 @@ export enum JobType {
   EdrQuarantineFile = 'edr_quarantine_file',
   EdrIsolateMachine = 'edr_isolate_machine',
   EdrCollectBundle = 'edr_collect_bundle',
+  ListMonitors = 'list_monitors',
   // Artifacts
   UploadArtifact = 'upload_artifact',
   DownloadArtifact = 'download_artifact',
@@ -83,7 +84,10 @@ export const RemoteDesktopStartPayload = z.object({
   quality: z.number().int().min(10).max(100).default(60),
   scale: z.number().min(0.1).max(1.0).default(0.5),
   codec: z.enum(['jpeg', 'png', 'webp']).default('jpeg'),
+  monitor: z.number().int().min(-1).max(15).default(-1).describe('-1 = all monitors, 0-N = specific monitor index'),
 });
+
+export const ListMonitorsPayload = z.object({});
 
 export const PrivacyModeSetPayload = z.object({
   enabled: z.boolean(),
@@ -151,6 +155,7 @@ export const JobPayloadSchemas: Record<JobType, z.ZodTypeAny> = {
   [JobType.RemoteDesktopInputLockSet]: InputLockSetPayload,
   [JobType.WakeOnLan]: WakeOnLanPayload,
   [JobType.UpdateAgent]: UpdateAgentPayload,
+  [JobType.ListMonitors]: ListMonitorsPayload,
   [JobType.CollectInventory]: EmptyPayload,
   [JobType.CollectMetrics]: EmptyPayload,
   [JobType.EdrKillProcess]: EdrKillProcessPayload,
@@ -176,6 +181,7 @@ export const JobTypePermission: Record<JobType, string> = {
   [JobType.RemoteDesktopInputLockSet]: 'remote:input_lock',
   [JobType.WakeOnLan]: 'remote:wake_on_lan',
   [JobType.UpdateAgent]: 'settings:update',
+  [JobType.ListMonitors]: 'remote:desktop',
   [JobType.CollectInventory]: 'agent:view',
   [JobType.CollectMetrics]: 'agent:view',
   [JobType.EdrKillProcess]: 'edr:respond',

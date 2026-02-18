@@ -652,6 +652,9 @@ async fn handle_job(
                 finfo!("Remote desktop stopped by job");
                 Ok(serde_json::json!({ "exit_code": 0, "stdout": "Remote desktop stopped", "stderr": "" }))
             }
+            "list_monitors" => {
+                list_monitors().await
+            }
             _ => Err(format!("Unsupported job type: {}", job_type)),
         }
     };
@@ -1076,7 +1079,8 @@ async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value
 //   5. Stop signal is a flag file on disk
 
 /// PowerShell capture-loop script.  Written to disk and launched in user session.
-/// Placeholders __SCALE__, __QUALITY__, __FPS__, __DIR__ are replaced at runtime.
+/// Placeholders __SCALE__, __QUALITY__, __FPS__, __DIR__, __MONITOR__ are replaced at runtime.
+/// __MONITOR__ = -1 means capture ALL screens combined, 0..N captures a specific screen.
 const RD_CAPTURE_LOOP_PS: &str = r#"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
@@ -1086,16 +1090,35 @@ Remove-Item $stop -ErrorAction SilentlyContinue
 $scale = [double]__SCALE__
 $quality = [int]__QUALITY__
 $fps = [int]__FPS__
+$monIdx = [int]__MONITOR__
 $interval = [int](1000 / $fps)
 $seq = 0
 while (-not (Test-Path $stop)) {
     try {
-        $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-        $w = [int]($s.Width * $scale)
-        $h = [int]($s.Height * $scale)
-        $bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
+        if ($monIdx -ge 0) {
+            $screens = [System.Windows.Forms.Screen]::AllScreens
+            if ($monIdx -lt $screens.Length) {
+                $bounds = $screens[$monIdx].Bounds
+            } else {
+                $bounds = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+            }
+        } else {
+            $minX = [int]::MaxValue; $minY = [int]::MaxValue
+            $maxX = [int]::MinValue; $maxY = [int]::MinValue
+            foreach ($scr in [System.Windows.Forms.Screen]::AllScreens) {
+                $b = $scr.Bounds
+                if ($b.X -lt $minX) { $minX = $b.X }
+                if ($b.Y -lt $minY) { $minY = $b.Y }
+                if (($b.X + $b.Width) -gt $maxX) { $maxX = $b.X + $b.Width }
+                if (($b.Y + $b.Height) -gt $maxY) { $maxY = $b.Y + $b.Height }
+            }
+            $bounds = New-Object System.Drawing.Rectangle($minX, $minY, ($maxX - $minX), ($maxY - $minY))
+        }
+        $w = [int]($bounds.Width * $scale)
+        $h = [int]($bounds.Height * $scale)
+        $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
         $g = [System.Drawing.Graphics]::FromImage($bmp)
-        $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+        $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
         $resized = New-Object System.Drawing.Bitmap($w, $h)
         $g2 = [System.Drawing.Graphics]::FromImage($resized)
         $g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
@@ -1117,6 +1140,27 @@ while (-not (Test-Path $stop)) {
 }
 Remove-Item "$dir\rd_frame.dat" -ErrorAction SilentlyContinue
 Remove-Item $stop -ErrorAction SilentlyContinue
+"#;
+
+/// PowerShell one-liner to enumerate all displays and return JSON.
+/// Runs in user session so it can access the real monitor topology.
+const RD_LIST_MONITORS_PS: &str = r#"
+Add-Type -AssemblyName System.Windows.Forms
+$monitors = @()
+$idx = 0
+foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
+    $monitors += [PSCustomObject]@{
+        index   = $idx
+        name    = $s.DeviceName
+        primary = $s.Primary
+        x       = $s.Bounds.X
+        y       = $s.Bounds.Y
+        width   = $s.Bounds.Width
+        height  = $s.Bounds.Height
+    }
+    $idx++
+}
+$monitors | ConvertTo-Json -Compress
 "#;
 
 // ── Windows FFI for launching a process in the interactive user session ───
@@ -1298,6 +1342,94 @@ fn rd_signal_stop() {
     let _ = std::fs::remove_file(rd_frame_data_path());
 }
 
+/// Enumerate monitors by running a small PowerShell script in the user session.
+async fn list_monitors() -> Result<serde_json::Value, String> {
+    finfo!("Enumerating monitors...");
+
+    // Write the monitor enumeration script to a temp file
+    let script_path = config_dir().join("rd_list_monitors.ps1");
+    std::fs::write(&script_path, RD_LIST_MONITORS_PS)
+        .map_err(|e| format!("Write list_monitors script: {}", e))?;
+
+    // Try to run in user session first (needed when running as service in Session 0)
+    let output = {
+        #[cfg(windows)]
+        {
+            // Write a wrapper that captures output to file since CreateProcessAsUserW
+            // doesn't give us stdout directly
+            let out_path = config_dir().join("rd_monitors.json");
+            let wrapper = format!(
+                "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& {{ {} }} | Out-File -FilePath '{}' -Encoding utf8 -NoNewline\"",
+                RD_LIST_MONITORS_PS.replace('"', "`\""),
+                out_path.display()
+            );
+            let _ = std::fs::remove_file(&out_path);
+
+            match user_session::launch_in_user_session(&wrapper) {
+                Ok(pid) => {
+                    finfo!("list_monitors: launched in user session (PID {})", pid);
+                    // Wait for output file to appear (max 5s)
+                    let mut attempts = 0;
+                    loop {
+                        tokio::time::sleep(Duration::from_millis(300)).await;
+                        attempts += 1;
+                        if out_path.exists() {
+                            // Wait a bit more for write to complete
+                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            break;
+                        }
+                        if attempts > 16 {
+                            return Err("Timeout waiting for monitor list output".into());
+                        }
+                    }
+                    std::fs::read_to_string(&out_path)
+                        .map_err(|e| format!("Read monitors output: {}", e))?
+                }
+                Err(e) => {
+                    fwarn!("list_monitors: user session failed: {}, trying local", e);
+                    // Fallback: run locally
+                    let child = tokio::process::Command::new("powershell")
+                        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", RD_LIST_MONITORS_PS])
+                        .output()
+                        .await
+                        .map_err(|e| format!("Run list_monitors locally: {}", e))?;
+                    String::from_utf8_lossy(&child.stdout).to_string()
+                }
+            }
+        }
+        #[cfg(not(windows))]
+        {
+            // Non-windows: return a single virtual screen
+            String::from("[{\"index\":0,\"name\":\":0\",\"primary\":true,\"x\":0,\"y\":0,\"width\":1920,\"height\":1080}]")
+        }
+    };
+
+    // Parse the JSON output
+    let trimmed = output.trim().trim_start_matches('\u{feff}'); // strip BOM
+    let monitors: serde_json::Value = serde_json::from_str(trimmed).unwrap_or_else(|_| {
+        fwarn!("list_monitors: failed to parse output: {}", trimmed);
+        serde_json::json!([])
+    });
+
+    // Ensure it's always an array (single monitor returns an object from ConvertTo-Json)
+    let monitors_arr = if monitors.is_array() {
+        monitors
+    } else if monitors.is_object() {
+        serde_json::json!([monitors])
+    } else {
+        serde_json::json!([])
+    };
+
+    finfo!("Monitors found: {}", monitors_arr);
+
+    Ok(serde_json::json!({
+        "exit_code": 0,
+        "stdout": serde_json::to_string(&monitors_arr).unwrap_or_default(),
+        "stderr": "",
+        "monitors": monitors_arr,
+    }))
+}
+
 async fn start_remote_desktop(
     payload: &serde_json::Value,
     agent_id: String,
@@ -1311,6 +1443,7 @@ async fn start_remote_desktop(
     let fps = payload["fps"].as_u64().unwrap_or(2).clamp(1, 15);
     let quality = payload["quality"].as_u64().unwrap_or(50).clamp(10, 100);
     let scale = payload["scale"].as_f64().unwrap_or(0.5).clamp(0.2, 1.0);
+    let monitor: i64 = payload["monitor"].as_i64().unwrap_or(-1).clamp(-1, 15);
 
     // Stop any existing session
     RD_ACTIVE.store(false, Ordering::SeqCst);
@@ -1331,14 +1464,16 @@ async fn start_remote_desktop(
         .replace("__DIR__", &dir_str)
         .replace("__SCALE__", &format!("{:.2}", scale))
         .replace("__QUALITY__", &format!("{}", quality))
-        .replace("__FPS__", &format!("{}", fps));
+        .replace("__FPS__", &format!("{}", fps))
+        .replace("__MONITOR__", &format!("{}", monitor));
 
     let script_path = rd_script_path();
     std::fs::write(&script_path, &script_content).map_err(|e| format!("Write capture script: {}", e))?;
 
     finfo!(
-        "Remote desktop started: session={} fps={} quality={} scale={:.0}%",
-        session_id, fps, quality, scale * 100.0
+        "Remote desktop started: session={} fps={} quality={} scale={:.0}% monitor={}",
+        session_id, fps, quality, scale * 100.0,
+        if monitor < 0 { "all".to_string() } else { format!("{}", monitor) }
     );
 
     // Launch capture process
@@ -1437,7 +1572,8 @@ async fn start_remote_desktop(
 
     Ok(serde_json::json!({
         "exit_code": 0,
-        "stdout": format!("Remote desktop started: fps={} quality={} scale={:.0}%", fps, quality, scale * 100.0),
+        "stdout": format!("Remote desktop started: fps={} quality={} scale={:.0}% monitor={}", fps, quality, scale * 100.0,
+            if monitor < 0 { "all".to_string() } else { format!("{}", monitor) }),
         "stderr": ""
     }))
 }

@@ -69,6 +69,10 @@ export default function AgentDetailPage() {
   const [rdFrameCount, setRdFrameCount] = useState(0);
   const [rdSessionId, setRdSessionId] = useState<string | null>(null);
   const rdContainerRef = useRef<HTMLDivElement>(null);
+  // Multi-monitor state
+  const [rdMonitors, setRdMonitors] = useState<Array<{ index: number; name: string; primary: boolean; x: number; y: number; width: number; height: number }>>([]);
+  const [rdSelectedMonitor, setRdSelectedMonitor] = useState<number>(-1); // -1 = all screens
+  const [rdMonitorsLoading, setRdMonitorsLoading] = useState(false);
 
   // File explorer state
   const [fePath, setFePath] = useState(agent?.os === 'windows' ? 'C:\\' : '/');
@@ -224,10 +228,74 @@ export default function AgentDetailPage() {
     termEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [termHistory]);
 
+  // ── Remote Desktop: fetch available monitors ──
+  const fetchMonitors = async () => {
+    if (!agent || rdMonitorsLoading) return;
+    console.log('[RD] Fetching monitors for agent:', agent.id);
+    setRdMonitorsLoading(true);
+    try {
+      const job = await api.jobs.create({
+        agent_id: agent.id,
+        type: JobType.ListMonitors,
+        payload: {},
+        reason: 'List monitors',
+      });
+      const jobId = job.id ?? job.job_id;
+      // Poll for result (max 10 seconds)
+      let attempts = 0;
+      const poll = async (): Promise<void> => {
+        if (attempts >= 20) {
+          console.warn('[RD] Monitor list timeout');
+          setRdMonitorsLoading(false);
+          return;
+        }
+        attempts++;
+        try {
+          const j = await api.jobs.get(jobId);
+          if (j.status === 'completed' || j.status === 'success') {
+            const stdout = j.result?.stdout ?? j.stdout ?? '';
+            try {
+              const parsed = JSON.parse(stdout);
+              const monitors = Array.isArray(parsed) ? parsed : [parsed];
+              console.log('[RD] Monitors found:', monitors);
+              setRdMonitors(monitors);
+              // If only 1 monitor, auto-select it
+              if (monitors.length === 1) {
+                setRdSelectedMonitor(0);
+              }
+            } catch {
+              console.warn('[RD] Failed to parse monitors JSON:', stdout);
+            }
+            setRdMonitorsLoading(false);
+            return;
+          }
+          if (j.status === 'failed') {
+            console.warn('[RD] Monitor list job failed');
+            setRdMonitorsLoading(false);
+            return;
+          }
+        } catch { /* retry */ }
+        await new Promise(r => setTimeout(r, 500));
+        return poll();
+      };
+      await poll();
+    } catch (err: any) {
+      console.error('[RD] Failed to fetch monitors:', err);
+      setRdMonitorsLoading(false);
+    }
+  };
+
+  // Auto-fetch monitors when switching to RD tab
+  useEffect(() => {
+    if (tab === 'remote-desktop' && agent && isOnline && rdMonitors.length === 0 && !rdMonitorsLoading) {
+      fetchMonitors();
+    }
+  }, [tab, agent?.id, isOnline]);
+
   // ── Remote Desktop: WebSocket video streaming ──
   const startRdStream = async () => {
     if (!agent || rdLoading) return;
-    console.log('[RD] Starting stream, agent:', agent.id, 'ws connected:', realtime.connected);
+    console.log('[RD] Starting stream, agent:', agent.id, 'monitor:', rdSelectedMonitor, 'ws connected:', realtime.connected);
     setRdLoading(true);
     setRdError(null);
     setRdFrameCount(0);
@@ -235,7 +303,7 @@ export default function AgentDetailPage() {
       const job = await api.jobs.create({
         agent_id: agent.id,
         type: JobType.RemoteDesktopStart,
-        payload: { mode: 'view', fps: rdFps, quality: rdQuality, codec: 'jpeg', scale: rdScale / 100 },
+        payload: { mode: 'view', fps: rdFps, quality: rdQuality, codec: 'jpeg', scale: rdScale / 100, monitor: rdSelectedMonitor },
         reason: 'Remote Desktop stream',
       });
       const jobId = job.id ?? job.job_id;
@@ -298,7 +366,12 @@ export default function AgentDetailPage() {
     setRdLoading(true);
     setRdError(null);
     try {
-      const SCREENSHOT_SCRIPT = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $w=[int][Math]::Round($s.Width*${rdScale/100}); $h=[int][Math]::Round($s.Height*${rdScale/100}); $bmp=New-Object System.Drawing.Bitmap($s.Width,$s.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size); $resized=New-Object System.Drawing.Bitmap($w,$h); $g2=[System.Drawing.Graphics]::FromImage($resized); $g2.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $g2.DrawImage($bmp,0,0,$w,$h); $ms=New-Object System.IO.MemoryStream; $enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{$_.MimeType -eq 'image/jpeg'}; $ep=New-Object System.Drawing.Imaging.EncoderParameters(1); $ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,[long]${rdQuality}); $resized.Save($ms,$enc,$ep); [Convert]::ToBase64String($ms.ToArray()); $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()`;
+      // Build screen bounds selection based on monitor choice
+      const monIdx = rdSelectedMonitor;
+      const boundsCode = monIdx >= 0
+        ? `$screens=[System.Windows.Forms.Screen]::AllScreens; if(${monIdx} -lt $screens.Length){$s=$screens[${monIdx}].Bounds}else{$s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds}`
+        : `$minX=[int]::MaxValue;$minY=[int]::MaxValue;$maxX=[int]::MinValue;$maxY=[int]::MinValue;foreach($scr in [System.Windows.Forms.Screen]::AllScreens){$b=$scr.Bounds;if($b.X -lt $minX){$minX=$b.X};if($b.Y -lt $minY){$minY=$b.Y};if(($b.X+$b.Width) -gt $maxX){$maxX=$b.X+$b.Width};if(($b.Y+$b.Height) -gt $maxY){$maxY=$b.Y+$b.Height}};$s=New-Object System.Drawing.Rectangle($minX,$minY,($maxX-$minX),($maxY-$minY))`;
+      const SCREENSHOT_SCRIPT = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; ${boundsCode}; $w=[int][Math]::Round($s.Width*${rdScale/100}); $h=[int][Math]::Round($s.Height*${rdScale/100}); $bmp=New-Object System.Drawing.Bitmap($s.Width,$s.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size); $resized=New-Object System.Drawing.Bitmap($w,$h); $g2=[System.Drawing.Graphics]::FromImage($resized); $g2.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $g2.DrawImage($bmp,0,0,$w,$h); $ms=New-Object System.IO.MemoryStream; $enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{$_.MimeType -eq 'image/jpeg'}; $ep=New-Object System.Drawing.Imaging.EncoderParameters(1); $ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,[long]${rdQuality}); $resized.Save($ms,$enc,$ep); [Convert]::ToBase64String($ms.ToArray()); $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()`;
       const job = await api.jobs.create({
         agent_id: agent.id,
         type: JobType.RunScript,
@@ -869,6 +942,33 @@ export default function AgentDetailPage() {
                     <option value={5}>5</option>
                   </select>
                 </label>
+                {/* Monitor selector */}
+                <label className="text-[10px] text-reap3r-muted flex items-center gap-1">
+                  <Monitor className="w-3 h-3" />
+                  Screen
+                  <select
+                    value={rdSelectedMonitor}
+                    onChange={e => setRdSelectedMonitor(Number(e.target.value))}
+                    disabled={rdStreaming}
+                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text disabled:opacity-50"
+                  >
+                    <option value={-1}>All screens</option>
+                    {rdMonitors.map(m => (
+                      <option key={m.index} value={m.index}>
+                        {m.primary ? '★ ' : ''}Screen {m.index + 1} ({m.width}x{m.height})
+                      </option>
+                    ))}
+                  </select>
+                  {rdMonitorsLoading && <Loader2 className="w-3 h-3 animate-spin text-reap3r-accent" />}
+                  <button
+                    onClick={fetchMonitors}
+                    disabled={rdMonitorsLoading || rdStreaming}
+                    className="p-0.5 text-reap3r-muted hover:text-reap3r-accent transition-colors disabled:opacity-50"
+                    title="Refresh monitor list"
+                  >
+                    <RefreshCw className="w-3 h-3" />
+                  </button>
+                </label>
                 {/* Stream / Stop / Screenshot buttons */}
                 {!rdStreaming ? (
                   <>
@@ -947,6 +1047,10 @@ export default function AgentDetailPage() {
             <div className={`flex items-center gap-3 mt-2 text-[10px] text-reap3r-muted ${rdFullscreen ? 'px-4 pb-2' : ''}`}>
               <span className="flex items-center gap-1">
                 <Camera className="w-3 h-3" /> Quality: {rdQuality}% &middot; Scale: {rdScale}% &middot; FPS: {rdFps}
+              </span>
+              <span className="flex items-center gap-1">
+                <Monitor className="w-3 h-3" /> {rdSelectedMonitor === -1 ? 'All screens' : `Screen ${rdSelectedMonitor + 1}`}
+                {rdMonitors.length > 0 && ` (${rdMonitors.length} detected)`}
               </span>
               {rdStreaming && (
                 <span className="flex items-center gap-1 text-green-400">
