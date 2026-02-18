@@ -71,15 +71,33 @@ export default async function agentRoutes(fastify: FastifyInstance) {
   // ── Agent inventory ──
   fastify.get('/api/agents/:id/inventory', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.AgentView)] }, async (request, reply) => {
     const { id } = request.params as any;
-    const { rows } = await fastify.pg.query(
-      `SELECT id, hostname, os, arch, capabilities, inventory, cpu_percent, mem_percent, disk_percent, last_seen_at
-       FROM agents WHERE id = $1 AND org_id = $2`,
+    
+    // Get agent
+    const { rows: agentRows } = await fastify.pg.query(
+      `SELECT id, hostname, os, arch, last_seen_at FROM agents WHERE id = $1 AND org_id = $2`,
       [id, request.currentUser.org_id],
     );
-    if (!rows[0]) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
+    if (!agentRows[0]) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
+    const agent = agentRows[0];
+    
+    // Get latest capabilities
+    const { rows: capRows } = await fastify.pg.query(
+      `SELECT jsonb_agg(capability) as capabilities FROM agent_capabilities WHERE agent_id = $1`,
+      [id],
+    );
+    const capabilities = capRows[0]?.capabilities || [];
+    
+    // Get latest inventory snapshot
+    const { rows: invRows } = await fastify.pg.query(
+      `SELECT data FROM inventory_snapshots WHERE agent_id = $1 ORDER BY collected_at DESC LIMIT 1`,
+      [id],
+    );
+    const inventory = invRows[0]?.data || {};
+    
     return {
-      ...rows[0],
-      inventory: rows[0].inventory ?? {},
+      ...agent,
+      capabilities,
+      inventory,
     };
   });
 
