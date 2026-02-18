@@ -585,13 +585,13 @@ async fn handle_job(
     job: &serde_json::Value,
     agent_id: &str,
     secret: &str,
-) -> (String, String) {
+) -> (String, String, Vec<String>) {
     let job_id = job["job_id"].as_str().unwrap_or("");
     let job_type = job["name"].as_str().unwrap_or("");
     let payload = &job["args"];
     let timeout_sec = job["timeout_sec"].as_u64().unwrap_or(300);
 
-    info!(job_id, job_type, "Executing job");
+    finfo!("Executing job: id={} type={}", job_id, job_type);
 
     // Send ACK with "running" status
     let ack = build_message(
@@ -600,6 +600,8 @@ async fn handle_job(
         serde_json::json!({ "job_id": job_id, "status": "running" }),
         secret,
     );
+
+    let mut side_effects: Vec<String> = Vec::new();
 
     // Start timer for duration_ms
     let start_time = std::time::Instant::now();
@@ -636,6 +638,12 @@ async fn handle_job(
     // Build result message with proper schema
     let result_msg = match result {
         Ok(data) => {
+            // Side effects for "collect_inventory": push inventory snapshot immediately.
+            if job_type == "collect_inventory" {
+                let inv_msg = build_message(agent_id, "inventory_push", data.clone(), secret);
+                side_effects.push(inv_msg);
+            }
+
             // Extract exit_code, stdout, stderr from execution results (if script)
             let (exit_code, stdout, stderr) = if let Some(obj) = data.as_object() {
                 (
@@ -678,7 +686,7 @@ async fn handle_job(
     };
 
     // Return both ACK and result
-    (ack, result_msg)
+    (ack, result_msg, side_effects)
 }
 
 // ── Inventory Collection ──────────────────────────────────
@@ -1441,8 +1449,12 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                 }),
                 &key_hb,
             );
-            flog("INFO", &format!("Heartbeat sent (cpu={}% mem={}% disk={}%)",
-                metrics["cpu_percent"].as_u64().unwrap_or(0), memory_percent, disk_percent));
+            finfo!(
+                "Heartbeat queued (cpu={}% mem={}% disk={}%)",
+                metrics["cpu_percent"].as_u64().unwrap_or(0),
+                memory_percent,
+                disk_percent
+            );
             if tx_hb.send(hb).await.is_err() {
                 break;
             }
@@ -1454,6 +1466,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                 metrics,
                 &key_hb,
             );
+            finfo!("Metrics queued");
             if tx_hb.send(metrics_msg).await.is_err() {
                 break;
             }
@@ -1468,6 +1481,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                     inv,
                     &key_hb,
                 );
+                finfo!("Inventory queued");
                 if tx_hb.send(inv_msg).await.is_err() {
                     break;
                 }
@@ -1533,9 +1547,13 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                             }
 
                             finfo!("Job received: id={} type={}", job_id, job_type);
-                            let (ack_msg, result_msg) = handle_job(job, &agent_id_loop, &key_loop).await;
+                            let (ack_msg, result_msg, side_effects) = handle_job(job, &agent_id_loop, &key_loop).await;
                             // Send ACK first
                             tx_jobs.send(ack_msg).await.ok();
+                            // Side-effects (e.g., inventory push for collect_inventory)
+                            for m in side_effects {
+                                tx_jobs.send(m).await.ok();
+                            }
                             // Then send result
                             tx_jobs.send(result_msg).await.ok();
                             state.remember_job(job_id);

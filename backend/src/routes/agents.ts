@@ -134,14 +134,6 @@ export default async function agentRoutes(fastify: FastifyInstance) {
       reason: 'Inventory collection from UI',
     });
 
-    // Dispatch to agent WS
-    if (fastify.agentSockets) {
-      const ws = fastify.agentSockets.get(id);
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'job:dispatch', payload: job }));
-      }
-    }
-
     return reply.status(201).send(job);
   });
 }

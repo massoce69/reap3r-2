@@ -42,10 +42,18 @@ export function clearToken() {
 async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
   const token = getToken();
   const headers: Record<string, string> = {
-    'Content-Type': 'application/json',
     ...(options.headers as Record<string, string> ?? {}),
   };
   if (token) headers['Authorization'] = `Bearer ${token}`;
+
+  // Only set JSON content-type when we actually send a body.
+  // Fastify rejects empty bodies when content-type is application/json.
+  const hasBody = options.body !== undefined && options.body !== null;
+  const isFormData =
+    typeof FormData !== 'undefined' && options.body instanceof FormData;
+  if (hasBody && !isFormData && !('Content-Type' in headers)) {
+    headers['Content-Type'] = 'application/json';
+  }
 
   const res = await fetch(`${API_BASE}${path}`, {
     ...options,
