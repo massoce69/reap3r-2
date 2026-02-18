@@ -11,7 +11,9 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "db:migrate": "tsx src/db/migrate.ts",
-    "db:reset-admin": "tsx src/scripts/reset-admin.ts"
+    "db:reset-admin": "tsx src/scripts/reset-admin.ts",
+    "seed:test-token": "tsx src/scripts/seed-test-token.ts",
+    "test:agent-sim": "tsx src/scripts/agent-sim.ts"
   },
   "dependencies": {
     "@massvision/shared": "*",
