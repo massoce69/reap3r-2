@@ -43,6 +43,27 @@ function resolveBinaryPath(os: Os, arch: Arch): { filePath: string; fileName: st
     return { filePath, fileName: 'reap3r-agent' };
   }
 
+  if (os === 'windows' && arch === 'x86_64') {
+    // Try cross-compiled binary first (uploaded from Windows build machine)
+    const crossPath = path.resolve(process.cwd(), '../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe');
+    if (fs.existsSync(crossPath)) {
+      return { filePath: crossPath, fileName: 'reap3r-agent.exe' };
+    }
+    // Fallback: same dir as linux binary but with .exe extension
+    const localPath = path.resolve(process.cwd(), '../agent/target/release/reap3r-agent.exe');
+    return { filePath: localPath, fileName: 'reap3r-agent.exe' };
+  }
+
+  if (os === 'darwin' && arch === 'x86_64') {
+    const filePath = path.resolve(process.cwd(), '../agent/target/x86_64-apple-darwin/release/reap3r-agent');
+    return { filePath, fileName: 'reap3r-agent' };
+  }
+
+  if (os === 'darwin' && arch === 'aarch64') {
+    const filePath = path.resolve(process.cwd(), '../agent/target/aarch64-apple-darwin/release/reap3r-agent');
+    return { filePath, fileName: 'reap3r-agent' };
+  }
+
   return null;
 }
 
