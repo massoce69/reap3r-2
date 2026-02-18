@@ -106,144 +106,164 @@ systemctl --no-pager --full status reap3r-agent.service || true
     const token = String(q.token ?? '');
     const base = publicBaseUrl(_request);
 
-    // Installs a Windows Service; must be run from an elevated PowerShell.
-    const ps1 = `param(
-  [string]$Token  = "${token}",
-  [string]$Server = "${base}"
-)
-
-$ErrorActionPreference = "Stop"
-[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
-
-function Write-Step([string]$msg) { Write-Host \`\`n"[reap3r] $msg" -ForegroundColor Cyan }
-function Write-OK([string]$msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }
-function Write-Fail([string]$msg) { Write-Host "    ERR $msg" -ForegroundColor Red }
-
-# ── Admin check ──────────────────────────────────────────────────────────────
-$wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-if (-not $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-  Write-Fail "Please run PowerShell as Administrator (right-click → Run as administrator)."
-  Read-Host "Press Enter to exit"
-  exit 1
-}
-
-if ([string]::IsNullOrWhiteSpace($Token)) {
-  Write-Fail "Missing enrollment token. Provide ?token=... in the URL."
-  Read-Host "Press Enter to exit"
-  exit 1
-}
-
-$Server = $Server.TrimEnd('/')
-if (-not ($Server -match '^https?://')) {
-  Write-Fail "Server URL must start with https:// or http://. Got: $Server"
-  Read-Host "Press Enter to exit"
-  exit 1
-}
-
-# Convert http(s):// → ws(s)://
-$wsUrl = ($Server -replace '^http://', 'ws://') -replace '^https://', 'wss://'
-$wsUrl = "$wsUrl/ws/agent"
-
-$installDir = Join-Path $env:ProgramFiles 'MASSVISION\\Reap3r'
-$exePath    = Join-Path $installDir 'reap3r-agent.exe'
-$dataDir    = Join-Path $env:ProgramData 'Reap3r'
-$logDir     = Join-Path $dataDir 'logs'
-$svcName    = 'MASSVISION-Reap3r-Agent'
-
-Write-Step "Creating directories..."
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-New-Item -ItemType Directory -Force -Path $dataDir    | Out-Null
-New-Item -ItemType Directory -Force -Path $logDir     | Out-Null
-Write-OK $installDir
-
-Write-Step "Downloading agent binary from $Server ..."
-try {
-  Invoke-WebRequest -UseBasicParsing \`
-    -Uri "$Server/api/agent-binary/download?os=windows&arch=x86_64" \`
-    -OutFile $exePath
-  $size = (Get-Item $exePath).Length
-  Write-OK "Saved to $exePath ($size bytes)"
-} catch {
-  Write-Fail "Download failed: $_"
-  Write-Fail "Make sure you can reach $Server from this machine."
-  Read-Host "Press Enter to exit"
-  exit 1
-}
-
-Write-Step "Writing agent config ($dataDir\\agent.conf)..."
-$agentConf = @{
-  agent_id   = ""
-  hmac_key   = ""
-  server     = $wsUrl
-  enrolled_at = 0
-} | ConvertTo-Json
-Set-Content -Path "$dataDir\\agent.conf" -Value $agentConf -Encoding UTF8
-Write-OK "Config written (will be populated on first enrollment)"
-
-Write-Step "Installing Windows service '$svcName' ..."
-$existingSvc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
-if ($existingSvc) {
-  try { Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue } catch {}
-  sc.exe delete $svcName | Out-Null
-  Start-Sleep -Seconds 2
-}
-
-# The binary runs in service mode: REAP3R_SERVICE_MODE=1 triggers service dispatcher.
-# Pass --server and --token as arguments so first-run enrollment works.
-# After enrollment, agent.conf is written and args are no longer needed.
-$bin = "\`"$exePath\`" --server \`"$wsUrl\`" --token \`"$Token\`""
-New-Service -Name $svcName \`
-  -BinaryPathName $bin \`
-  -DisplayName "MASSVISION Reap3r Agent" \`
-  -Description "MASSVISION Reap3r remote-management agent" \`
-  -StartupType Automatic | Out-Null
-
-# Set environment variable for service mode in registry
-$regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$svcName"
-New-ItemProperty -Path $regPath -Name "Environment" \`
-  -Value @("REAP3R_SERVICE_MODE=1", "REAP3R_LOG_FILE=$logDir\\agent.log") \`
-  -PropertyType MultiString -Force | Out-Null
-
-# Auto-restart on failure (3 times, every 5s)
-sc.exe failure $svcName reset= 0 actions= restart/5000/restart/5000/restart/5000 | Out-Null
-Write-OK "Service created"
-
-Write-Step "Starting service..."
-try {
-  Start-Service -Name $svcName
-  Start-Sleep -Seconds 3
-  $svc = Get-Service -Name $svcName
-  if ($svc.Status -eq 'Running') {
-    Write-OK "Status: $($svc.Status)"
-  } else {
-    Write-Fail "Service status: $($svc.Status) (expected Running)"
-    Write-Host "    Check logs at: $logDir\\agent.log" -ForegroundColor Yellow
-    Write-Host "    Or run: Get-WinEvent -LogName System | Where-Object {\\$_.Message -like '*$svcName*'} | Select-Object -First 10" -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
-    exit 1
-  }
-} catch {
-  Write-Fail "Failed to start service: $_"
-  Write-Host "    Check logs at: $logDir\\agent.log" -ForegroundColor Yellow
-  Read-Host "Press Enter to exit"
-  exit 1
-}
-
-Write-Host \`\`n"═══════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  Reap3r Agent installed and running!" -ForegroundColor Green
-Write-Host "═══════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "Service : $svcName"
-Write-Host "Binary  : $exePath"
-Write-Host "Server  : $wsUrl"
-Write-Host "Logs    : $logDir\\agent.log"
-Write-Host ""
-Write-Host "To check logs:"
-Write-Host "  Get-Content '$logDir\\agent.log' -Tail 30"
-Write-Host ""
-Write-Host "To check service status:"
-Write-Host "  Get-Service $svcName"
-Read-Host \`\`n"Press Enter to close"
-`;
+    // Build the PS1 using array join to avoid ALL backtick / escaping issues in TS template strings.
+    // Each entry is one line of the PowerShell script.
+    const lines: string[] = [
+      `param(`,
+      `  [string]$Token  = "${token}",`,
+      `  [string]$Server = "${base}"`,
+      `)`,
+      ``,
+      `$ErrorActionPreference = "Stop"`,
+      `[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13`,
+      ``,
+      `function Write-Step([string]$msg) { Write-Host "" ; Write-Host "[reap3r] $msg" -ForegroundColor Cyan }`,
+      `function Write-OK([string]$msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }`,
+      `function Write-Fail([string]$msg) { Write-Host "    ERR $msg" -ForegroundColor Red }`,
+      ``,
+      `# ── Admin check ──────────────────────────────────────────────────────────────`,
+      `$wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())`,
+      `if (-not $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {`,
+      `  Write-Fail "Please run PowerShell as Administrator (right-click -> Run as administrator)."`,
+      `  Read-Host "Press Enter to exit"`,
+      `  exit 1`,
+      `}`,
+      ``,
+      `if ([string]::IsNullOrWhiteSpace($Token)) {`,
+      `  Write-Fail "Missing enrollment token."`,
+      `  Read-Host "Press Enter to exit"`,
+      `  exit 1`,
+      `}`,
+      ``,
+      `$Server = $Server.TrimEnd('/')`,
+      `if (-not ($Server -match '^https?://')) {`,
+      `  Write-Fail "Server URL must start with https:// or http://"`,
+      `  Read-Host "Press Enter to exit"`,
+      `  exit 1`,
+      `}`,
+      ``,
+      `# Convert http(s):// to ws(s)://`,
+      `$wsUrl = ($Server -replace '^http://', 'ws://') -replace '^https://', 'wss://'`,
+      `$wsUrl = "$wsUrl/ws/agent"`,
+      ``,
+      `$installDir = Join-Path $env:ProgramFiles "MASSVISION\Reap3r"`,
+      `$exePath    = Join-Path $installDir "reap3r-agent.exe"`,
+      `$dataDir    = Join-Path $env:ProgramData "Reap3r"`,
+      `$logDir     = Join-Path $dataDir "logs"`,
+      `$taskName   = "MASSVISION-Reap3r-Agent"`,
+      `$logFile    = Join-Path $logDir "agent.log"`,
+      ``,
+      `Write-Step "Creating directories..."`,
+      `New-Item -ItemType Directory -Force -Path $installDir | Out-Null`,
+      `New-Item -ItemType Directory -Force -Path $dataDir    | Out-Null`,
+      `New-Item -ItemType Directory -Force -Path $logDir     | Out-Null`,
+      `Write-OK $installDir`,
+      ``,
+      `Write-Step "Downloading agent binary..."`,
+      `try {`,
+      `  $dlUrl = "$Server/api/agent-binary/download?os=windows&arch=x86_64"`,
+      `  $wc = New-Object System.Net.WebClient`,
+      `  $wc.DownloadFile($dlUrl, $exePath)`,
+      `  $size = (Get-Item $exePath).Length`,
+      `  Write-OK "Saved: $exePath ($size bytes)"`,
+      `} catch {`,
+      `  Write-Fail "Download failed: $_"`,
+      `  Write-Fail "URL tried: $Server/api/agent-binary/download?os=windows&arch=x86_64"`,
+      `  Read-Host "Press Enter to exit"`,
+      `  exit 1`,
+      `}`,
+      ``,
+      `Write-Step "Writing agent config..."`,
+      `$agentConf = '{"agent_id":"","hmac_key":"","server":"' + $wsUrl + '","enrolled_at":0}'`,
+      `Set-Content -Path "$dataDir\agent.conf" -Value $agentConf -Encoding UTF8`,
+      `Write-OK "Config: $dataDir\agent.conf"`,
+      ``,
+      `# ── Remove existing scheduled task if present ────────────────────────────────`,
+      `Write-Step "Registering scheduled task '$taskName'..."`,
+      `$existing = Get-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue`,
+      `if ($existing) {`,
+      `  Stop-ScheduledTask -TaskName $taskName -ErrorAction SilentlyContinue`,
+      `  Unregister-ScheduledTask -TaskName $taskName -Confirm:$false`,
+      `  Start-Sleep -Seconds 1`,
+      `}`,
+      ``,
+      `# Use XML to define the task precisely — avoids escaping issues with New-ScheduledTask`,
+      `$taskXml = @"`,
+      `<?xml version="1.0" encoding="UTF-16"?>`,
+      `<Task version="1.2" xmlns="http://schemas.microsoft.com/windows/2004/02/mit/task">`,
+      `  <RegistrationInfo><Description>MASSVISION Reap3r remote-management agent</Description></RegistrationInfo>`,
+      `  <Triggers>`,
+      `    <BootTrigger><Enabled>true</Enabled></BootTrigger>`,
+      `  </Triggers>`,
+      `  <Principals>`,
+      `    <Principal id="Author">`,
+      `      <UserId>S-1-5-18</UserId>`,
+      `      <RunLevel>HighestAvailable</RunLevel>`,
+      `    </Principal>`,
+      `  </Principals>`,
+      `  <Settings>`,
+      `    <MultipleInstancesPolicy>IgnoreNew</MultipleInstancesPolicy>`,
+      `    <DisallowStartIfOnBatteries>false</DisallowStartIfOnBatteries>`,
+      `    <StopIfGoingOnBatteries>false</StopIfGoingOnBatteries>`,
+      `    <ExecutionTimeLimit>PT0S</ExecutionTimeLimit>`,
+      `    <RestartOnFailure>`,
+      `      <Interval>PT30S</Interval>`,
+      `      <Count>999</Count>`,
+      `    </RestartOnFailure>`,
+      `    <Enabled>true</Enabled>`,
+      `  </Settings>`,
+      `  <Actions Context="Author">`,
+      `    <Exec>`,
+      `      <Command>$exePath</Command>`,
+      `      <Arguments>--server "$wsUrl" --token "$Token"</Arguments>`,
+      `    </Exec>`,
+      `  </Actions>`,
+      `</Task>`,
+      `"@`,
+      ``,
+      `Register-ScheduledTask -TaskName $taskName -Xml $taskXml -Force | Out-Null`,
+      `Write-OK "Task registered (runs at boot as SYSTEM, restarts every 30s on failure)"`,
+      ``,
+      `Write-Step "Starting agent now..."`,
+      `Start-ScheduledTask -TaskName $taskName`,
+      `Start-Sleep -Seconds 4`,
+      ``,
+      `$state = (Get-ScheduledTask -TaskName $taskName).State`,
+      `if ($state -eq 'Running') {`,
+      `  Write-OK "Task state: $state"`,
+      `} else {`,
+      `  Write-Fail "Task state: $state (expected Running)"`,
+      `  Write-Host "    Check logs: $logFile" -ForegroundColor Yellow`,
+      `  Write-Host "    Or: Get-WinEvent -LogName Microsoft-Windows-TaskScheduler/Operational | Select-Object -First 20" -ForegroundColor Yellow`,
+      `  Read-Host "Press Enter to exit"`,
+      `  exit 1`,
+      `}`,
+      ``,
+      `# Try to show first log lines`,
+      `Start-Sleep -Seconds 3`,
+      `if (Test-Path $logFile) {`,
+      `  Write-Host ""`,
+      `  Write-Host "--- Agent log (first lines) ---" -ForegroundColor DarkGray`,
+      `  Get-Content $logFile -Tail 10 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }`,
+      `}`,
+      ``,
+      `Write-Host ""`,
+      `Write-Host "================================================" -ForegroundColor Green`,
+      `Write-Host "  Reap3r Agent installed and running!" -ForegroundColor Green`,
+      `Write-Host "================================================" -ForegroundColor Green`,
+      `Write-Host "Task    : $taskName"`,
+      `Write-Host "Binary  : $exePath"`,
+      `Write-Host "Server  : $wsUrl"`,
+      `Write-Host "Logs    : $logFile"`,
+      `Write-Host ""`,
+      `Write-Host "Useful commands:"`,
+      `Write-Host "  Get-Content '$logFile' -Tail 30 -Wait"`,
+      `Write-Host "  Get-ScheduledTask -TaskName '$taskName'"`,
+      `Write-Host "  Stop-ScheduledTask -TaskName '$taskName'"`,
+      `Write-Host "  Start-ScheduledTask -TaskName '$taskName'"`,
+      `Read-Host "Press Enter to close"`,
+    ];
+    const ps1 = lines.join('\r\n');
 
     reply.header('Content-Type', 'text/plain; charset=utf-8');
     return reply.send(ps1);
