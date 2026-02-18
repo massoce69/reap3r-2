@@ -15,9 +15,18 @@ import {
   Server, MemoryStick, Wifi, Layers, Loader2, Square,
   Send, AlertCircle, CheckCircle, XCircle, Copy, Check,
   ScreenShare, Maximize2, Minimize2, Camera, MousePointer,
+  FolderOpen, Folder, File, FileText, Upload, Download, ArrowUp, Home,
 } from 'lucide-react';
 
-type Tab = 'overview' | 'terminal' | 'remote-desktop' | 'inventory' | 'metrics' | 'jobs';
+type Tab = 'overview' | 'terminal' | 'remote-desktop' | 'file-explorer' | 'inventory' | 'metrics' | 'jobs';
+
+interface FileEntry {
+  name: string;
+  type: 'file' | 'directory';
+  size: number;
+  modified: string;
+  permissions?: string;
+}
 
 export default function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -60,6 +69,17 @@ export default function AgentDetailPage() {
   const [rdFrameCount, setRdFrameCount] = useState(0);
   const [rdSessionId, setRdSessionId] = useState<string | null>(null);
   const rdContainerRef = useRef<HTMLDivElement>(null);
+
+  // File explorer state
+  const [fePath, setFePath] = useState(agent?.os === 'windows' ? 'C:\\' : '/');
+  const [feFiles, setFeFiles] = useState<FileEntry[]>([]);
+  const [feLoading, setFeLoading] = useState(false);
+  const [feError, setFeError] = useState<string | null>(null);
+  const [feHistory, setFeHistory] = useState<string[]>([]);
+  const [feUploading, setFeUploading] = useState(false);
+  const [feDownloading, setFeDownloading] = useState<string | null>(null);
+  const [fePathInput, setFePathInput] = useState('');
+  const feUploadRef = useRef<HTMLInputElement>(null);
 
   const userPerms = user ? RolePermissions[user.role as keyof typeof RolePermissions] ?? [] : [];
   const canRunScript = userPerms.includes(Permission.JobRunScript);
@@ -311,6 +331,198 @@ export default function AgentDetailPage() {
     router.push('/agents');
   };
 
+  // ── File Explorer: helpers ──
+  const isWindows = agent?.os === 'windows';
+
+  const feListDir = async (dirPath: string) => {
+    if (!agent) return;
+    setFeLoading(true);
+    setFeError(null);
+    try {
+      const script = isWindows
+        ? `Get-ChildItem -Path '${dirPath.replace(/'/g, "''")}' -Force -ErrorAction Stop | Select-Object Name,@{N='Type';E={if($_.PSIsContainer){'directory'}else{'file'}}},Length,LastWriteTime | ConvertTo-Json -Compress`
+        : `ls -la --time-style=long-iso '${dirPath.replace(/'/g, "'\\''")}' 2>/dev/null | tail -n +2 | awk '{printf "{\\"name\\":\\"%s\\",\\"type\\":\\"%s\\",\\"size\\":%s,\\"modified\\":\\"%s %s\\",\\"permissions\\":\\"%s\\"}\\n", $NF, ($1 ~ /^d/ ? "directory" : "file"), ($5+0), $6, $7, $1}'`;
+      const job = await api.jobs.create({
+        agent_id: agent.id,
+        type: JobType.RunScript,
+        payload: { interpreter: isWindows ? 'powershell' : 'bash', script, timeout_sec: 15, stream_output: false },
+        reason: `List directory: ${dirPath}`,
+      });
+      const jobId = job.id ?? job.job_id;
+      let attempts = 0;
+      const poll = async () => {
+        if (attempts >= 20) { setFeError('Timeout listing directory'); setFeLoading(false); return; }
+        attempts++;
+        try {
+          const j = await api.jobs.get(jobId);
+          if (j.status === 'completed') {
+            const raw = j.result?.stdout ?? j.stdout ?? '';
+            try {
+              let parsed = JSON.parse(raw);
+              if (!Array.isArray(parsed)) parsed = [parsed];
+              const entries: FileEntry[] = parsed.map((f: any) => ({
+                name: f.Name ?? f.name ?? '',
+                type: (f.Type ?? f.type ?? 'file').toLowerCase() === 'directory' ? 'directory' as const : 'file' as const,
+                size: f.Length ?? f.size ?? 0,
+                modified: f.LastWriteTime ?? f.modified ?? '',
+                permissions: f.permissions,
+              })).filter((f: FileEntry) => f.name);
+              entries.sort((a: FileEntry, b: FileEntry) => {
+                if (a.type !== b.type) return a.type === 'directory' ? -1 : 1;
+                return a.name.localeCompare(b.name);
+              });
+              setFeFiles(entries);
+              setFePath(dirPath);
+              setFePathInput(dirPath);
+              setFeLoading(false);
+            } catch {
+              setFeError('Failed to parse directory listing');
+              setFeLoading(false);
+            }
+            return;
+          }
+          if (j.status === 'failed') {
+            setFeError(j.result?.stderr ?? j.stderr ?? 'Failed to list directory');
+            setFeLoading(false);
+            return;
+          }
+        } catch { /* retry */ }
+        setTimeout(poll, 1500);
+      };
+      setTimeout(poll, 1000);
+    } catch (err: any) { setFeError(err?.message ?? 'Failed to list directory'); setFeLoading(false); }
+  };
+
+  const feNavigate = (name: string) => {
+    const sep = isWindows ? '\\' : '/';
+    const newPath = fePath.endsWith(sep) ? `${fePath}${name}` : `${fePath}${sep}${name}`;
+    setFeHistory(prev => [...prev, fePath]);
+    feListDir(newPath);
+  };
+
+  const feGoUp = () => {
+    const sep = isWindows ? '\\' : '/';
+    const parts = fePath.replace(/[/\\]$/, '').split(/[/\\]/);
+    if (parts.length <= 1) return;
+    parts.pop();
+    let parent = parts.join(sep);
+    if (isWindows && parent.length === 2 && parent[1] === ':') parent += sep;
+    if (!isWindows && parent === '') parent = '/';
+    setFeHistory(prev => [...prev, fePath]);
+    feListDir(parent);
+  };
+
+  const feGoHome = () => {
+    const home = isWindows ? 'C:\\' : '/';
+    setFeHistory(prev => [...prev, fePath]);
+    feListDir(home);
+  };
+
+  const feGoBack = () => {
+    if (feHistory.length === 0) return;
+    const prev = feHistory[feHistory.length - 1];
+    setFeHistory(h => h.slice(0, -1));
+    feListDir(prev);
+  };
+
+  const feDownload = async (fileName: string) => {
+    if (!agent) return;
+    setFeDownloading(fileName);
+    try {
+      const sep = isWindows ? '\\' : '/';
+      const fullPath = fePath.endsWith(sep) ? `${fePath}${fileName}` : `${fePath}${sep}${fileName}`;
+      const script = isWindows
+        ? `[Convert]::ToBase64String([System.IO.File]::ReadAllBytes('${fullPath.replace(/'/g, "''")}'))`
+        : `base64 '${fullPath.replace(/'/g, "'\\''")}'`;
+      const job = await api.jobs.create({
+        agent_id: agent.id,
+        type: JobType.RunScript,
+        payload: { interpreter: isWindows ? 'powershell' : 'bash', script, timeout_sec: 60, stream_output: false },
+        reason: `Download file: ${fullPath}`,
+      });
+      const jobId = job.id ?? job.job_id;
+      let attempts = 0;
+      const poll = async () => {
+        if (attempts >= 40) { setFeError('Download timeout'); setFeDownloading(null); return; }
+        attempts++;
+        try {
+          const j = await api.jobs.get(jobId);
+          if (j.status === 'completed') {
+            const b64 = (j.result?.stdout ?? j.stdout ?? '').trim();
+            if (b64.length > 0) {
+              const byteChars = atob(b64);
+              const byteArray = new Uint8Array(byteChars.length);
+              for (let i = 0; i < byteChars.length; i++) byteArray[i] = byteChars.charCodeAt(i);
+              const blob = new Blob([byteArray]);
+              const url = URL.createObjectURL(blob);
+              const a = document.createElement('a');
+              a.href = url; a.download = fileName; a.click();
+              URL.revokeObjectURL(url);
+            } else { setFeError('Empty file'); }
+            setFeDownloading(null); return;
+          }
+          if (j.status === 'failed') { setFeError(j.result?.stderr ?? j.stderr ?? 'Download failed'); setFeDownloading(null); return; }
+        } catch { /* retry */ }
+        setTimeout(poll, 2000);
+      };
+      setTimeout(poll, 1500);
+    } catch (err: any) { setFeError(err?.message ?? 'Failed to download'); setFeDownloading(null); }
+  };
+
+  const feUpload = async (file: globalThis.File) => {
+    if (!agent) return;
+    setFeUploading(true);
+    setFeError(null);
+    try {
+      const buffer = await file.arrayBuffer();
+      const bytes = new Uint8Array(buffer);
+      let b64 = '';
+      const CHUNK = 8192;
+      for (let i = 0; i < bytes.length; i += CHUNK) {
+        b64 += String.fromCharCode(...bytes.subarray(i, i + CHUNK));
+      }
+      b64 = btoa(b64);
+      const sep = isWindows ? '\\' : '/';
+      const destPath = fePath.endsWith(sep) ? `${fePath}${file.name}` : `${fePath}${sep}${file.name}`;
+      const script = isWindows
+        ? `[System.IO.File]::WriteAllBytes('${destPath.replace(/'/g, "''")}', [Convert]::FromBase64String('${b64}')); Write-Output 'OK'`
+        : `echo '${b64}' | base64 -d > '${destPath.replace(/'/g, "'\\''")}' && echo OK`;
+      const job = await api.jobs.create({
+        agent_id: agent.id,
+        type: JobType.RunScript,
+        payload: { interpreter: isWindows ? 'powershell' : 'bash', script, timeout_sec: 120, stream_output: false },
+        reason: `Upload file: ${destPath}`,
+      });
+      const jobId = job.id ?? job.job_id;
+      let attempts = 0;
+      const poll = async () => {
+        if (attempts >= 60) { setFeError('Upload timeout'); setFeUploading(false); return; }
+        attempts++;
+        try {
+          const j = await api.jobs.get(jobId);
+          if (j.status === 'completed') {
+            setFeUploading(false);
+            feListDir(fePath); // refresh listing
+            return;
+          }
+          if (j.status === 'failed') { setFeError(j.result?.stderr ?? j.stderr ?? 'Upload failed'); setFeUploading(false); return; }
+        } catch { /* retry */ }
+        setTimeout(poll, 2000);
+      };
+      setTimeout(poll, 1500);
+    } catch (err: any) { setFeError(err?.message ?? 'Failed to upload'); setFeUploading(false); }
+  };
+
+  // Load file explorer when switching to tab
+  useEffect(() => {
+    if (tab === 'file-explorer' && feFiles.length === 0 && !feLoading && agent) {
+      const home = agent.os === 'windows' ? 'C:\\' : '/';
+      setFePath(home);
+      setFePathInput(home);
+      feListDir(home);
+    }
+  }, [tab, agent?.id]);
+
   if (loading) {
     return (
       <>
@@ -329,6 +541,7 @@ export default function AgentDetailPage() {
     { key: 'overview', label: 'Overview', icon: <Monitor className="w-4 h-4" /> },
     { key: 'terminal', label: 'Terminal', icon: <Terminal className="w-4 h-4" /> },
     { key: 'remote-desktop', label: 'Remote Desktop', icon: <ScreenShare className="w-4 h-4" /> },
+    { key: 'file-explorer', label: 'Files', icon: <FolderOpen className="w-4 h-4" /> },
     { key: 'inventory', label: 'Inventory', icon: <Package className="w-4 h-4" /> },
     { key: 'metrics', label: 'Metrics', icon: <Activity className="w-4 h-4" /> },
     { key: 'jobs', label: 'Jobs', icon: <Layers className="w-4 h-4" /> },
@@ -727,6 +940,141 @@ export default function AgentDetailPage() {
               <span className="ml-auto">Agent: {agent.os === 'windows' ? 'Windows' : agent.os}</span>
             </div>
           </div>
+        )}
+
+        {/* ── File Explorer Tab ── */}
+        {tab === 'file-explorer' && (
+          <Card>
+            {/* Toolbar */}
+            <div className="flex items-center gap-2 mb-4 flex-wrap">
+              <button onClick={feGoBack} disabled={feHistory.length === 0 || feLoading}
+                className="p-1.5 rounded hover:bg-reap3r-hover text-reap3r-muted disabled:opacity-30 disabled:cursor-not-allowed transition-colors"
+                title="Back">
+                <ArrowLeft className="w-4 h-4" />
+              </button>
+              <button onClick={feGoUp} disabled={feLoading}
+                className="p-1.5 rounded hover:bg-reap3r-hover text-reap3r-muted disabled:opacity-30 transition-colors"
+                title="Up">
+                <ArrowUp className="w-4 h-4" />
+              </button>
+              <button onClick={feGoHome} disabled={feLoading}
+                className="p-1.5 rounded hover:bg-reap3r-hover text-reap3r-muted disabled:opacity-30 transition-colors"
+                title="Home">
+                <Home className="w-4 h-4" />
+              </button>
+              <button onClick={() => feListDir(fePath)} disabled={feLoading}
+                className="p-1.5 rounded hover:bg-reap3r-hover text-reap3r-muted disabled:opacity-30 transition-colors"
+                title="Refresh">
+                <RefreshCw className={`w-4 h-4 ${feLoading ? 'animate-spin' : ''}`} />
+              </button>
+              <form className="flex-1 min-w-[200px]" onSubmit={e => { e.preventDefault(); feListDir(fePathInput); }}>
+                <input
+                  value={fePathInput}
+                  onChange={e => setFePathInput(e.target.value)}
+                  className="w-full px-3 py-1.5 bg-reap3r-surface border border-reap3r-border rounded text-sm text-reap3r-text font-mono focus:outline-none focus:ring-1 focus:ring-reap3r-accent/50"
+                  placeholder="Path..."
+                />
+              </form>
+              {/* Upload */}
+              <input type="file" ref={feUploadRef} className="hidden"
+                onChange={e => { if (e.target.files?.[0]) feUpload(e.target.files[0]); e.target.value = ''; }} />
+              <Button size="sm" variant="ghost" onClick={() => feUploadRef.current?.click()} disabled={!isOnline || feUploading}>
+                {feUploading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Upload className="w-4 h-4" />}
+                {feUploading ? 'Uploading...' : 'Upload'}
+              </Button>
+            </div>
+
+            {/* Error */}
+            {feError && (
+              <div className="bg-red-500/5 border border-red-500/20 rounded-lg px-3 py-2 text-xs text-red-400 flex items-center gap-2 mb-3">
+                <AlertCircle className="w-4 h-4 flex-shrink-0" /> {feError}
+                <button onClick={() => setFeError(null)} className="ml-auto text-red-400 hover:text-red-300">&times;</button>
+              </div>
+            )}
+
+            {/* Path breadcrumb */}
+            <div className="text-xs text-reap3r-muted mb-3 font-mono truncate" title={fePath}>
+              <FolderOpen className="w-3 h-3 inline mr-1" /> {fePath}
+              <span className="ml-2 text-reap3r-muted/50">{feFiles.length} items</span>
+            </div>
+
+            {/* File listing */}
+            {feLoading && feFiles.length === 0 ? (
+              <div className="text-center py-12">
+                <Loader2 className="w-8 h-8 mx-auto text-reap3r-accent animate-spin mb-3" />
+                <p className="text-sm text-reap3r-muted">Loading directory...</p>
+              </div>
+            ) : feFiles.length === 0 && !feError ? (
+              <div className="text-center py-12">
+                <FolderOpen className="w-10 h-10 mx-auto text-reap3r-muted mb-3" />
+                <p className="text-sm text-reap3r-muted">Empty directory</p>
+              </div>
+            ) : (
+              <div className="border border-reap3r-border rounded-lg overflow-hidden">
+                {/* Header */}
+                <div className="grid grid-cols-12 gap-2 px-3 py-2 bg-reap3r-surface text-[10px] text-reap3r-muted uppercase tracking-wider font-medium border-b border-reap3r-border">
+                  <div className="col-span-6">Name</div>
+                  <div className="col-span-2">Size</div>
+                  <div className="col-span-3">Modified</div>
+                  <div className="col-span-1 text-right">Actions</div>
+                </div>
+                {/* Rows */}
+                <div className="max-h-[500px] overflow-y-auto divide-y divide-reap3r-border/50">
+                  {feFiles.map((f) => (
+                    <div key={f.name}
+                      className="grid grid-cols-12 gap-2 px-3 py-2 hover:bg-reap3r-hover transition-colors items-center group text-sm"
+                    >
+                      <div className="col-span-6 flex items-center gap-2 min-w-0">
+                        {f.type === 'directory'
+                          ? <Folder className="w-4 h-4 text-reap3r-accent flex-shrink-0" />
+                          : <File className="w-4 h-4 text-reap3r-muted flex-shrink-0" />}
+                        {f.type === 'directory' ? (
+                          <button
+                            onClick={() => feNavigate(f.name)}
+                            className="text-reap3r-text hover:text-reap3r-accent truncate text-left transition-colors"
+                            title={f.name}
+                          >
+                            {f.name}
+                          </button>
+                        ) : (
+                          <span className="text-reap3r-text truncate" title={f.name}>{f.name}</span>
+                        )}
+                      </div>
+                      <div className="col-span-2 text-xs text-reap3r-muted">
+                        {f.type === 'directory' ? '—' : formatBytes(f.size)}
+                      </div>
+                      <div className="col-span-3 text-xs text-reap3r-muted truncate" title={f.modified}>
+                        {f.modified ? new Date(f.modified).toLocaleString() : '—'}
+                      </div>
+                      <div className="col-span-1 flex justify-end">
+                        {f.type === 'file' && (
+                          <button
+                            onClick={() => feDownload(f.name)}
+                            disabled={feDownloading === f.name}
+                            className="p-1 rounded hover:bg-reap3r-accent/10 text-reap3r-muted hover:text-reap3r-accent opacity-0 group-hover:opacity-100 transition-all disabled:opacity-50"
+                            title={`Download ${f.name}`}
+                          >
+                            {feDownloading === f.name
+                              ? <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                              : <Download className="w-3.5 h-3.5" />}
+                          </button>
+                        )}
+                        {f.type === 'directory' && (
+                          <button
+                            onClick={() => feNavigate(f.name)}
+                            className="p-1 rounded hover:bg-reap3r-accent/10 text-reap3r-muted hover:text-reap3r-accent opacity-0 group-hover:opacity-100 transition-all"
+                            title={`Open ${f.name}`}
+                          >
+                            <FolderOpen className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </Card>
         )}
 
         {tab === 'inventory' && (

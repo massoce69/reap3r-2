@@ -418,10 +418,17 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
           case MessageType.StreamOutput: {
             const soParsed = StreamOutputPayload.safeParse(msg.payload);
-            if (!soParsed.success) break;
+            if (!soParsed.success) {
+              fastify.log.warn({ err: soParsed.error?.message }, 'StreamOutput parse failed');
+              break;
+            }
             const so = soParsed.data;
             // Relay frames to UI WebSocket subscribers
             if (so.stream_type === 'frame') {
+              const uiCount = Array.from(uiSockets).filter(s => s.readyState === WS.OPEN).length;
+              if (so.sequence % 10 === 0) {
+                fastify.log.info({ seq: so.sequence, uiClients: uiCount, dataLen: so.data.length }, 'RD frame relay');
+              }
               fastify.broadcastToUI('rd:frame', {
                 agent_id: msg.agentId,
                 session_id: so.session_id,

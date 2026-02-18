@@ -3,6 +3,7 @@
 // ─────────────────────────────────────────────
 import { create } from 'zustand';
 import { api, setToken, clearToken } from './api';
+import { realtime } from './ws';
 
 interface User {
   id: string;
@@ -47,6 +48,7 @@ export const useAuth = create<AuthState>((set, get) => ({
 
       if (res.token && res.user) {
         setToken(res.token);
+        realtime.connect(res.token);
         set({ user: res.user, loading: false, mfaRequired: false, mfaEmail: null, mfaPassword: null });
         return true;
       }
@@ -61,6 +63,7 @@ export const useAuth = create<AuthState>((set, get) => ({
 
   logout: () => {
     clearToken();
+    realtime.disconnect();
     set({ user: null });
     window.location.href = '/login';
   },
@@ -76,6 +79,7 @@ export const useAuth = create<AuthState>((set, get) => ({
 
     try {
       const user = await api.auth.me();
+      realtime.connect(token);
       set({ user, initialized: true });
     } catch {
       clearToken();
