@@ -10,6 +10,7 @@ use sha2::Sha256;
 use std::collections::HashSet;
 use std::io::Write as IoWrite;
 use std::path::PathBuf;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
@@ -31,6 +32,9 @@ type HmacSha256 = Hmac<Sha256>;
 
 const MAX_JOB_HISTORY: usize = 256;
 const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MB rotate threshold
+
+// ── Remote Desktop global state ───────────────────────────
+static RD_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 // ── Global file logger ────────────────────────────────────
 
@@ -585,6 +589,7 @@ async fn handle_job(
     job: &serde_json::Value,
     agent_id: &str,
     secret: &str,
+    tx: Option<tokio::sync::mpsc::Sender<String>>,
 ) -> (String, String, Vec<String>) {
     let job_id = job["job_id"].as_str().unwrap_or("");
     let job_type = job["name"].as_str().unwrap_or("");
@@ -624,6 +629,20 @@ async fn handle_job(
             "service_action" => execute_service_action(payload).await,
             "edr_kill_process" => execute_edr_kill_process(payload).await,
             "edr_isolate_machine" => execute_edr_isolate(payload).await,
+            "remote_desktop_start" => {
+                start_remote_desktop(
+                    payload,
+                    agent_id.to_string(),
+                    secret.to_string(),
+                    job_id.to_string(),
+                    tx.clone(),
+                ).await
+            }
+            "remote_desktop_stop" => {
+                RD_ACTIVE.store(false, Ordering::SeqCst);
+                finfo!("Remote desktop stopped by job");
+                Ok(serde_json::json!({ "exit_code": 0, "stdout": "Remote desktop stopped", "stderr": "" }))
+            }
             _ => Err(format!("Unsupported job type: {}", job_type)),
         }
     };
@@ -1034,6 +1053,127 @@ async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value
         Ok(Err(e)) => Err(format!("Failed to execute: {}", e)),
         Err(_) => Err("Script execution timed out".to_string()),
     }
+}
+
+// ── Remote Desktop (screenshot streaming via PowerShell) ──
+
+/// The PowerShell script that captures a single screenshot and outputs base64 JPEG.
+/// Placeholders SCALE_FACTOR and QUALITY_VALUE are replaced at runtime.
+const RD_CAPTURE_PS: &str = r#"
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$w = [Math]::Round($s.Width * SCALE_FACTOR)
+$h = [Math]::Round($s.Height * SCALE_FACTOR)
+$bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
+$g = [System.Drawing.Graphics]::FromImage($bmp)
+$g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+$resized = New-Object System.Drawing.Bitmap($w, $h)
+$g2 = [System.Drawing.Graphics]::FromImage($resized)
+$g2.InterpolationMode = [System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic
+$g2.DrawImage($bmp, 0, 0, $w, $h)
+$ms = New-Object System.IO.MemoryStream
+$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+$ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
+$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, QUALITY_VALUE)
+$resized.Save($ms, $enc, $ep)
+[Convert]::ToBase64String($ms.ToArray())
+$g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()
+"#;
+
+async fn start_remote_desktop(
+    payload: &serde_json::Value,
+    agent_id: String,
+    secret: String,
+    job_id: String,
+    tx: Option<tokio::sync::mpsc::Sender<String>>,
+) -> Result<serde_json::Value, String> {
+    let tx = tx.ok_or_else(|| "No WS channel available for streaming".to_string())?;
+
+    // Parse parameters
+    let fps = payload["fps"].as_u64().unwrap_or(2).clamp(1, 15);
+    let quality = payload["quality"].as_u64().unwrap_or(50).clamp(10, 100);
+    let scale = payload["scale"].as_f64().unwrap_or(0.5).clamp(0.2, 1.0);
+
+    // Stop any existing session
+    RD_ACTIVE.store(false, Ordering::SeqCst);
+    tokio::time::sleep(Duration::from_millis(200)).await;
+
+    // Start new session
+    RD_ACTIVE.store(true, Ordering::SeqCst);
+
+    let session_id = job_id.clone();
+    let frame_interval = Duration::from_millis(1000 / fps);
+
+    let script_template = RD_CAPTURE_PS
+        .replace("SCALE_FACTOR", &format!("{:.2}", scale))
+        .replace("QUALITY_VALUE", &format!("{}", quality));
+
+    finfo!(
+        "Remote desktop started: session={} fps={} quality={} scale={:.0}%",
+        session_id, fps, quality, scale * 100.0
+    );
+
+    // Spawn background capture loop
+    tokio::spawn(async move {
+        let mut sequence: u64 = 0;
+
+        while RD_ACTIVE.load(Ordering::SeqCst) {
+            let frame_start = std::time::Instant::now();
+
+            // Capture screenshot via PowerShell
+            match tokio::process::Command::new("powershell")
+                .args(["-NoProfile", "-NonInteractive", "-Command", &script_template])
+                .output()
+                .await
+            {
+                Ok(output) if output.status.success() => {
+                    let b64 = String::from_utf8_lossy(&output.stdout).trim().to_string();
+                    if b64.len() > 100 {
+                        // Send stream_output frame
+                        let msg = build_message(
+                            &agent_id,
+                            "stream_output",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "stream_type": "frame",
+                                "data": b64,
+                                "sequence": sequence,
+                            }),
+                            &secret,
+                        );
+                        if tx.send(msg).await.is_err() {
+                            fwarn!("RD: Failed to send frame, stopping");
+                            break;
+                        }
+                        sequence += 1;
+                    }
+                }
+                Ok(output) => {
+                    let stderr = String::from_utf8_lossy(&output.stderr);
+                    fwarn!("RD: PowerShell capture failed: {}", stderr.chars().take(200).collect::<String>());
+                }
+                Err(e) => {
+                    fwarn!("RD: Failed to run PowerShell: {}", e);
+                }
+            }
+
+            // Wait for next frame interval (minus time already spent capturing)
+            let elapsed = frame_start.elapsed();
+            if elapsed < frame_interval {
+                tokio::time::sleep(frame_interval - elapsed).await;
+            }
+        }
+
+        RD_ACTIVE.store(false, Ordering::SeqCst);
+        finfo!("Remote desktop session ended: session={}", session_id);
+    });
+
+    Ok(serde_json::json!({
+        "exit_code": 0,
+        "stdout": format!("Remote desktop started: fps={} quality={} scale={:.0}%", fps, quality, scale * 100.0),
+        "stderr": ""
+    }))
 }
 
 async fn execute_system_command(action: &str, delay_secs: u64) -> Result<serde_json::Value, String> {
@@ -1547,7 +1687,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                             }
 
                             finfo!("Job received: id={} type={}", job_id, job_type);
-                            let (ack_msg, result_msg, side_effects) = handle_job(job, &agent_id_loop, &key_loop).await;
+                            let (ack_msg, result_msg, side_effects) = handle_job(job, &agent_id_loop, &key_loop, Some(tx_jobs.clone())).await;
                             // Send ACK first
                             tx_jobs.send(ack_msg).await.ok();
                             // Side-effects (e.g., inventory push for collect_inventory)

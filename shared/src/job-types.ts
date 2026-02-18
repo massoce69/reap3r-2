@@ -81,6 +81,7 @@ export const RemoteDesktopStartPayload = z.object({
   mode: z.enum(['view', 'control']),
   fps: z.number().int().min(1).max(60).default(15),
   quality: z.number().int().min(10).max(100).default(60),
+  scale: z.number().min(0.1).max(1.0).default(0.5),
   codec: z.enum(['jpeg', 'png', 'webp']).default('jpeg'),
 });
 

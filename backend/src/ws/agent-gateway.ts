@@ -26,6 +26,7 @@ import {
   CapabilitiesPayload,
   JobAckPayload,
   JobResultPayload,
+  StreamOutputPayload,
 } from '@massvision/shared';
 
 import * as agentService from '../services/agent.service.js';
@@ -412,6 +413,31 @@ export function setupAgentGateway(fastify: FastifyInstance) {
             }
 
             fastify.broadcastToUI('job:result', { job_id: p.job_id, status: p.status, exit_code: p.exit_code });
+            break;
+          }
+
+          case MessageType.StreamOutput: {
+            const soParsed = StreamOutputPayload.safeParse(msg.payload);
+            if (!soParsed.success) break;
+            const so = soParsed.data;
+            // Relay frames to UI WebSocket subscribers
+            if (so.stream_type === 'frame') {
+              fastify.broadcastToUI('rd:frame', {
+                agent_id: msg.agentId,
+                session_id: so.session_id,
+                data: so.data,
+                sequence: so.sequence,
+              });
+            } else {
+              // stdout/stderr stream → broadcast as generic stream event
+              fastify.broadcastToUI('stream:output', {
+                agent_id: msg.agentId,
+                session_id: so.session_id,
+                stream_type: so.stream_type,
+                data: so.data,
+                sequence: so.sequence,
+              });
+            }
             break;
           }
 
