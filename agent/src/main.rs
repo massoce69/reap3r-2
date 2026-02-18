@@ -143,6 +143,14 @@ struct Args {
     /// Custom log file path (overrides automatic detection)
     #[arg(long, env = "REAP3R_LOG_FILE")]
     log_file: Option<PathBuf>,
+
+    /// Install the agent as a Windows Service and exit
+    #[arg(long)]
+    install: bool,
+
+    /// Uninstall the Windows Service and exit
+    #[arg(long)]
+    uninstall: bool,
 }
 
 async fn connect_ws(
@@ -1289,6 +1297,90 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
 }
 
 #[cfg(windows)]
+fn install_windows_service() {
+    let exe = std::env::current_exe().expect("Cannot determine executable path");
+    let exe_path = exe.display().to_string();
+    println!("Installing Windows Service: {}", SERVICE_NAME);
+    println!("Binary: {}", exe_path);
+
+    // Use sc.exe to create the service
+    let output = std::process::Command::new("sc.exe")
+        .args([
+            "create", SERVICE_NAME,
+            "binPath=", &exe_path,
+            "start=", "auto",
+            "DisplayName=", "MASSVISION Reap3r Agent",
+        ])
+        .output();
+    match output {
+        Ok(o) => {
+            let stdout = String::from_utf8_lossy(&o.stdout);
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            if o.status.success() {
+                println!("[OK] Service created successfully");
+            } else {
+                eprintln!("[ERROR] sc create failed: {} {}", stdout.trim(), stderr.trim());
+                return;
+            }
+        }
+        Err(e) => { eprintln!("[ERROR] Failed to run sc.exe: {}", e); return; }
+    }
+
+    // Set description
+    let _ = std::process::Command::new("sc.exe")
+        .args(["description", SERVICE_NAME, "MASSVISION Reap3r remote management agent — runs invisibly in the background."])
+        .output();
+
+    // Configure recovery: restart on failure (restart after 5s, 10s, 30s)
+    let _ = std::process::Command::new("sc.exe")
+        .args(["failure", SERVICE_NAME, "reset=", "86400", "actions=", "restart/5000/restart/10000/restart/30000"])
+        .output();
+
+    // Start the service
+    println!("Starting service...");
+    let start = std::process::Command::new("sc.exe")
+        .args(["start", SERVICE_NAME])
+        .output();
+    match start {
+        Ok(o) if o.status.success() => println!("[OK] Service started!"),
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stdout);
+            eprintln!("[WARN] Service start: {}", msg.trim());
+        }
+        Err(e) => eprintln!("[WARN] Could not start service: {}", e),
+    }
+
+    println!("\nDone! The agent is now running as an invisible Windows Service.");
+    println!("Check status:  sc query {}", SERVICE_NAME);
+    println!("View logs:     type {}\\logs\\agent.log", config_dir().display());
+    println!("Stop service:  sc stop {}", SERVICE_NAME);
+    println!("Remove:        reap3r-agent.exe --uninstall");
+}
+
+#[cfg(windows)]
+fn uninstall_windows_service() {
+    println!("Uninstalling Windows Service: {}", SERVICE_NAME);
+    // Stop first
+    let _ = std::process::Command::new("sc.exe")
+        .args(["stop", SERVICE_NAME])
+        .output();
+    std::thread::sleep(Duration::from_secs(2));
+    // Delete
+    let output = std::process::Command::new("sc.exe")
+        .args(["delete", SERVICE_NAME])
+        .output();
+    match output {
+        Ok(o) if o.status.success() => println!("[OK] Service removed"),
+        Ok(o) => {
+            let msg = String::from_utf8_lossy(&o.stdout);
+            let err = String::from_utf8_lossy(&o.stderr);
+            eprintln!("[ERROR] sc delete: {} {}", msg.trim(), err.trim());
+        }
+        Err(e) => eprintln!("[ERROR] Failed to run sc.exe: {}", e),
+    }
+}
+
+#[cfg(windows)]
 fn build_args_from_config() -> Args {
     let saved = load_config();
     Args {
@@ -1306,12 +1398,14 @@ fn build_args_from_config() -> Args {
         insecure_tls: std::env::var("REAP3R_INSECURE_TLS").as_deref() == Ok("1"),
         run_for_secs: std::env::var("REAP3R_RUN_FOR_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
         log_file: None,
+        install: false,
+        uninstall: false,
     }
 }
 
 #[tokio::main]
 async fn main() {
-    // ── Windows: try service dispatcher first ─────────────
+    // ── Windows: always try service dispatcher first ────────
     // When launched by Windows SCM, service_dispatcher::start() will block and
     // call windows_service_main(). If we're NOT running as a service (e.g. CLI),
     // it returns an error immediately and we fall through to normal CLI mode.
@@ -1323,15 +1417,13 @@ async fn main() {
             .unwrap_or_else(|_| default_log_path());
         let _ = FILE_LOGGER.set(FileLogger::open(&log_path));
 
-        // If REAP3R_SERVICE_MODE=1, we are running as a Windows service.
-        if std::env::var("REAP3R_SERVICE_MODE").as_deref() == Ok("1") {
-            flog("INFO", "REAP3R_SERVICE_MODE=1 — starting Windows service dispatcher");
-            match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
-                Ok(()) => return,
-                Err(e) => {
-                    flog("ERROR", &format!("service_dispatcher::start failed: {}", e));
-                    // Fall through — will fail at Args::parse() if no args, which is fine
-                }
+        // Always attempt service dispatcher — if launched by SCM it will block,
+        // otherwise it returns an error and we fall through to CLI mode.
+        flog("INFO", "Trying Windows service dispatcher...");
+        match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
+            Ok(()) => return,  // SCM took over, we're done
+            Err(_) => {
+                flog("INFO", "Not running as service — entering CLI mode");
             }
         }
     }
@@ -1383,6 +1475,26 @@ async fn main() {
     }
     if args.insecure_tls {
         fwarn!("WARNING: --insecure-tls active — TLS certificate validation is DISABLED");
+    }
+
+    // ── 4b. --install / --uninstall Windows Service ────────
+    #[cfg(windows)]
+    {
+        if args.install {
+            install_windows_service();
+            std::process::exit(0);
+        }
+        if args.uninstall {
+            uninstall_windows_service();
+            std::process::exit(0);
+        }
+    }
+    #[cfg(not(windows))]
+    {
+        if args.install || args.uninstall {
+            eprintln!("--install / --uninstall is only supported on Windows");
+            std::process::exit(1);
+        }
     }
 
     // ── 5. --diagnose mode ────────────────────────────────
