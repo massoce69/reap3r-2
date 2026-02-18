@@ -146,9 +146,10 @@ NODE_ENV=production
 DATABASE_URL=postgresql://reap3r:reap3r_secret@localhost:5432/reap3r
 JWT_SECRET=$(openssl rand -base64 32)
 HMAC_SECRET=$(openssl rand -base64 32)
+VAULT_MASTER_KEY=$(openssl rand -base64 32)
 LOG_LEVEL=info
-BACKEND_PORT=4000
-WEBSOCKET_PORT=4001
+PORT=4000
+WS_PORT=4001
 EOF
 else
     log_warn "backend/.env existe déjà"
@@ -193,8 +194,10 @@ log_success "PostgreSQL configuré"
 # ─────────────────────────────────────────────
 
 log_info "Exécution des migrations..."
-export DATABASE_URL="postgresql://reap3r:reap3r_secret@localhost:5432/reap3r"
 cd "$APP_DIR/backend"
+set -a
+source "$APP_DIR/backend/.env"
+set +a
 npm run db:migrate > /dev/null 2>&1
 log_success "Migrations appliquées"
 
@@ -220,17 +223,16 @@ sleep 2
 
 # Start backend
 cd "$APP_DIR/backend"
-export DATABASE_URL="postgresql://reap3r:reap3r_secret@localhost:5432/reap3r"
-pm2 start "npm start" \
-    --name "reap3r-backend" \
-    --env production \
-    --interpretation "shell" > /dev/null 2>&1
+set -a
+source "$APP_DIR/backend/.env"
+set +a
+pm2 start "dist/index.js" --name "reap3r-backend" --cwd "$APP_DIR/backend" --interpreter node > /dev/null 2>&1
 
 # Start frontend
 cd "$APP_DIR/frontend"
 pm2 start "npm start" \
     --name "reap3r-frontend" \
-    --interpretation "shell" > /dev/null 2>&1
+    --interpreter "bash" > /dev/null 2>&1
 
 pm2 save > /dev/null 2>&1
 

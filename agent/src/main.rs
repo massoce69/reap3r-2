@@ -7,6 +7,7 @@ use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
+use std::collections::HashSet;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
@@ -15,6 +16,8 @@ use tracing::{error, info, warn};
 use uuid::Uuid;
 
 type HmacSha256 = Hmac<Sha256>;
+
+const MAX_JOB_HISTORY: usize = 256;
 
 #[derive(Parser, Debug)]
 #[command(name = "reap3r-agent", version, about = "MASSVISION Reap3r Agent")]
@@ -31,41 +34,22 @@ struct Args {
     #[arg(long, env = "REAP3R_AGENT_ID")]
     agent_id: Option<String>,
 
-    /// Agent secret (after enrollment, persisted)
-    #[arg(long, env = "REAP3R_AGENT_SECRET")]
-    agent_secret: Option<String>,
+    /// HMAC key (after enrollment, persisted). Protocol v1 uses a single backend-provided key.
+    #[arg(long, env = "REAP3R_HMAC_KEY")]
+    hmac_key: Option<String>,
 
     /// Heartbeat interval in seconds
     #[arg(long, default_value = "30", env = "REAP3R_HEARTBEAT_INTERVAL")]
     heartbeat_interval: u64,
 }
 
-#[derive(Serialize, Deserialize, Debug)]
-struct AgentMessage {
-    agent_id: String,
-    ts: u64,
-    nonce: String,
-    #[serde(rename = "type")]
-    msg_type: String,
-    payload: serde_json::Value,
-    hmac: String,
-}
-
-#[derive(Serialize, Deserialize, Debug)]
-struct EnrollResponse {
-    success: bool,
-    agent_id: Option<String>,
-    agent_secret: Option<String>,
-    error: Option<String>,
-    server_ts: Option<u64>,
-}
 
 // ── Config persistence ──────────────────────────────────────
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct AgentConfig {
     agent_id: String,
-    agent_secret: String,
+    hmac_key: String,
     server: String,
     enrolled_at: u64,
 }
@@ -83,6 +67,66 @@ fn config_dir() -> PathBuf {
 
 fn config_path() -> PathBuf {
     config_dir().join("agent.conf")
+}
+
+fn job_history_path() -> PathBuf {
+    config_dir().join("job_history.json")
+}
+
+#[derive(Serialize, Deserialize, Debug, Default)]
+struct JobHistoryFile {
+    job_ids: Vec<String>,
+}
+
+fn load_job_history() -> JobHistoryFile {
+    let path = job_history_path();
+    match std::fs::read_to_string(&path) {
+        Ok(data) => serde_json::from_str::<JobHistoryFile>(&data).unwrap_or_default(),
+        Err(_) => JobHistoryFile::default(),
+    }
+}
+
+fn save_job_history(file: &JobHistoryFile) {
+    let path = job_history_path();
+    let _ = std::fs::create_dir_all(config_dir());
+    if let Ok(json) = serde_json::to_string_pretty(file) {
+        let _ = std::fs::write(&path, json);
+    }
+}
+
+struct AgentRuntimeState {
+    job_file: JobHistoryFile,
+    job_set: HashSet<String>,
+}
+
+impl AgentRuntimeState {
+    fn load() -> Self {
+        let job_file = load_job_history();
+        let job_set = job_file.job_ids.iter().cloned().collect::<HashSet<_>>();
+        Self { job_file, job_set }
+    }
+
+    fn has_job(&self, job_id: &str) -> bool {
+        self.job_set.contains(job_id)
+    }
+
+    fn remember_job(&mut self, job_id: &str) {
+        if self.job_set.contains(job_id) {
+            return;
+        }
+        self.job_set.insert(job_id.to_string());
+        self.job_file.job_ids.push(job_id.to_string());
+        if self.job_file.job_ids.len() > MAX_JOB_HISTORY {
+            let overflow = self.job_file.job_ids.len() - MAX_JOB_HISTORY;
+            for _ in 0..overflow {
+                if let Some(old) = self.job_file.job_ids.first().cloned() {
+                    self.job_file.job_ids.remove(0);
+                    self.job_set.remove(&old);
+                }
+            }
+        }
+        save_job_history(&self.job_file);
+    }
 }
 
 fn save_config(cfg: &AgentConfig) -> Result<(), String> {
@@ -128,14 +172,45 @@ fn now_ms() -> u64 {
         .as_millis() as u64
 }
 
-fn compute_hmac(msg: &serde_json::Value, secret: &str) -> String {
+fn canonicalize_json(v: &serde_json::Value) -> serde_json::Value {
+    match v {
+        serde_json::Value::Null => serde_json::Value::Null,
+        serde_json::Value::Bool(b) => serde_json::Value::Bool(*b),
+        serde_json::Value::Number(n) => serde_json::Value::Number(n.clone()),
+        serde_json::Value::String(s) => serde_json::Value::String(s.clone()),
+        serde_json::Value::Array(arr) => serde_json::Value::Array(arr.iter().map(canonicalize_json).collect()),
+        serde_json::Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut out = serde_json::Map::new();
+            for k in keys {
+                if let Some(v2) = map.get(k) {
+                    out.insert(k.clone(), canonicalize_json(v2));
+                }
+            }
+            serde_json::Value::Object(out)
+        }
+    }
+}
+
+fn compute_sig(msg: &serde_json::Value, secret: &str) -> String {
     let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).expect("HMAC key");
-    // Compute over the message without the hmac field
+    // Compute over the envelope without the sig field, using canonical JSON encoding (sorted keys).
     let mut obj = msg.as_object().unwrap().clone();
-    obj.remove("hmac");
-    let payload = serde_json::to_string(&serde_json::Value::Object(obj)).unwrap();
+    obj.remove("sig");
+    let canonical = canonicalize_json(&serde_json::Value::Object(obj));
+    let payload = serde_json::to_string(&canonical).unwrap();
     mac.update(payload.as_bytes());
     hex::encode(mac.finalize().into_bytes())
+}
+
+fn verify_sig(msg: &serde_json::Value, secret: &str) -> bool {
+    let received = msg.get("sig").and_then(|v| v.as_str()).unwrap_or("");
+    if received.is_empty() {
+        return false;
+    }
+    let expected = compute_sig(msg, secret);
+    received.eq_ignore_ascii_case(&expected)
 }
 
 fn build_message(
@@ -145,15 +220,16 @@ fn build_message(
     secret: &str,
 ) -> String {
     let mut msg = serde_json::json!({
-        "agent_id": agent_id,
+        "type": msg_type,
         "ts": now_ms(),
         "nonce": Uuid::new_v4().to_string(),
-        "type": msg_type,
+        "traceId": Uuid::new_v4().to_string(),
+        "agentId": agent_id,
         "payload": payload,
     });
 
-    let hmac = compute_hmac(&msg, secret);
-    msg["hmac"] = serde_json::Value::String(hmac);
+    let sig = compute_sig(&msg, secret);
+    msg["sig"] = serde_json::Value::String(sig);
 
     serde_json::to_string(&msg).unwrap()
 }
@@ -220,12 +296,28 @@ fn collect_metrics() -> serde_json::Value {
     let mut sys = System::new_all();
     sys.refresh_all();
 
+    let memory_used_bytes = sys.used_memory();
+    let memory_total_bytes = sys.total_memory();
+
+    let disks = sysinfo::Disks::new_with_refreshed_list();
+    let disk_total_bytes: u64 = disks.iter().map(|d| d.total_space()).sum();
+    let disk_used_bytes: u64 = disks
+        .iter()
+        .map(|d| d.total_space().saturating_sub(d.available_space()))
+        .sum();
+
+    // sysinfo returns a floating CPU usage; protocol v1 uses an int percent to avoid
+    // cross-language JSON float formatting issues in the signature.
+    let cpu_percent = sys.global_cpu_usage().round().clamp(0.0, 100.0) as u64;
+
     serde_json::json!({
-        "collected_at": now_ms(),
-        "cpu_percent": sys.global_cpu_usage(),
-        "memory_used_mb": sys.used_memory() as f64 / 1_048_576.0,
-        "memory_total_mb": sys.total_memory() as f64 / 1_048_576.0,
-        "processes_count": sys.processes().len(),
+        "ts": now_ms(),
+        "cpu_percent": cpu_percent,
+        "memory_used_bytes": memory_used_bytes,
+        "memory_total_bytes": memory_total_bytes,
+        "disk_used_bytes": disk_used_bytes,
+        "disk_total_bytes": disk_total_bytes,
+        "process_count": sys.processes().len(),
     })
 }
 
@@ -234,9 +326,10 @@ async fn handle_job(
     agent_id: &str,
     secret: &str,
 ) -> (String, String) {
-    let job_id = job["id"].as_str().unwrap_or("");
-    let job_type = job["type"].as_str().unwrap_or("");
-    let payload = &job["payload"];
+    let job_id = job["job_id"].as_str().unwrap_or("");
+    let job_type = job["name"].as_str().unwrap_or("");
+    let payload = &job["args"];
+    let timeout_sec = job["timeout_sec"].as_u64().unwrap_or(300);
 
     info!(job_id, job_type, "Executing job");
 
@@ -251,24 +344,31 @@ async fn handle_job(
     // Start timer for duration_ms
     let start_time = std::time::Instant::now();
 
-    // Execute based on type
-    let result = match job_type {
-        "run_script" => execute_script(payload).await,
-        "reboot" => {
-            let delay = payload["delay_secs"].as_u64().unwrap_or(0);
-            execute_system_command("reboot", delay).await
+    // Execute based on type, with timeout.
+    let exec = async {
+        match job_type {
+            "run_script" => execute_script(payload).await,
+            "reboot" => {
+                let delay = payload["delay_sec"].as_u64().unwrap_or(0);
+                execute_system_command("reboot", delay).await
+            }
+            "shutdown" => {
+                let delay = payload["delay_sec"].as_u64().unwrap_or(0);
+                execute_system_command("shutdown", delay).await
+            }
+            "collect_metrics" => Ok(collect_metrics()),
+            "collect_inventory" => Ok(collect_inventory()),
+            "process_action" => execute_process_action(payload).await,
+            "service_action" => execute_service_action(payload).await,
+            "edr_kill_process" => execute_edr_kill_process(payload).await,
+            "edr_isolate_machine" => execute_edr_isolate(payload).await,
+            _ => Err(format!("Unsupported job type: {}", job_type)),
         }
-        "shutdown" => {
-            let delay = payload["delay_secs"].as_u64().unwrap_or(0);
-            execute_system_command("shutdown", delay).await
-        }
-        "collect_metrics" => Ok(collect_metrics()),
-        "collect_inventory" => Ok(collect_inventory()),
-        "process_action" => execute_process_action(payload).await,
-        "service_action" => execute_service_action(payload).await,
-        "edr_kill_process" => execute_edr_kill_process(payload).await,
-        "edr_isolate_machine" => execute_edr_isolate(payload).await,
-        _ => Err(format!("Unsupported job type: {}", job_type)),
+    };
+
+    let result = match tokio::time::timeout(Duration::from_secs(timeout_sec), exec).await {
+        Ok(inner) => inner,
+        Err(_) => Err("timeout".to_string()),
     };
 
     let duration_ms = start_time.elapsed().as_millis() as u64;
@@ -302,12 +402,13 @@ async fn handle_job(
             )
         }
         Err(err) => {
+            let status = if err == "timeout" { "timeout" } else { "failed" };
             build_message(
                 agent_id,
                 "job_result",
                 serde_json::json!({
                     "job_id": job_id,
-                    "status": "failed",
+                    "status": status,
                     "error": err,
                     "duration_ms": duration_ms,
                 }),
@@ -367,10 +468,11 @@ fn collect_inventory() -> serde_json::Value {
     let mut procs: Vec<_> = sys.processes().values().collect();
     procs.sort_by(|a, b| b.cpu_usage().partial_cmp(&a.cpu_usage()).unwrap_or(std::cmp::Ordering::Equal));
     let top_procs: Vec<serde_json::Value> = procs.iter().take(20).map(|p| {
+        let cpu_percent = p.cpu_usage().round().clamp(0.0, 100.0) as u64;
         serde_json::json!({
             "pid": p.pid().as_u32(),
             "name": p.name().to_string_lossy(),
-            "cpu_percent": p.cpu_usage(),
+            "cpu_percent": cpu_percent,
             "memory_bytes": p.memory(),
             "status": format!("{:?}", p.status()),
             "user": p.user_id().map(|u| format!("{:?}", u)),
@@ -410,10 +512,11 @@ async fn execute_process_action(payload: &serde_json::Value) -> Result<serde_jso
                     .map(|s| s.to_string_lossy())
                     .collect::<Vec<_>>()
                     .join(" ");
+                let cpu_percent = p.cpu_usage().round().clamp(0.0, 100.0) as u64;
                 serde_json::json!({
                     "pid": p.pid().as_u32(),
                     "name": p.name().to_string_lossy(),
-                    "cpu_percent": p.cpu_usage(),
+                    "cpu_percent": cpu_percent,
                     "memory_bytes": p.memory(),
                     "status": format!("{:?}", p.status()),
                     "start_time": p.start_time(),
@@ -422,9 +525,9 @@ async fn execute_process_action(payload: &serde_json::Value) -> Result<serde_jso
                 })
             }).collect();
             procs.sort_by(|a, b| {
-                let ca = a["cpu_percent"].as_f64().unwrap_or(0.0);
-                let cb = b["cpu_percent"].as_f64().unwrap_or(0.0);
-                cb.partial_cmp(&ca).unwrap_or(std::cmp::Ordering::Equal)
+                let ca = a["cpu_percent"].as_u64().unwrap_or(0);
+                let cb = b["cpu_percent"].as_u64().unwrap_or(0);
+                cb.cmp(&ca)
             });
             Ok(serde_json::json!({ "processes": procs, "total": procs.len() }))
         }
@@ -705,20 +808,24 @@ async fn main() {
     info!("MASSVISION Reap3r Agent starting...");
     info!(server = %args.server, "Connecting to server");
 
+    let mut state = AgentRuntimeState::load();
+    let mut backoff_secs: u64 = 1;
+
     loop {
-        match run_agent(&args).await {
-            Ok(()) => {
-                warn!("Connection closed. Reconnecting in 5s...");
-            }
-            Err(e) => {
-                error!(error = %e, "Agent error. Reconnecting in 5s...");
-            }
+        let res = run_agent(&args, &mut state).await;
+        match &res {
+            Ok(()) => warn!("Connection closed. Reconnecting..."),
+            Err(e) => error!(error = %e, "Agent error. Reconnecting..."),
         }
-        tokio::time::sleep(Duration::from_secs(5)).await;
+
+        // Exponential backoff with jitter (max 60s). Reset on a clean session close.
+        let jitter_ms = (Uuid::new_v4().as_u128() % 500) as u64; // 0..499ms
+        tokio::time::sleep(Duration::from_millis(backoff_secs * 1000 + jitter_ms)).await;
+        backoff_secs = if res.is_ok() { 1 } else { (backoff_secs * 2).min(60) };
     }
 }
 
-async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
+async fn run_agent(args: &Args, state: &mut AgentRuntimeState) -> Result<(), Box<dyn std::error::Error>> {
     let url = url::Url::parse(&args.server)?;
     let (ws_stream, _) = connect_async(url.as_str()).await?;
     let (mut write, mut read) = ws_stream.split();
@@ -728,20 +835,19 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     let (hostname, os, arch, os_version) = get_system_info();
 
     // Determine if we need to enroll or reconnect
-    let (agent_id, agent_secret) = if let (Some(id), Some(secret)) = (&args.agent_id, &args.agent_secret) {
+    let (agent_id, hmac_key) = if let (Some(id), Some(key)) = (&args.agent_id, &args.hmac_key) {
         info!(agent_id = %id, "Reconnecting with CLI-provided identity");
-        (id.clone(), secret.clone())
-    } else if let Some(saved) = load_config() {
-        // Auto-reconnect with persisted credentials
-        info!(agent_id = %saved.agent_id, "Reconnecting with saved config");
-        (saved.agent_id, saved.agent_secret)
+        (id.clone(), key.clone())
     } else if let Some(token) = &args.token {
+        // If a token is provided, force enrollment. This prevents "stuck" installs where a
+        // previously saved (agent_id,hmac_key) pair no longer matches the backend secret.
         info!("Enrolling with token...");
         // Send enrollment
         let enroll_msg = serde_json::json!({
-            "agent_id": "00000000-0000-0000-0000-000000000000",
+            "agentId": "00000000-0000-0000-0000-000000000000",
             "ts": now_ms(),
             "nonce": Uuid::new_v4().to_string(),
+            "traceId": Uuid::new_v4().to_string(),
             "type": "enroll_request",
             "payload": {
                 "hostname": hostname,
@@ -751,7 +857,6 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 "agent_version": env!("CARGO_PKG_VERSION"),
                 "enrollment_token": token,
             },
-            "hmac": "0".repeat(64),
         });
 
         write.send(Message::Text(serde_json::to_string(&enroll_msg)?)).await?;
@@ -766,39 +871,39 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                     return Err(format!("Enrollment failed: {}", err).into());
                 }
 
-                // Backend variants:
-                // - { success:true, agent_id, agent_secret }
-                // - { agent_id, hmac_key, ... }   (global HMAC key)
                 let id = payload["agent_id"]
                     .as_str()
                     .ok_or("Enrollment response missing agent_id")?
                     .to_string();
 
-                let secret = payload["agent_secret"]
+                let key = payload["hmac_key"]
                     .as_str()
-                    .or_else(|| payload["hmac_key"].as_str())
-                    .ok_or("Enrollment response missing agent_secret/hmac_key")?
+                    .ok_or("Enrollment response missing hmac_key")?
                     .to_string();
 
-                info!(agent_id = %id, "Enrollment successful!");
-                // Persist agent_id + secret to config file
+                info!(agent_id = %id, "Enrolled OK");
+                // Persist agent_id + hmac_key to config file
                 if let Err(e) = save_config(&AgentConfig {
                     agent_id: id.clone(),
-                    agent_secret: secret.clone(),
+                    hmac_key: key.clone(),
                     server: args.server.clone(),
                     enrolled_at: now_ms(),
                 }) {
                     warn!(error = %e, "Failed to save agent config - agent will need re-enrollment on next restart");
                 }
-                (id, secret)
+                (id, key)
             } else {
                 return Err("Unexpected response during enrollment".into());
             }
         } else {
             return Err("No response from server during enrollment".into());
         }
+    } else if let Some(saved) = load_config() {
+        // Auto-reconnect with persisted credentials
+        info!(agent_id = %saved.agent_id, "Reconnecting with saved config");
+        (saved.agent_id, saved.hmac_key)
     } else {
-        return Err("No agent_id/secret or enrollment token provided".into());
+        return Err("No agent_id/hmac_key or enrollment token provided".into());
     };
 
     // Send capabilities
@@ -809,13 +914,13 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
             "capabilities": get_capabilities(),
             "modules_version": { "core": env!("CARGO_PKG_VERSION") },
         }),
-        &agent_secret,
+        &hmac_key,
     );
     write.send(Message::Text(caps_msg)).await?;
 
     // Spawn heartbeat task
     let agent_id_hb = agent_id.clone();
-    let secret_hb = agent_secret.clone();
+    let key_hb = hmac_key.clone();
     let hb_interval = args.heartbeat_interval;
 
     let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
@@ -827,16 +932,22 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
         loop {
             interval.tick().await;
             let metrics = collect_metrics();
+            let mem_used = metrics["memory_used_bytes"].as_u64().unwrap_or(0);
+            let mem_total = metrics["memory_total_bytes"].as_u64().unwrap_or(0);
+            let disk_used = metrics["disk_used_bytes"].as_u64().unwrap_or(0);
+            let disk_total = metrics["disk_total_bytes"].as_u64().unwrap_or(0);
+
+            let memory_percent = if mem_total > 0 { ((mem_used as f64 / mem_total as f64) * 100.0).round() as u64 } else { 0 };
+            let disk_percent = if disk_total > 0 { ((disk_used as f64 / disk_total as f64) * 100.0).round() as u64 } else { 0 };
             let hb = build_message(
                 &agent_id_hb,
                 "heartbeat",
                 serde_json::json!({
-                    "uptime_secs": sysinfo::System::uptime(),
-                    "cpu_percent": metrics["cpu_percent"],
-                    "memory_used_mb": metrics["memory_used_mb"],
-                    "memory_total_mb": metrics["memory_total_mb"],
+                    "uptime_sec": sysinfo::System::uptime(),
+                    "memory_percent": memory_percent,
+                    "disk_percent": disk_percent,
                 }),
-                &secret_hb,
+                &key_hb,
             );
             if tx_hb.send(hb).await.is_err() {
                 break;
@@ -847,7 +958,7 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                 &agent_id_hb,
                 "metrics_push",
                 metrics,
-                &secret_hb,
+                &key_hb,
             );
             if tx_hb.send(metrics_msg).await.is_err() {
                 break;
@@ -861,7 +972,7 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                     &agent_id_hb,
                     "inventory_push",
                     inv,
-                    &secret_hb,
+                    &key_hb,
                 );
                 if tx_hb.send(inv_msg).await.is_err() {
                     break;
@@ -875,7 +986,7 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                     &agent_id_hb,
                     "security_event_push",
                     alert,
-                    &secret_hb,
+                    &key_hb,
                 );
                 if tx_hb.send(sec_msg).await.is_err() {
                     break;
@@ -887,7 +998,7 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
     // Main loop: read messages + send outgoing
     let tx_jobs = tx.clone();
     let agent_id_loop = agent_id.clone();
-    let secret_loop = agent_secret.clone();
+    let key_loop = hmac_key.clone();
 
     loop {
         tokio::select! {
@@ -898,19 +1009,45 @@ async fn run_agent(args: &Args) -> Result<(), Box<dyn std::error::Error>> {
                         let msg_type = data["type"].as_str().unwrap_or("");
 
                         if msg_type == "job_assign" {
+                            if !verify_sig(&data, &key_loop) {
+                                warn!("Received job_assign with invalid signature, ignoring");
+                                continue;
+                            }
                             // Backend sends job in payload field (protocol standard)
                             let job = &data["payload"];
                             if job.is_null() {
                                 warn!("Received job_assign with no payload, ignoring");
                                 continue;
                             }
+
+                            let job_id = job["job_id"].as_str().unwrap_or("");
+                            if job_id.is_empty() {
+                                warn!("Received job_assign with missing job_id, ignoring");
+                                continue;
+                            }
+                            if state.has_job(job_id) {
+                                warn!(job_id, "Duplicate job_id received; rejecting (idempotence)");
+                                let rej = build_message(
+                                    &agent_id_loop,
+                                    "job_ack",
+                                    serde_json::json!({ "job_id": job_id, "status": "rejected", "reason": "duplicate" }),
+                                    &key_loop,
+                                );
+                                tx_jobs.send(rej).await.ok();
+                                continue;
+                            }
                             
-                            let (ack_msg, result_msg) = handle_job(job, &agent_id_loop, &secret_loop).await;
+                            let (ack_msg, result_msg) = handle_job(job, &agent_id_loop, &key_loop).await;
                             // Send ACK first
                             tx_jobs.send(ack_msg).await.ok();
                             // Then send result
                             tx_jobs.send(result_msg).await.ok();
+                            state.remember_job(job_id);
                         }
+                    }
+                    Message::Ping(p) => {
+                        // Respond quickly to keep the connection alive behind proxies/NATs.
+                        write.send(Message::Pong(p)).await?;
                     }
                     Message::Close(_) => {
                         info!("Server closed connection");

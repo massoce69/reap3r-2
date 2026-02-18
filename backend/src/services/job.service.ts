@@ -14,13 +14,23 @@ export async function createJob(
     org_id: string;
     reason?: string;
     priority?: number;
+    timeout_sec?: number;
   },
 ) {
   const { rows } = await fastify.pg.query(
-    `INSERT INTO jobs (agent_id, type, payload, created_by, org_id, reason, priority)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)
+    `INSERT INTO jobs (agent_id, type, payload, created_by, org_id, reason, priority, status, timeout_secs)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, 'pending', $8)
      RETURNING *`,
-    [data.agent_id, data.job_type, JSON.stringify(data.payload), data.created_by, data.org_id, data.reason ?? null, data.priority ?? 0],
+    [
+      data.agent_id,
+      data.job_type,
+      JSON.stringify(data.payload),
+      data.created_by,
+      data.org_id,
+      data.reason ?? null,
+      data.priority ?? 0,
+      data.timeout_sec ?? 300,
+    ],
   );
   return rows[0];
 }
@@ -84,7 +94,8 @@ export async function getJobById(fastify: FastifyInstance, id: string) {
 /* ── Pending jobs for agent ── */
 export async function getPendingJobs(fastify: FastifyInstance, agentId: string) {
   const { rows } = await fastify.pg.query(
-    `SELECT * FROM jobs WHERE agent_id = $1 AND status = 'pending' ORDER BY priority DESC, created_at ASC`,
+    // Backward compatible: older DBs used 'queued' default.
+    `SELECT * FROM jobs WHERE agent_id = $1 AND status IN ('pending', 'queued') ORDER BY priority DESC, created_at ASC`,
     [agentId],
   );
   return rows;
@@ -101,9 +112,11 @@ export async function updateJobStatus(
   const params: unknown[] = [jobId, status];
   let idx = 3;
 
-  if (status === 'running') {
+  if (status === 'dispatched') {
+    fields.push('assigned_at = now()');
+  } else if (status === 'running') {
     fields.push('started_at = now()');
-  } else if (status === 'completed' || status === 'failed') {
+  } else if (status === 'completed' || status === 'failed' || status === 'cancelled') {
     fields.push('completed_at = now()');
   }
 
@@ -138,7 +151,7 @@ export async function timeoutExpiredJobs(fastify: FastifyInstance, timeoutMinute
     `UPDATE jobs SET status = 'failed',
        result = jsonb_build_object('error', 'Job timed out'),
        completed_at = now()
-     WHERE status IN ('pending', 'running')
+     WHERE status IN ('pending', 'queued', 'dispatched', 'running')
        AND created_at < now() - interval '1 minute' * $1`,
     [timeoutMinutes],
   );
@@ -147,7 +160,7 @@ export async function timeoutExpiredJobs(fastify: FastifyInstance, timeoutMinute
 /* ── Cancel ── */
 export async function cancelJob(fastify: FastifyInstance, jobId: string) {
   await fastify.pg.query(
-    `UPDATE jobs SET status = 'cancelled', completed_at = now() WHERE id = $1 AND status IN ('pending', 'running')`,
+    `UPDATE jobs SET status = 'cancelled', completed_at = now() WHERE id = $1 AND status IN ('pending', 'queued', 'dispatched', 'running')`,
     [jobId],
   );
 }

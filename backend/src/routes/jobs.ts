@@ -35,7 +35,7 @@ export default async function jobRoutes(fastify: FastifyInstance) {
   fastify.post('/api/jobs', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.JobCreate)] }, async (request, reply) => {
     const body = parseBody(CreateJobSchema, request.body, reply);
     if (!body) return;
-    const { agent_id, job_type, payload, reason, priority } = body;
+    const { agent_id, job_type, payload, reason, priority, timeout_sec } = body;
 
     // Check job-type specific permission
     const requiredPerm = JobTypePermission[job_type as JobType];
@@ -57,6 +57,7 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       org_id: request.currentUser.org_id,
       reason,
       priority,
+      timeout_sec,
     });
 
     await createAuditLog(fastify, {
@@ -65,13 +66,7 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       details: { agent_id, job_type, reason }, ip_address: request.ip,
     });
 
-    // Broadcast to WS for the target agent
-    if (fastify.agentSockets) {
-      const ws = fastify.agentSockets.get(agent_id);
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'job:dispatch', payload: job }));
-      }
-    }
+    // Agent gateway dispatches on the next heartbeat to keep the wire protocol strictly v1 (no ad-hoc messages).
 
     return reply.status(201).send(job);
   });
@@ -82,7 +77,7 @@ export default async function jobRoutes(fastify: FastifyInstance) {
     if (!id) return;
     const job = await jobService.getJobById(fastify, id);
     if (!job) return reply.status(404).send({ statusCode: 404, error: 'Not Found' });
-    if (!['pending', 'running'].includes(job.status)) {
+    if (!['pending', 'queued', 'dispatched', 'running'].includes(job.status)) {
       return reply.status(400).send({ statusCode: 400, error: 'Bad Request', message: 'Job is not cancellable' });
     }
     await jobService.cancelJob(fastify, id);
@@ -101,7 +96,7 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       `SELECT status, count(*)::int FROM jobs WHERE org_id = $1 GROUP BY status`,
       [orgId],
     );
-    const stats: Record<string, number> = { pending: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    const stats: Record<string, number> = { pending: 0, queued: 0, dispatched: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
     for (const r of res.rows) {
       stats[r.status] = r.count;
     }

@@ -36,29 +36,29 @@ export async function listAuditLogs(
   let idx = 1;
 
   if (opts.org_id) {
-    conditions.push(`org_id = $${idx++}`);
+    conditions.push(`al.org_id = $${idx++}`);
     params.push(opts.org_id);
   }
   if (opts.user_id) {
-    conditions.push(`user_id = $${idx++}`);
+    conditions.push(`al.user_id = $${idx++}`);
     params.push(opts.user_id);
   }
   if (opts.entity_type) {
-    conditions.push(`resource_type = $${idx++}`);
+    conditions.push(`al.resource_type = $${idx++}`);
     params.push(opts.entity_type);
   }
   if (opts.entity_id) {
-    conditions.push(`resource_id = $${idx++}`);
+    conditions.push(`al.resource_id = $${idx++}`);
     params.push(opts.entity_id);
   }
   if (opts.action) {
-    conditions.push(`action ILIKE $${idx++}`);
+    conditions.push(`al.action ILIKE $${idx++}`);
     params.push(`%${opts.action}%`);
   }
 
   const where = conditions.length > 0 ? `WHERE ${conditions.join(' AND ')}` : '';
 
-  const countRes = await fastify.pg.query(`SELECT count(*)::int FROM audit_logs ${where}`, params);
+  const countRes = await fastify.pg.query(`SELECT count(*)::int FROM audit_logs al ${where}`, params);
   const total = countRes.rows[0].count;
 
   const dataRes = await fastify.pg.query(

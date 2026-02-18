@@ -1,196 +1,203 @@
-#!/usr/bin/env -S npx ts-node
-// ─────────────────────────────────────────────
-// MASSVISION Reap3r — Agent Simulator (E2E Test)
-// Usage: npx ts-node agent-sim.ts --server ws://localhost:4001 --token <token>
-// ─────────────────────────────────────────────
-
+#!/usr/bin/env node
+// ------------------------------------------------------------
+// MASSVISION Reap3r — Agent Simulator (Protocol v1)
+// Usage:
+//   npm -w backend run test:agent-sim -- --server=ws://localhost:4001/ws/agent --token=... --secret=...
+// ------------------------------------------------------------
 import WebSocket from 'ws';
-import { v4 as uuidv4 } from 'uuid';
 import crypto from 'crypto';
+import { v4 as uuidv4 } from 'uuid';
+import {
+  MessageType,
+  canonicalJsonStringify,
+  MessageEnvelopeSchema,
+  JobAssignPayload,
+} from '@massvision/shared';
 
-interface AgentMessage {
-  agent_id: string;
-  ts: number;
-  nonce: string;
-  type: string;
-  payload: any;
-  hmac: string;
-}
-
-const args = process.argv.slice(2).reduce((acc, arg) => {
+const argv = process.argv.slice(2).reduce((acc, arg) => {
   const [k, v] = arg.split('=');
-  acc[k.replace('--', '')] = v;
+  acc[k.replace(/^--/, '')] = v;
   return acc;
 }, {} as Record<string, string>);
 
-const SERVER = args.server || 'ws://localhost:4001/ws/agent';
-const TOKEN = args.token || 'test-token-12345';
-const HMAC_SECRET = args.secret || 'dev_hmac_secret_change_in_production_00000000';
+const SERVER = argv.server || process.env.REAP3R_AGENT_SIM_SERVER || 'ws://localhost:4001/ws/agent';
+const TOKEN = argv.token || process.env.REAP3R_ENROLLMENT_TOKEN || '';
+const FALLBACK_SECRET = argv.secret || 'dev_hmac_secret_change_in_production_00000000';
+const HEARTBEAT_EVERY_MS = parseInt(argv.heartbeat_ms || '5000', 10);
 
-console.log(`[agent-sim] Starting...`);
-console.log(`  Server: ${SERVER}`);
-console.log(`  Token:  ${TOKEN}`);
-
-// State
-let agentId = '';
-let agentSecret = '';
-const ws = new WebSocket(SERVER);
-
-function computeHmac(msg: Partial<AgentMessage>): string {
-  const { hmac, ...toSign } = msg;
-  // Canonicalize: sort keys recursively to match backend verification
-  const canonicalize = (obj: any): any => {
-    if (obj === null || typeof obj !== 'object') return obj;
-    if (Array.isArray(obj)) return obj.map(canonicalize);
-    const out: Record<string, any> = {};
-    for (const k of Object.keys(obj).sort()) {
-      out[k] = canonicalize(obj[k]);
-    }
-    return out;
-  };
-  const canonical = JSON.stringify(canonicalize(toSign));
-  return crypto
-    .createHmac('sha256', agentSecret || HMAC_SECRET)
-    .update(canonical)
-    .digest('hex');
+if (!TOKEN) {
+  console.error('[agent-sim] Missing --token=... (or set REAP3R_ENROLLMENT_TOKEN)');
+  process.exit(2);
 }
 
-function buildMessage(type: string, payload: any): string {
-  const msg: Partial<AgentMessage> = {
-    agent_id: agentId || '00000000-0000-0000-0000-000000000000',
+function computeSig(envelopeWithoutSig: any, secret: string): string {
+  const canonical = canonicalJsonStringify(envelopeWithoutSig);
+  return crypto.createHmac('sha256', secret).update(canonical).digest('hex');
+}
+
+function signEnvelope(env: any, secret: string): any {
+  const clone = { ...env };
+  delete clone.sig;
+  return { ...clone, sig: computeSig(clone, secret) };
+}
+
+function buildEnvelope(agentId: string, type: string, payload: any, extra?: Partial<any>) {
+  return {
+    type,
     ts: Date.now(),
     nonce: uuidv4(),
-    type,
+    traceId: uuidv4(),
+    agentId,
     payload,
+    ...(extra ?? {}),
   };
-  const hmac = computeHmac(msg);
-  return JSON.stringify({ ...msg, hmac });
 }
 
-function log(stage: string, msg: string) {
-  console.log(`[agent-sim:${stage}] ${msg}`);
+console.log('[agent-sim] Starting...');
+console.log(`  Server: ${SERVER}`);
+
+let agentId = '00000000-0000-0000-0000-000000000000';
+let hmacKey = '';
+let hbTimer: NodeJS.Timeout | null = null;
+function startHeartbeatLoop() {
+  if (hbTimer) return;
+  hbTimer = setInterval(() => {
+    if (!hmacKey) return;
+    ws.send(JSON.stringify(signEnvelope(
+      buildEnvelope(agentId, MessageType.Heartbeat, {
+        uptime_sec: 123,
+        memory_percent: 10,
+        disk_percent: 5,
+      }),
+      hmacKey,
+    )));
+  }, HEARTBEAT_EVERY_MS);
 }
+
+const ws = new WebSocket(SERVER);
 
 ws.on('open', () => {
-  log('ws', 'Connected to server');
-
-  // 1. Send enrollment request
-  const enrollMsg = buildMessage('enroll_request', {
-    hostname: 'test-agent-001',
+  console.log('[agent-sim] WS connected');
+  const enroll = buildEnvelope(agentId, MessageType.EnrollRequest, {
+    hostname: 'agent-sim',
     os: 'linux',
-    os_version: '5.10',
+    os_version: 'sim',
     arch: 'x86_64',
     agent_version: '1.0.0',
     enrollment_token: TOKEN,
   });
-  log('enroll', `Sending enrollment request (token: ${TOKEN.substring(0, 8)}...)`);
-  ws.send(enrollMsg);
+  // Enrollment is unsigned.
+  ws.send(JSON.stringify(enroll));
 });
 
 ws.on('message', async (data: WebSocket.Data) => {
   const text = data.toString();
+  let msg: any;
   try {
-    const msg: any = JSON.parse(text);
-    const type = msg.type;
+    msg = JSON.parse(text);
+  } catch {
+    console.error('[agent-sim] Invalid JSON from server');
+    process.exit(1);
+  }
 
-    if (type === 'enroll_response') {
-      const { payload } = msg;
-      if (payload.error) {
-        log('enroll', `❌ Error: ${payload.error}`);
-        process.exit(1);
-      }
+  if (msg.type === MessageType.EnrollResponse) {
+    const p = msg.payload || {};
+    if (!p.success) {
+      console.error(`[agent-sim] Enroll failed: ${p.error || 'unknown'}`);
+      process.exit(1);
+    }
+    agentId = p.agent_id;
+    hmacKey = p.hmac_key || FALLBACK_SECRET;
+    console.log(`[agent-sim] Enrolled OK agentId=${agentId}`);
 
-      agentId = payload.agent_id;
-      agentSecret = payload.agent_secret || payload.hmac_key;
-      log('enroll', `✅ Enrolled as ${agentId}`);
-      log('enroll', `   Secret (first 16): ${agentSecret.substring(0, 16)}...`);
+    // Capabilities (signed)
+    ws.send(JSON.stringify(signEnvelope(
+      buildEnvelope(agentId, MessageType.Capabilities, {
+        capabilities: ['run_script', 'metrics', 'inventory'],
+        modules_version: { core: 'sim' },
+      }),
+      hmacKey,
+    )));
 
-      // 2. Send capabilities
-      const capsMsg = buildMessage('capabilities', {
-        capabilities: ['run_script', 'metrics', 'inventory', 'remote_shell'],
-        modules_version: { core: '1.0.0' },
-      });
-      log('caps', 'Sending capabilities...');
-      ws.send(capsMsg);
+    // Heartbeat (signed)
+    ws.send(JSON.stringify(signEnvelope(
+      buildEnvelope(agentId, MessageType.Heartbeat, {
+        uptime_sec: 123,
+        memory_percent: 10,
+        disk_percent: 5,
+      }),
+      hmacKey,
+    )));
+    startHeartbeatLoop();
 
-      // 3. Send heartbeat
-      setTimeout(() => {
-        const hbMsg = buildMessage('heartbeat', {
-          uptime_secs: 3600,
-          cpu_percent: 15.2,
-          memory_used_mb: 512,
-          memory_total_mb: 8192,
-        });
-        log('heartbeat', 'Sending heartbeat...');
-        ws.send(hbMsg);
-      }, 500);
+    // Metrics (signed)
+    ws.send(JSON.stringify(signEnvelope(
+      buildEnvelope(agentId, MessageType.MetricsPush, {
+        ts: Date.now(),
+        cpu_percent: 7,
+        memory_total_bytes: 8_000_000_000,
+        memory_used_bytes: 900_000_000,
+        disk_total_bytes: 200_000_000_000,
+        disk_used_bytes: 20_000_000_000,
+        process_count: 42,
+      }),
+      hmacKey,
+    )));
 
-      // 4. Wait for job_assign
-      log('job', 'Waiting for job assignment...');
-    } else if (type === 'job_assign') {
-      const { payload } = msg;
-      const job = payload;
-      const jobId = job.id;
-      const jobType = job.type;
+    console.log('[agent-sim] Waiting for job_assign...');
+    return;
+  }
 
-      log('job', `✅ Received job: ${jobId} (type: ${jobType})`);
+  // For all non-enroll_response server messages, validate the envelope shape.
+  const parsed = MessageEnvelopeSchema.safeParse(msg);
+  if (!parsed.success) {
+    console.error('[agent-sim] Invalid envelope from server');
+    console.error('[agent-sim] raw:', JSON.stringify(msg));
+    process.exit(1);
+  }
 
-      // Send ACK
-      const ackMsg = buildMessage('job_ack', {
-        job_id: jobId,
-        status: 'running',
-      });
-      log('job_ack', `Sending ACK for ${jobId}...`);
-      ws.send(ackMsg);
+  if (msg.type === MessageType.JobAssign) {
+    const jobParsed = JobAssignPayload.safeParse(msg.payload);
+    if (!jobParsed.success) {
+      console.error('[agent-sim] Invalid job_assign payload');
+      process.exit(1);
+    }
 
-      // Simulate execution delay
-      await new Promise((r) => setTimeout(r, 500));
+    const job = jobParsed.data;
+    console.log(`[agent-sim] Got job_assign job_id=${job.job_id} name=${job.name}`);
 
-      // Send result
-      const resultMsg = buildMessage('job_result', {
-        job_id: jobId,
+    ws.send(JSON.stringify(signEnvelope(
+      buildEnvelope(agentId, MessageType.JobAck, { job_id: job.job_id, status: 'running' }),
+      hmacKey,
+    )));
+
+    // Simulate execution and return result.
+    await new Promise((r) => setTimeout(r, 200));
+    ws.send(JSON.stringify(signEnvelope(
+      buildEnvelope(agentId, MessageType.JobResult, {
+        job_id: job.job_id,
         status: 'success',
         exit_code: 0,
-        stdout: 'Job executed successfully',
+        stdout: 'ok',
         stderr: '',
-        duration_ms: 523,
-      });
-      log('job_result', `Sending result for ${jobId}...`);
-      ws.send(resultMsg);
+        duration_ms: 200,
+      }),
+      hmacKey,
+    )));
 
-      // Keep connection alive for a bit then close
-      await new Promise((r) => setTimeout(r, 2000));
-      log('done', '✅ All tests passed! Closing connection.');
-      ws.close();
-      process.exit(0);
-    } else if (type === 'error') {
-      const payload = msg.payload;
-      log('error', `Server error: ${payload?.message || text}`);
-      process.exit(1);
-    } else {
-      log('msg', `Received: ${type}`);
-    }
-  } catch (err) {
-    log('error', `Failed to parse message: ${err}`);
+    console.log('[agent-sim] E2E OK');
+    if (hbTimer) clearInterval(hbTimer);
+    ws.close();
+    process.exit(0);
   }
 });
 
 ws.on('error', (err: Error) => {
-  log('error', `WebSocket error: ${err.message}`);
+  console.error('[agent-sim] WS error:', err.message);
   process.exit(1);
 });
 
-ws.on('close', () => {
-  log('ws', 'Connection closed');
-  // If we haven't exited yet, something went wrong
-  if (!agentId) {
-    log('error', '❌ Did not complete enrollment');
-    process.exit(1);
-  }
-});
-
-// Timeout after 30s
 setTimeout(() => {
-  log('timeout', '❌ Test timed out after 30s');
+  console.error('[agent-sim] Timeout (30s)');
   process.exit(1);
-}, 30000);
+}, 30_000);

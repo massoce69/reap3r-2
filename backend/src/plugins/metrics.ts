@@ -36,6 +36,12 @@ async function metricsPlugin(fastify: FastifyInstance) {
     registers: [register],
   });
 
+  const wsAuthFailed = new client.Counter({
+    name: 'ws_auth_failed_total',
+    help: 'Total number of WS auth/signature failures',
+    registers: [register],
+  });
+
   // Track request duration
   fastify.addHook('onResponse', async (request, reply) => {
     const route = request.routeOptions?.url ?? request.url;
@@ -52,7 +58,7 @@ async function metricsPlugin(fastify: FastifyInstance) {
   });
 
   // Make counters accessible
-  fastify.decorate('metrics', { wsConnections, agentsOnline, jobsTotal, register });
+  fastify.decorate('metrics', { wsConnections, agentsOnline, jobsTotal, wsAuthFailed, register });
 }
 
 export default fp(metricsPlugin, { name: 'metrics' });
@@ -63,6 +69,7 @@ declare module 'fastify' {
       wsConnections: import('prom-client').Gauge;
       agentsOnline: import('prom-client').Gauge;
       jobsTotal: import('prom-client').Counter;
+      wsAuthFailed: import('prom-client').Counter;
       register: import('prom-client').Registry;
     };
   }

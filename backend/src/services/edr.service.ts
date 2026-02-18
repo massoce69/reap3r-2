@@ -32,13 +32,13 @@ export async function ingestSecurityEvent(orgId: string, agentId: string, event:
 export async function listSecurityEvents(orgId: string, params: {
   page: number; limit: number; agent_id?: string; event_type?: string; severity?: string;
 }) {
-  const conditions = ['org_id = $1'];
+  const conditions = ['se.org_id = $1'];
   const vals: unknown[] = [orgId];
   let idx = 2;
 
-  if (params.agent_id) { conditions.push(`agent_id = $${idx}`); vals.push(params.agent_id); idx++; }
-  if (params.event_type) { conditions.push(`event_type = $${idx}`); vals.push(params.event_type); idx++; }
-  if (params.severity) { conditions.push(`severity = $${idx}`); vals.push(params.severity); idx++; }
+  if (params.agent_id) { conditions.push(`se.agent_id = $${idx}`); vals.push(params.agent_id); idx++; }
+  if (params.event_type) { conditions.push(`se.event_type = $${idx}`); vals.push(params.event_type); idx++; }
+  if (params.severity) { conditions.push(`se.severity = $${idx}`); vals.push(params.severity); idx++; }
 
   const where = conditions.join(' AND ');
   const offset = (params.page - 1) * params.limit;
@@ -50,7 +50,7 @@ export async function listSecurityEvents(orgId: string, params: {
        WHERE ${where} ORDER BY se.created_at DESC LIMIT $${idx} OFFSET $${idx + 1}`,
       [...vals, params.limit, offset]
     ),
-    query(`SELECT COUNT(*)::int AS total FROM security_events WHERE ${where}`, vals),
+    query(`SELECT COUNT(*)::int AS total FROM security_events se WHERE ${where}`, vals),
   ]);
 
   return { data: dataRes.rows, total: countRes.rows[0].total, page: params.page, limit: params.limit };

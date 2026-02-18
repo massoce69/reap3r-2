@@ -107,8 +107,10 @@ export default async function agentBinaryRoutes(fastify: FastifyInstance) {
       return reply.status(404).send({ statusCode: 404, error: 'Not Found', message: 'Agent binary not found on server' });
     }
 
-    const baseName =
-      os === 'windows' ? resolved.fileName.replace(/\\.exe$/i, '') : resolved.fileName;
+    // Build a stable filename regardless of what the on-disk filename is.
+    // Example: reap3r-agent-windows-x86_64.exe
+    const parsed = path.parse(resolved.fileName);
+    const baseName = parsed.name; // strips extension
     const ext = os === 'windows' ? '.exe' : '';
     const downloadName = `${baseName}-${os}-${arch}${ext}`;
     reply.header('Content-Type', 'application/octet-stream');

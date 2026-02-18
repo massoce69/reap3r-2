@@ -18,19 +18,24 @@ if (!connectionString) {
 
 const pool = new Pool({ connectionString });
 
-const ADMIN_EMAIL = 'admin@massvision.local';
-const ADMIN_PASSWORD = 'Admin123!@#';
+const ADMIN_EMAIL = process.env.REAP3R_ADMIN_EMAIL || 'admin@massvision.local';
+const ADMIN_PASSWORD_ENV = process.env.REAP3R_ADMIN_PASSWORD;
+if (!ADMIN_PASSWORD_ENV) {
+  console.error('ERROR: REAP3R_ADMIN_PASSWORD environment variable is required.');
+  console.error('Example:');
+  console.error('  REAP3R_ADMIN_PASSWORD=... DATABASE_URL=... npx tsx src/scripts/reset-admin.ts');
+  process.exit(1);
+}
+const ADMIN_PASSWORD: string = ADMIN_PASSWORD_ENV;
 
 async function run() {
   const client = await pool.connect();
   try {
     console.log('[reset-admin] Starting...');
     console.log('[reset-admin] Target email:', ADMIN_EMAIL);
-    console.log('[reset-admin] Target password:', ADMIN_PASSWORD);
 
     // 1. Generate bcrypt hash
     const hash = await bcrypt.hash(ADMIN_PASSWORD, 12);
-    console.log('[reset-admin] Generated bcrypt hash:', hash.substring(0, 20) + '...');
 
     // 2. Verify hash works BEFORE writing to DB
     const verifyBefore = await bcrypt.compare(ADMIN_PASSWORD, hash);
@@ -80,7 +85,7 @@ async function run() {
     if (verifyAfter) {
       console.log('\n[reset-admin] SUCCESS! You can now login with:');
       console.log('  Email:    ' + ADMIN_EMAIL);
-      console.log('  Password: ' + ADMIN_PASSWORD);
+      console.log('  Password: (the one you set in REAP3R_ADMIN_PASSWORD)');
     } else {
       console.error('\n[reset-admin] FAILED! Hash stored in DB does not match password.');
       process.exit(1);

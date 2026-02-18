@@ -1,11 +1,33 @@
-// ─────────────────────────────────────────────
-// MASSVISION Reap3r — Agent WebSocket Gateway
-// ─────────────────────────────────────────────
+// ------------------------------------------------------------
+// MASSVISION Reap3r — Agent WebSocket Gateway (Protocol v1)
+// ------------------------------------------------------------
+//
+// P0 requirements:
+// - Single protocol source of truth: @massvision/shared (shared/src/protocol.ts)
+// - Enrollment is the only unsigned message.
+// - All other agent messages must be signed:
+//   sig = HMAC_SHA256(HMAC_SECRET, canonical_json(envelope_without_sig))
+// - Close WS on invalid signature (fail-closed).
+//
 import { WebSocketServer, WebSocket as WS, RawData } from 'ws';
 import crypto from 'crypto';
-import { config } from '../config.js';
+import { v4 as uuidv4 } from 'uuid';
 import { FastifyInstance } from 'fastify';
-import { MessageType, ANTI_REPLAY_WINDOW_MS } from '@massvision/shared';
+import { config } from '../config.js';
+import {
+  MessageType,
+  ANTI_REPLAY_WINDOW_MS,
+  MessageEnvelopeSchema,
+  canonicalJsonStringify,
+  EnrollRequestPayload,
+  HeartbeatPayload,
+  MetricsPushPayload,
+  InventoryPushPayload,
+  CapabilitiesPayload,
+  JobAckPayload,
+  JobResultPayload,
+} from '@massvision/shared';
+
 import * as agentService from '../services/agent.service.js';
 import * as jobService from '../services/job.service.js';
 import { ingestSecurityEvent } from '../services/edr.service.js';
@@ -15,15 +37,13 @@ declare module 'fastify' {
     agentSockets: Map<string, WS>;
     uiSockets: Set<WS>;
     broadcastToUI: (event: string, data: unknown) => void;
+    agentWsPort?: number;
   }
 }
 
-// Nonce replay cache
+// Nonce replay cache (best-effort).
 const recentNonces = new Set<string>();
-const NONCE_CLEANUP_INTERVAL = 60_000;
-
-const agentSecretCache = new Map<string, { secret: string; expiresAt: number }>();
-const AGENT_SECRET_CACHE_TTL_MS = 10 * 60_000;
+const NONCE_CLEANUP_INTERVAL_MS = 60_000;
 
 function safeTimingEqualHex(aHex: string, bHex: string): boolean {
   try {
@@ -36,185 +56,18 @@ function safeTimingEqualHex(aHex: string, bHex: string): boolean {
   }
 }
 
-function canonicalizeJson(value: any): any {
-  if (value === null || value === undefined) return value;
-  if (Array.isArray(value)) return value.map(canonicalizeJson);
-  if (typeof value !== 'object') return value;
-
-  const out: Record<string, any> = {};
-  for (const k of Object.keys(value).sort()) {
-    out[k] = canonicalizeJson(value[k]);
-  }
-  return out;
+function computeSig(envelopeWithoutSig: any, secret: string): string {
+  const canonical = canonicalJsonStringify(envelopeWithoutSig);
+  return crypto.createHmac('sha256', secret).update(canonical).digest('hex');
 }
 
-function hmacPayloadForMessage(msg: any): string {
+function verifySig(msg: any, secret: string): boolean {
+  const received = typeof msg?.sig === 'string' ? msg.sig : '';
+  if (!received) return false;
   const clone = { ...msg };
-  delete clone.hmac;
-  // The Rust agent uses serde_json::to_string on a map which sorts keys by default.
-  // Use a stable canonical JSON encoding here so HMAC verification matches cross-language.
-  return JSON.stringify(canonicalizeJson(clone));
-}
-
-function hmacPayloadCandidates(msg: any): string[] {
-  // Different agent builds / JSON implementations may preserve insertion order or sort keys.
-  // Accept both encodings for compatibility.
-  const clone = { ...msg };
-  delete clone.hmac;
-  return [
-    JSON.stringify(clone),
-    JSON.stringify(canonicalizeJson(clone)),
-  ];
-}
-
-function parseJsonString(raw: string, start: number): { value: string; end: number } | null {
-  // Minimal JSON string parser (enough for top-level keys).
-  if (raw[start] !== '"') return null;
-  let i = start + 1;
-  let out = '';
-  while (i < raw.length) {
-    const ch = raw[i];
-    if (ch === '"') return { value: out, end: i + 1 };
-    if (ch === '\\') {
-      i++;
-      if (i >= raw.length) return null;
-      const esc = raw[i];
-      switch (esc) {
-        case '"': out += '"'; break;
-        case '\\': out += '\\'; break;
-        case '/': out += '/'; break;
-        case 'b': out += '\b'; break;
-        case 'f': out += '\f'; break;
-        case 'n': out += '\n'; break;
-        case 'r': out += '\r'; break;
-        case 't': out += '\t'; break;
-        case 'u': {
-          const hex = raw.slice(i + 1, i + 5);
-          if (hex.length !== 4 || !/^[0-9a-fA-F]{4}$/.test(hex)) return null;
-          out += String.fromCharCode(parseInt(hex, 16));
-          i += 4;
-          break;
-        }
-        default:
-          return null;
-      }
-      i++;
-      continue;
-    }
-    out += ch;
-    i++;
-  }
-  return null;
-}
-
-function skipWs(raw: string, i: number): number {
-  while (i < raw.length) {
-    const c = raw[i];
-    if (c !== ' ' && c !== '\t' && c !== '\n' && c !== '\r') return i;
-    i++;
-  }
-  return i;
-}
-
-function scanJsonValueEnd(raw: string, start: number): number | null {
-  // Returns index (exclusive) for the end of a JSON value starting at `start`.
-  let i = skipWs(raw, start);
-  if (i >= raw.length) return null;
-
-  const first = raw[i];
-  if (first === '"') {
-    const s = parseJsonString(raw, i);
-    return s ? s.end : null;
-  }
-
-  if (first === '{' || first === '[') {
-    const open = first;
-    const close = first === '{' ? '}' : ']';
-    let depth = 0;
-    while (i < raw.length) {
-      const ch = raw[i];
-      if (ch === '"') {
-        const s = parseJsonString(raw, i);
-        if (!s) return null;
-        i = s.end;
-        continue;
-      }
-      if (ch === open) depth++;
-      if (ch === close) {
-        depth--;
-        if (depth === 0) return i + 1;
-      }
-      i++;
-    }
-    return null;
-  }
-
-  // number | true | false | null
-  while (i < raw.length) {
-    const ch = raw[i];
-    if (ch === ',' || ch === '}' || ch === ']' || ch === ' ' || ch === '\t' || ch === '\n' || ch === '\r') {
-      return i;
-    }
-    i++;
-  }
-  return i;
-}
-
-function stripTopLevelHmac(raw: string): string | null {
-  // Build a raw JSON object string without the top-level "hmac" property, preserving the original
-  // raw value substrings (important for float formatting like 0.0 vs 0).
-  let i = skipWs(raw, 0);
-  if (raw[i] !== '{') return null;
-  i++;
-
-  const keptPairs: string[] = [];
-  let removed = false;
-
-  while (true) {
-    i = skipWs(raw, i);
-    if (i >= raw.length) return null;
-    if (raw[i] === '}') break;
-
-    const keyStart = i;
-    const key = parseJsonString(raw, i);
-    if (!key) return null;
-    i = skipWs(raw, key.end);
-    if (raw[i] !== ':') return null;
-    i++;
-
-    const valueEnd = scanJsonValueEnd(raw, i);
-    if (valueEnd === null) return null;
-
-    const pairRaw = raw.slice(keyStart, valueEnd);
-    if (key.value === 'hmac') removed = true;
-    else keptPairs.push(pairRaw);
-
-    i = skipWs(raw, valueEnd);
-    if (raw[i] === ',') {
-      i++;
-      continue;
-    }
-    if (raw[i] === '}') break;
-    return null;
-  }
-
-  if (!removed) return null;
-  return `{${keptPairs.join(',')}}`;
-}
-
-function verifyHMAC(payload: string, receivedHmac: string, secret: string): boolean {
-  const expected = crypto.createHmac('sha256', secret).update(payload).digest('hex');
-  return safeTimingEqualHex(expected, receivedHmac);
-}
-
-async function getAgentSecret(fastify: FastifyInstance, agentId: string): Promise<string | null> {
-  const cached = agentSecretCache.get(agentId);
-  if (cached && cached.expiresAt > Date.now()) return cached.secret;
-
-  const { rows } = await fastify.pg.query(`SELECT agent_secret FROM agents WHERE id = $1`, [agentId]);
-  const secret = rows[0]?.agent_secret ? String(rows[0].agent_secret) : null;
-  if (secret) agentSecretCache.set(agentId, { secret, expiresAt: Date.now() + AGENT_SECRET_CACHE_TTL_MS });
-  return secret;
+  delete (clone as any).sig;
+  const expected = computeSig(clone, secret);
+  return safeTimingEqualHex(expected, received);
 }
 
 function remoteIp(ws: WS): string | undefined {
@@ -227,11 +80,27 @@ function remoteIp(ws: WS): string | undefined {
   }
 }
 
+function sendSigned(ws: WS, secret: string, data: Omit<any, 'sig'>) {
+  const sig = computeSig(data, secret);
+  ws.send(JSON.stringify({ ...data, sig }));
+}
+
+function nowEnvelopeBase(agentId: string, type: string, payload: any, extra?: Partial<any>) {
+  return {
+    type,
+    ts: Date.now(),
+    nonce: uuidv4(),
+    traceId: uuidv4(),
+    agentId,
+    payload,
+    ...(extra ?? {}),
+  };
+}
+
 export function setupAgentGateway(fastify: FastifyInstance) {
   const agentSockets = new Map<string, WS>();
   const uiSockets = new Set<WS>();
 
-  // Decorate Fastify instance
   fastify.decorate('agentSockets', agentSockets);
   fastify.decorate('uiSockets', uiSockets);
   fastify.decorate('broadcastToUI', (event: string, data: unknown) => {
@@ -241,55 +110,65 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     }
   });
 
-  // ── Agent WS (port wsPort) ──
+  // Agent WS server is on a dedicated port (proxies should forward /ws/agent to it).
   const wss = new WebSocketServer({ port: config.wsPort, path: '/ws/agent' });
-  fastify.log.info(`Agent WS gateway listening on port ${config.wsPort}`);
+  const addr: any = wss.address();
+  const actualPort = typeof addr === 'object' && addr ? Number(addr.port) : config.wsPort;
+  fastify.decorate('agentWsPort', actualPort);
+  fastify.log.info(`Agent WS gateway listening on port ${actualPort}`);
+
+  // Ping/pong keepalive.
+  const pingInterval = setInterval(() => {
+    for (const ws of wss.clients) {
+      const anyWs: any = ws as any;
+      if (anyWs.isAlive === false) {
+        try { ws.terminate(); } catch {}
+        continue;
+      }
+      anyWs.isAlive = false;
+      try { ws.ping(); } catch {}
+    }
+  }, 30_000);
 
   wss.on('connection', (ws: WS) => {
     let agentId: string | null = null;
+    (ws as any).isAlive = true;
+    ws.on('pong', () => { (ws as any).isAlive = true; });
+
     fastify.log.info({ ip: remoteIp(ws) }, 'Agent WS connected');
+    if ((fastify as any).metrics?.wsConnections) (fastify as any).metrics.wsConnections.inc();
 
     ws.on('message', async (raw: RawData) => {
-      try {
-        const text = raw.toString();
-        const msg = JSON.parse(text);
+      const text = raw.toString();
 
-        // Validate HMAC (skip for enroll_request which uses token auth)
+      try {
+        const msg = JSON.parse(text);
+        const parsed = MessageEnvelopeSchema.safeParse(msg);
+        if (!parsed.success) {
+          ws.send(JSON.stringify({ type: 'error', payload: { message: 'Invalid message envelope' } }));
+          ws.close();
+          return;
+        }
+
+        // Fail-closed signature verification (except enroll_request).
         if (msg.type !== MessageType.EnrollRequest) {
-          const idForHmac = typeof msg.agent_id === 'string' ? msg.agent_id : '';
-          if (!idForHmac) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Missing agent_id' }));
-            return;
-          }
-          const secret = await getAgentSecret(fastify, idForHmac);
-          if (!secret) {
-            fastify.log.warn({ agent_id: idForHmac, ip: remoteIp(ws) }, 'Agent WS message for unknown agent_id');
-            ws.send(JSON.stringify({ type: 'error', message: 'Unknown agent_id' }));
+          if (!verifySig(msg, config.hmac.secret)) {
+            fastify.log.warn({ agentId: msg.agentId, ip: remoteIp(ws), msg_type: msg.type }, 'Agent WS signature verification failed');
+            if ((fastify as any).metrics?.wsAuthFailed) (fastify as any).metrics.wsAuthFailed.inc();
+            ws.send(JSON.stringify({ type: 'error', payload: { message: 'Signature verification failed' } }));
             ws.close();
             return;
           }
 
-          const rawWithoutHmac = stripTopLevelHmac(text);
-          const candidates = [
-            ...(rawWithoutHmac ? [rawWithoutHmac] : []),
-            ...hmacPayloadCandidates(msg),
-          ];
-          const ok = Boolean(msg.hmac) && candidates.some((payload) =>
-            verifyHMAC(payload, msg.hmac, secret) || verifyHMAC(payload, msg.hmac, config.hmac.secret),
-          );
-
-          if (!ok) {
-            fastify.log.warn({ agent_id: idForHmac, ip: remoteIp(ws), msg_type: msg.type }, 'Agent WS HMAC verification failed');
-            ws.send(JSON.stringify({ type: 'error', message: 'HMAC verification failed' }));
-            return;
-          }
-          // Anti-replay
+          // Anti-replay.
           if (recentNonces.has(msg.nonce)) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Nonce replay detected' }));
+            ws.send(JSON.stringify({ type: 'error', payload: { message: 'Nonce replay detected' } }));
+            ws.close();
             return;
           }
-          if (msg.ts && Date.now() - msg.ts > ANTI_REPLAY_WINDOW_MS) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Message expired' }));
+          if (Date.now() - msg.ts > ANTI_REPLAY_WINDOW_MS) {
+            ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message expired' } }));
+            ws.close();
             return;
           }
           recentNonces.add(msg.nonce);
@@ -297,18 +176,30 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
         switch (msg.type) {
           case MessageType.EnrollRequest: {
-            const p = msg.payload;
-            // Validate enrollment token
-            const token = await agentService.validateEnrollmentToken(fastify, p.enrollment_token);
-            if (!token) {
-              fastify.log.warn({ ip: remoteIp(ws) }, 'Agent enrollment failed: invalid token');
-              ws.send(JSON.stringify({
-                type: MessageType.EnrollResponse,
-                payload: { success: false, error: 'Invalid enrollment token' },
-              }));
+            const pParsed = EnrollRequestPayload.safeParse(msg.payload);
+            if (!pParsed.success) {
+              ws.send(JSON.stringify(nowEnvelopeBase(
+                '00000000-0000-0000-0000-000000000000',
+                MessageType.EnrollResponse,
+                { success: false, error: 'Invalid enroll payload', hmac_key: config.hmac.secret, server_url: config.apiBaseUrl, heartbeat_interval_sec: 10 },
+              )));
               ws.close();
               return;
             }
+            const p = pParsed.data;
+
+            const token = await agentService.validateEnrollmentToken(fastify, p.enrollment_token);
+            if (!token) {
+              fastify.log.warn({ ip: remoteIp(ws) }, 'Agent enrollment failed: invalid token');
+              ws.send(JSON.stringify(nowEnvelopeBase(
+                '00000000-0000-0000-0000-000000000000',
+                MessageType.EnrollResponse,
+                { success: false, error: 'Invalid enrollment token', hmac_key: config.hmac.secret, server_url: config.apiBaseUrl, heartbeat_interval_sec: 10 },
+              )));
+              ws.close();
+              return;
+            }
+
             const agent = await agentService.enrollAgent(fastify, {
               hostname: p.hostname,
               os: p.os,
@@ -322,179 +213,205 @@ export function setupAgentGateway(fastify: FastifyInstance) {
               folder_id: p.folder_id ?? token.folder_id ?? null,
               last_ip: remoteIp(ws) ?? null,
             });
-            agentId = agent.id;
-            agentSockets.set(agentId!, ws);
+
+            const aid = String(agent.id);
+            agentId = aid;
+            agentSockets.set(aid, ws);
             fastify.log.info({ agent_id: agent.id, hostname: p.hostname, ip: remoteIp(ws) }, 'Agent enrolled');
-            ws.send(JSON.stringify({
-              type: MessageType.EnrollResponse,
-              payload: {
-                success: true,
-                agent_id: agent.id,
-                org_id: agent.org_id,
-                agent_secret: agent.agent_secret,
-                hmac_key: agent.agent_secret, // backward compatible for older agents
-                server_url: config.apiBaseUrl,
-                heartbeat_interval_sec: config.agentOfflineThresholdSecs / 2,
-              },
-            }));
-            agentSecretCache.set(agent.id, { secret: String(agent.agent_secret), expiresAt: Date.now() + AGENT_SECRET_CACHE_TTL_MS });
+
+            // v1: hmac_key is the backend HMAC secret (global). Enroll response is unsigned (agent learns hmac_key here).
+            ws.send(JSON.stringify(nowEnvelopeBase(aid, MessageType.EnrollResponse, {
+              success: true,
+              agent_id: aid,
+              org_id: agent.org_id,
+              hmac_key: config.hmac.secret,
+              server_url: config.apiBaseUrl,
+              heartbeat_interval_sec: 10,
+            }, { orgId: agent.org_id })));
+
             fastify.broadcastToUI('agent:enrolled', { agent_id: agent.id, hostname: p.hostname });
             break;
           }
 
+          case MessageType.Capabilities: {
+            const pParsed = CapabilitiesPayload.safeParse(msg.payload);
+            if (!pParsed.success) break;
+            const aid = String(msg.agentId);
+            agentId = aid;
+            agentSockets.set(aid, ws);
+            await agentService.updateCapabilities(fastify, aid, msg.payload as any);
+            break;
+          }
+
           case MessageType.Heartbeat: {
-            agentId = msg.agent_id;
-            agentSockets.set(agentId!, ws);
-            const p = msg.payload;
-            const usedMb = Number(p.memory_used_mb ?? NaN);
-            const totalMb = Number(p.memory_total_mb ?? NaN);
-            const memPercent = Number.isFinite(usedMb) && Number.isFinite(totalMb) && totalMb > 0 ? (usedMb / totalMb) * 100 : undefined;
-            await agentService.heartbeat(fastify, agentId!, {
+            const pParsed = HeartbeatPayload.safeParse(msg.payload);
+            if (!pParsed.success) break;
+            const aid = String(msg.agentId);
+            agentId = aid;
+            agentSockets.set(aid, ws);
+
+            const p = pParsed.data;
+            await agentService.heartbeat(fastify, aid, {
               last_ip: remoteIp(ws),
-              agent_version: p.agent_version,
-              cpu_percent: p.cpu_percent,
-              mem_percent: memPercent,
+              mem_percent: p.memory_percent,
               disk_percent: p.disk_percent,
             });
-            // Send pending jobs
-            const pending = await jobService.getPendingJobs(fastify, agentId!);
+
+            // Dispatch pending jobs.
+            const pending = await jobService.getPendingJobs(fastify, aid);
             for (const job of pending) {
-              // Send both "payload" and "job" shapes to stay compatible with older agents.
-              ws.send(JSON.stringify({ type: MessageType.JobAssign, payload: job, job }));
+              const payload = {
+                job_id: job.id,
+                name: job.type,
+                args: job.payload ?? {},
+                timeout_sec: job.timeout_secs ?? 300,
+                created_at: new Date(job.created_at).toISOString(),
+              };
+              const env = nowEnvelopeBase(aid, MessageType.JobAssign, payload);
+              sendSigned(ws, config.hmac.secret, env);
               await jobService.updateJobStatus(fastify, job.id, 'dispatched');
             }
             break;
           }
 
-          case MessageType.Capabilities: {
-            if (msg.agent_id) {
-              await agentService.updateCapabilities(fastify, msg.agent_id, msg.payload);
-            }
-            break;
-          }
-
           case MessageType.MetricsPush: {
-            // Store latest metrics (update agent row)
-            if (msg.agent_id) {
-              const p = msg.payload;
-              const memUsedBytes: number | undefined =
-                typeof p.memory_used_bytes === 'number' ? p.memory_used_bytes
-                  : (typeof p.memory_used_mb === 'number' ? p.memory_used_mb * 1048576 : undefined);
-              const memTotalBytes: number | undefined =
-                typeof p.memory_total_bytes === 'number' ? p.memory_total_bytes
-                  : (typeof p.memory_total_mb === 'number' ? p.memory_total_mb * 1048576 : undefined);
-              const diskUsedBytes: number | undefined =
-                typeof p.disk_used_bytes === 'number' ? p.disk_used_bytes
-                  : (typeof p.disk_used_gb === 'number' ? p.disk_used_gb * 1073741824 : undefined);
-              const diskTotalBytes: number | undefined =
-                typeof p.disk_total_bytes === 'number' ? p.disk_total_bytes
-                  : (typeof p.disk_total_gb === 'number' ? p.disk_total_gb * 1073741824 : undefined);
+            const pParsed = MetricsPushPayload.safeParse(msg.payload);
+            if (!pParsed.success) break;
+            const aid = String(msg.agentId);
+            agentId = aid;
+            agentSockets.set(aid, ws);
 
-              const memPercent =
-                memUsedBytes !== undefined && memTotalBytes !== undefined && memTotalBytes > 0
-                  ? (memUsedBytes / memTotalBytes) * 100
-                  : undefined;
-              const diskPercent =
-                diskUsedBytes !== undefined && diskTotalBytes !== undefined && diskTotalBytes > 0
-                  ? (diskUsedBytes / diskTotalBytes) * 100
-                  : undefined;
-              await agentService.heartbeat(fastify, msg.agent_id, {
-                cpu_percent: p.cpu_percent,
-                mem_percent: memPercent,
-                disk_percent: diskPercent,
-              });
+            const p = pParsed.data;
+            const memPercent = p.memory_total_bytes > 0 ? (p.memory_used_bytes / p.memory_total_bytes) * 100 : undefined;
+            const diskPercent = p.disk_total_bytes > 0 ? (p.disk_used_bytes / p.disk_total_bytes) * 100 : undefined;
+            await agentService.heartbeat(fastify, aid, {
+              cpu_percent: p.cpu_percent,
+              mem_percent: memPercent,
+              disk_percent: diskPercent,
+            });
 
-              // Store time-series data
-              try {
-                const agent = await agentService.getAgentById(fastify, msg.agent_id);
-                if (agent) {
-                  await fastify.pg.query(
-                    `INSERT INTO metrics_timeseries (agent_id, org_id, collected_at, cpu_percent, memory_used_mb, memory_total_mb,
-                       disk_used_gb, disk_total_gb, network_rx_bytes, network_tx_bytes, processes_count)
-                     VALUES ($1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10)`,
-                    [
-                      msg.agent_id, agent.org_id,
-                      p.cpu_percent ?? 0,
-                      memUsedBytes !== undefined ? memUsedBytes / 1048576 : (p.memory_used_mb ?? 0),
-                      memTotalBytes !== undefined ? memTotalBytes / 1048576 : (p.memory_total_mb ?? 0),
-                      diskUsedBytes !== undefined ? diskUsedBytes / 1073741824 : (p.disk_used_gb ?? 0),
-                      diskTotalBytes !== undefined ? diskTotalBytes / 1073741824 : (p.disk_total_gb ?? 0),
-                      p.net_rx_bytes ?? 0,
-                      p.net_tx_bytes ?? 0,
-                      (p.process_count ?? p.processes_count ?? 0),
-                    ],
-                  );
-                }
-              } catch (err) {
-                fastify.log.warn({ err }, 'Failed to store time-series metric');
+            // Store time-series in existing schema (MB/GB floats).
+            try {
+              const agent = await agentService.getAgentById(fastify, aid);
+              if (agent) {
+                await fastify.pg.query(
+                  `INSERT INTO metrics_timeseries (
+                     agent_id, org_id, collected_at, cpu_percent,
+                     memory_used_mb, memory_total_mb, disk_used_gb, disk_total_gb,
+                     network_rx_bytes, network_tx_bytes, processes_count
+                   ) VALUES ($1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10)`,
+                  [
+                    aid,
+                    agent.org_id,
+                    p.cpu_percent,
+                    p.memory_used_bytes / 1048576,
+                    p.memory_total_bytes / 1048576,
+                    p.disk_used_bytes / 1073741824,
+                    p.disk_total_bytes / 1073741824,
+                    p.net_rx_bytes ?? 0,
+                    p.net_tx_bytes ?? 0,
+                    p.process_count ?? 0,
+                  ],
+                );
               }
-
-              fastify.broadcastToUI('agent:metrics', { agent_id: msg.agent_id, metrics: p });
+            } catch (err) {
+              fastify.log.warn({ err }, 'Failed to store time-series metric');
             }
+
+            fastify.broadcastToUI('agent:metrics', { agent_id: aid, metrics: p });
             break;
           }
 
           case MessageType.InventoryPush: {
-            // Update agent record with inventory data
-            if (msg.agent_id) {
-              const p = msg.payload;
-              await fastify.pg.query(
-                `UPDATE agents SET hostname = COALESCE($2, hostname), os = COALESCE($3, os),
-                 arch = COALESCE($4, arch), inventory = $5, last_seen_at = now()
-                 WHERE id = $1`,
-                [msg.agent_id, p.hostname, p.os, p.arch, JSON.stringify(p)],
-              );
-              fastify.broadcastToUI('agent:inventory', { agent_id: msg.agent_id });
-            }
+            const pParsed = InventoryPushPayload.safeParse(msg.payload);
+            if (!pParsed.success) break;
+            const aid = String(msg.agentId);
+            agentId = aid;
+            agentSockets.set(aid, ws);
+            const p = pParsed.data;
+
+            await fastify.pg.query(
+              `UPDATE agents
+               SET hostname = COALESCE($2, hostname),
+                   os = COALESCE($3, os),
+                   arch = COALESCE($4, arch),
+                   inventory = $5,
+                   last_seen_at = now(),
+                   status = 'online'
+               WHERE id = $1`,
+              [aid, p.hostname, p.os, p.arch, JSON.stringify(p)],
+            );
+
+            // Snapshot (immutable)
+            await fastify.pg.query(
+              `INSERT INTO inventory_snapshots (agent_id, collected_at, data)
+               VALUES ($1, now(), $2)`,
+              [aid, JSON.stringify(p)],
+            );
+
+            fastify.broadcastToUI('agent:inventory', { agent_id: aid });
             break;
           }
 
           case MessageType.SecurityEventPush: {
-            // Ingest into EDR pipeline
-            if (msg.agent_id) {
-              const agent = await agentService.getAgentById(fastify, msg.agent_id);
-              if (agent) {
-                await ingestSecurityEvent(agent.org_id, msg.agent_id, msg.payload);
-              }
-              fastify.broadcastToUI('edr:event', { agent_id: msg.agent_id, event: msg.payload });
+            const aid = String(msg.agentId);
+            agentId = aid;
+            agentSockets.set(aid, ws);
+            const agent = await agentService.getAgentById(fastify, aid);
+            if (agent) {
+              await ingestSecurityEvent(agent.org_id, aid, msg.payload);
             }
+            fastify.broadcastToUI('edr:event', { agent_id: aid, event: msg.payload });
             break;
           }
 
           case MessageType.JobAck: {
-            const p = msg.payload;
-            // Agent sends status: "running" | "rejected" | undefined
-            // Map to backend job status: "running" | "failed"
-            let newStatus: 'running' | 'failed' = 'failed';
+            const pParsed = JobAckPayload.safeParse(msg.payload);
+            if (!pParsed.success) break;
+            const p = pParsed.data;
             if (p.status === 'running') {
-              newStatus = 'running';
-            } else if (p.status !== 'rejected') {
-              // If no status or unknown, log warning but assume failed
-              fastify.log.warn({ job_id: p.job_id, agent_status: p.status }, 'JobAck missing/invalid status');
+              await jobService.updateJobStatus(fastify, p.job_id, 'running');
+            } else {
+              await jobService.updateJobStatus(fastify, p.job_id, 'failed', { error: p.reason ?? 'rejected' });
             }
-            await jobService.updateJobStatus(fastify, p.job_id, newStatus, p.reason ? { reason: p.reason } : undefined);
-            fastify.broadcastToUI('job:status', { job_id: p.job_id, status: newStatus });
+            fastify.broadcastToUI('job:status', { job_id: p.job_id, status: p.status });
             break;
           }
 
           case MessageType.JobResult: {
-            const p = msg.payload;
-            const status = p.status === 'success' ? 'completed' : 'failed';
+            const pParsed = JobResultPayload.safeParse(msg.payload);
+            if (!pParsed.success) break;
+            const p = pParsed.data;
+            const status = p.status === 'success' ? 'completed' : (p.status === 'timeout' ? 'failed' : 'failed');
+
             await jobService.updateJobStatus(fastify, p.job_id, status, {
               exit_code: p.exit_code,
               stdout: p.stdout,
               stderr: p.stderr,
-              error: p.error,
-              artifacts: p.artifacts,
               duration_ms: p.duration_ms,
+              error: p.error,
             });
-            fastify.broadcastToUI('job:result', { job_id: p.job_id, status, exit_code: p.exit_code });
-            break;
-          }
 
-          case MessageType.StreamOutput: {
-            // Forward stream to UI sockets
-            fastify.broadcastToUI('stream:output', { agent_id: msg.agent_id, ...msg.payload });
+            // Immutable job_results row.
+            try {
+              await fastify.pg.query(
+                `INSERT INTO job_results (job_id, agent_id, exit_code, stdout, stderr, data, duration_ms)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+                [
+                  p.job_id,
+                  msg.agentId,
+                  p.exit_code ?? null,
+                  p.stdout ?? null,
+                  p.stderr ?? null,
+                  JSON.stringify({ status: p.status, error: p.error ?? null }),
+                  p.duration_ms ?? null,
+                ],
+              );
+            } catch (err) {
+              fastify.log.warn({ err }, 'Failed to store job_results');
+            }
+
+            fastify.broadcastToUI('job:result', { job_id: p.job_id, status: p.status, exit_code: p.exit_code });
             break;
           }
 
@@ -507,6 +424,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     });
 
     ws.on('close', () => {
+      if ((fastify as any).metrics?.wsConnections) (fastify as any).metrics.wsConnections.dec();
       if (agentId) {
         agentSockets.delete(agentId);
         agentService.updateAgentStatus(fastify, agentId, 'offline').catch(() => {});
@@ -519,41 +437,37 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     });
   });
 
-  // ── UI WS (same HTTP server, path /ws/ui) ──
+  // UI WS (same HTTP server, path /ws/ui)
   const uiWss = new WebSocketServer({ noServer: true });
   const httpServer = fastify.server;
 
   httpServer.on('upgrade', (request: any, socket: any, head: any) => {
     const url = new URL(request.url, `http://${request.headers.host}`);
-    if (url.pathname === '/ws/ui') {
-      // Simple token check from query
-      const token = url.searchParams.get('token');
-      if (!token) {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-      try {
-        (fastify as any).jwt.verify(token);
-      } catch {
-        socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
-        socket.destroy();
-        return;
-      }
-      uiWss.handleUpgrade(request, socket, head, (ws: WS) => {
-        uiSockets.add(ws);
-        ws.on('close', () => uiSockets.delete(ws));
-        ws.on('error', () => uiSockets.delete(ws));
-      });
+    if (url.pathname !== '/ws/ui') return;
+
+    const token = url.searchParams.get('token');
+    if (!token) {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
     }
+    try {
+      (fastify as any).jwt.verify(token);
+    } catch {
+      socket.write('HTTP/1.1 401 Unauthorized\r\n\r\n');
+      socket.destroy();
+      return;
+    }
+
+    uiWss.handleUpgrade(request, socket, head, (ws: WS) => {
+      uiSockets.add(ws);
+      ws.on('close', () => uiSockets.delete(ws));
+      ws.on('error', () => uiSockets.delete(ws));
+    });
   });
 
-  // ── Periodic cleanup ──
-  const cleanupInterval = setInterval(() => {
-    recentNonces.clear();
-  }, NONCE_CLEANUP_INTERVAL);
-
-  // Periodic stale-agent check
+  // Cleanup.
+  const nonceCleanup = setInterval(() => recentNonces.clear(), NONCE_CLEANUP_INTERVAL_MS);
   const staleInterval = setInterval(async () => {
     try {
       await agentService.markStaleAgentsOffline(fastify, config.agentOfflineThresholdSecs);
@@ -561,8 +475,6 @@ export function setupAgentGateway(fastify: FastifyInstance) {
       fastify.log.error({ err }, 'Error marking stale agents offline');
     }
   }, 30_000);
-
-  // Periodic job timeout check
   const jobTimeoutInterval = setInterval(async () => {
     try {
       await jobService.timeoutExpiredJobs(fastify);
@@ -571,12 +483,14 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     }
   }, 60_000);
 
-  // Cleanup on close
   fastify.addHook('onClose', async () => {
-    clearInterval(cleanupInterval);
+    clearInterval(pingInterval);
+    clearInterval(nonceCleanup);
     clearInterval(staleInterval);
     clearInterval(jobTimeoutInterval);
     wss.close();
     uiWss.close();
   });
+
+  return wss;
 }
