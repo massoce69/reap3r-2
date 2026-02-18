@@ -114,7 +114,7 @@ export default async function enrollmentRoutes(fastify: FastifyInstance) {
     const apiBase = publicBaseUrl(request);
     const wsBase = apiBase.replace(/^http(s?):\/\//i, 'ws$1://');
     return {
-      windows_powershell: `powershell -ExecutionPolicy Bypass -Command "& { $token='${t}'; $server='${apiBase}'; $s=[System.Net.ServicePointManager]; $s::SecurityProtocol='Tls12,Tls13'; $ps=(Invoke-WebRequest -UseBasicParsing -Uri \"$server/api/install/windows?token=$token\").Content; Invoke-Expression $ps }"`,
+      windows_powershell: `powershell -ExecutionPolicy Bypass -Command "[Net.ServicePointManager]::SecurityProtocol='Tls12,Tls13'; $ps=(New-Object Net.WebClient).DownloadString('${apiBase}/api/install/windows?token=${t}'); Invoke-Expression $ps"`,
       linux_oneliner: `curl -fsSL "${apiBase}/api/install/linux?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
       macos_oneliner: `curl -fsSL "${apiBase}/api/install/macos?token=${t}" | sudo bash -s -- --token "${t}" --server "${apiBase}"`,
 

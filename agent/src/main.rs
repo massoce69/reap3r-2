@@ -1263,13 +1263,22 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
 
     let (hostname, os, arch, os_version) = get_system_info();
 
-    // Determine if we need to enroll or reconnect
+    // Determine if we need to enroll or reconnect.
+    // Priority order:
+    //  1. Explicit --agent-id + --hmac-key CLI flags
+    //  2. Saved agent.conf (already enrolled on a previous run) ← checked BEFORE token
+    //  3. --token provided for first enrollment
+    // This ensures that even when --token is permanently baked into a Scheduled Task,
+    // we do NOT re-enroll on every restart once agent.conf exists.
     let (agent_id, hmac_key) = if let (Some(id), Some(key)) = (&args.agent_id, &args.hmac_key) {
         finfo!("Reconnecting with CLI-provided identity: agent_id={}", id);
         (id.clone(), key.clone())
+    } else if let Some(saved) = load_config().filter(|c| !c.agent_id.is_empty() && !c.hmac_key.is_empty()) {
+        finfo!("Reconnecting with saved config: agent_id={}", saved.agent_id);
+        (saved.agent_id, saved.hmac_key)
     } else if let Some(token) = &args.token {
-        // Token provided → force enrollment.
-        finfo!("Enrolling with token (first seen or forced re-enroll)...");
+        // No saved config → first enrollment with token.
+        finfo!("No saved config found — enrolling with token...");
         let enroll_msg = serde_json::json!({
             "agentId": "00000000-0000-0000-0000-000000000000",
             "ts": now_ms(),
@@ -1328,9 +1337,6 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
         } else {
             return Err("No response from server during enrollment".into());
         }
-    } else if let Some(saved) = load_config() {
-        finfo!("Reconnecting with saved config: agent_id={}", saved.agent_id);
-        (saved.agent_id, saved.hmac_key)
     } else {
         let msg = "No credentials available: provide --server and --token for first enroll, \
                    or ensure agent.conf exists from a previous enrollment.\n\
