@@ -33,17 +33,25 @@ async function run() {
     const siteRes = await client.query('SELECT id FROM sites WHERE org_id = $1 LIMIT 1', [orgId]);
     const siteId = siteRes.rows[0]?.id || null;
 
+    // Get admin user (created by admin for this token)
+    const adminRes = await client.query("SELECT id FROM users WHERE org_id = $1 AND role = 'super_admin' LIMIT 1", [orgId]);
+    if ((adminRes.rowCount ?? 0) === 0) {
+      console.error('ERROR: No admin user found in DB!');
+      process.exit(1);
+    }
+    const createdBy = adminRes.rows[0].id;
+
     // Create a test enrollment token
     const tokenId = uuidv4();
     const token = 'test-enrollment-token-e2e';
     const expiresAt = new Date(Date.now() + 7 * 24 * 60 * 60 * 1000); // 7 days
 
     const insertRes = await client.query(
-      `INSERT INTO enrollment_tokens (id, org_id, site_id, name, token, expires_at, created_at)
-       VALUES ($1, $2, $3, $4, $5, $6, NOW())
+      `INSERT INTO enrollment_tokens (id, org_id, site_id, name, token, created_by, expires_at, created_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
        ON CONFLICT (token) DO UPDATE SET expires_at = EXCLUDED.expires_at
        RETURNING id, token, expires_at`,
-      [tokenId, orgId, siteId, 'E2E Agent Test Token', token, expiresAt]
+      [tokenId, orgId, siteId, 'E2E Agent Test Token', token, createdBy, expiresAt]
     );
 
     const record = insertRes.rows[0];
