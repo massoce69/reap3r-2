@@ -1,5 +1,5 @@
 'use client';
-import { useEffect, useState, useCallback } from 'react';
+import { useEffect, useState, useCallback, useRef } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, StatusDot, Skeleton, Input } from '@/components/ui';
@@ -11,10 +11,11 @@ import {
   Monitor, Terminal, Play, RotateCcw, Power, PowerOff,
   Shield, Cpu, HardDrive, Network, Clock, ArrowLeft, Trash2,
   Package, Activity, RefreshCw, ChevronDown, ChevronRight,
-  Server, MemoryStick, Wifi, Layers,
+  Server, MemoryStick, Wifi, Layers, Loader2, Square,
+  Send, AlertCircle, CheckCircle, XCircle, Copy, Check,
 } from 'lucide-react';
 
-type Tab = 'overview' | 'inventory' | 'metrics' | 'jobs';
+type Tab = 'overview' | 'terminal' | 'inventory' | 'metrics' | 'jobs';
 
 export default function AgentDetailPage() {
   const { id } = useParams<{ id: string }>();
@@ -31,6 +32,19 @@ export default function AgentDetailPage() {
   const [inventory, setInventory] = useState<any>(null);
   const [metricsData, setMetricsData] = useState<any[]>([]);
   const [metricsPeriod, setMetricsPeriod] = useState(24);
+
+  // Terminal state
+  const [termCmd, setTermCmd] = useState('');
+  const [termInterpreter, setTermInterpreter] = useState<'powershell' | 'bash' | 'cmd' | 'python'>('powershell');
+  const [termHistory, setTermHistory] = useState<Array<{
+    id: string; cmd: string; status: 'pending' | 'running' | 'completed' | 'failed' | 'dispatched';
+    stdout?: string; stderr?: string; exit_code?: number; duration_ms?: number; created_at: string;
+  }>>([]);
+  const [termRunning, setTermRunning] = useState(false);
+  const termEndRef = useRef<HTMLDivElement>(null);
+  const termInputRef = useRef<HTMLInputElement>(null);
+  // Script execution result
+  const [lastScriptResult, setLastScriptResult] = useState<any>(null);
 
   const userPerms = user ? RolePermissions[user.role as keyof typeof RolePermissions] ?? [] : [];
   const canRunScript = userPerms.includes(Permission.JobRunScript);
@@ -76,11 +90,70 @@ export default function AgentDetailPage() {
     return false;
   };
 
+  const pollJobResult = async (jobId: string, historyIdx: number) => {
+    let attempts = 0;
+    const maxAttempts = 150; // 5 min at 2s interval
+    const poll = async () => {
+      if (attempts >= maxAttempts) {
+        setTermHistory(prev => prev.map((h, i) => i === historyIdx ? { ...h, status: 'failed' as const, stderr: 'Timeout: no result after 5 minutes' } : h));
+        setTermRunning(false);
+        return;
+      }
+      attempts++;
+      try {
+        const job = await api.jobs.get(jobId);
+        if (job.status === 'completed' || job.status === 'failed') {
+          setTermHistory(prev => prev.map((h, i) => i === historyIdx ? {
+            ...h,
+            status: job.status as 'completed' | 'failed',
+            stdout: job.result?.stdout ?? job.stdout ?? '',
+            stderr: job.result?.stderr ?? job.stderr ?? '',
+            exit_code: job.result?.exit_code ?? job.exit_code,
+            duration_ms: job.result?.duration_ms ?? job.duration_ms,
+          } : h));
+          setTermRunning(false);
+          return;
+        }
+        if (job.status === 'running' || job.status === 'dispatched') {
+          setTermHistory(prev => prev.map((h, i) => i === historyIdx ? { ...h, status: job.status as 'running' | 'dispatched' } : h));
+        }
+      } catch { /* ignore network errors during polling */ }
+      setTimeout(poll, 2000);
+    };
+    setTimeout(poll, 1500);
+  };
+
+  const runTerminalCommand = async (cmd?: string) => {
+    const command = cmd ?? termCmd;
+    if (!agent || !command.trim() || termRunning) return;
+    setTermRunning(true);
+    const entry = {
+      id: '', cmd: command, status: 'pending' as const, created_at: new Date().toISOString(),
+    };
+    const idx = termHistory.length;
+    setTermHistory(prev => [...prev, entry]);
+    setTermCmd('');
+    try {
+      const job = await api.jobs.create({
+        agent_id: agent.id,
+        type: JobType.RunScript,
+        payload: { interpreter: termInterpreter, script: command, timeout_secs: 300, stream_output: false },
+        reason: `Terminal: ${command.substring(0, 80)}`,
+      });
+      const jobId = job.id ?? job.job_id;
+      setTermHistory(prev => prev.map((h, i) => i === idx ? { ...h, id: jobId, status: 'pending' } : h));
+      pollJobResult(jobId, idx);
+    } catch (err: any) {
+      setTermHistory(prev => prev.map((h, i) => i === idx ? { ...h, status: 'failed', stderr: err?.message ?? 'Failed to create job' } : h));
+      setTermRunning(false);
+    }
+  };
+
   const runScript = async () => {
     if (!agent || !script.trim()) return;
     setSubmitting(true);
     try {
-      await api.jobs.create({
+      const job = await api.jobs.create({
         agent_id: agent.id,
         type: JobType.RunScript,
         payload: { interpreter, script, timeout_secs: 300, stream_output: false },
@@ -88,6 +161,15 @@ export default function AgentDetailPage() {
       });
       setScriptOpen(false);
       setScript('');
+      setLastScriptResult(null);
+      // Also add to terminal history for visibility
+      const jobId = job.id ?? job.job_id;
+      const idx = termHistory.length;
+      setTermHistory(prev => [...prev, {
+        id: jobId, cmd: `[Script] ${script.substring(0, 100)}...`, status: 'pending' as const,
+        created_at: new Date().toISOString(),
+      }]);
+      pollJobResult(jobId, idx);
       const jobsData = await api.jobs.list({ agent_id: agent.id, limit: '10', sort_order: 'desc' });
       setRecentJobs(jobsData.data);
     } finally {
@@ -101,6 +183,11 @@ export default function AgentDetailPage() {
     const jobsData = await api.jobs.list({ agent_id: agent.id, limit: '10', sort_order: 'desc' });
     setRecentJobs(jobsData.data);
   };
+
+  // Auto-scroll terminal
+  useEffect(() => {
+    termEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [termHistory]);
 
   const collectInventoryNow = async () => {
     if (!id) return;
@@ -134,6 +221,7 @@ export default function AgentDetailPage() {
 
   const tabs: { key: Tab; label: string; icon: React.ReactNode }[] = [
     { key: 'overview', label: 'Overview', icon: <Monitor className="w-4 h-4" /> },
+    { key: 'terminal', label: 'Terminal', icon: <Terminal className="w-4 h-4" /> },
     { key: 'inventory', label: 'Inventory', icon: <Package className="w-4 h-4" /> },
     { key: 'metrics', label: 'Metrics', icon: <Activity className="w-4 h-4" /> },
     { key: 'jobs', label: 'Jobs', icon: <Layers className="w-4 h-4" /> },
@@ -264,10 +352,133 @@ export default function AgentDetailPage() {
                   onClick={collectInventoryNow} />
                 <ActionButton icon={<Shield className="w-4 h-4" />} label="Remote Shell"
                   disabled={!isOnline || !hasCapability('remote_shell')}
-                  onClick={() => sendAction(JobType.RemoteShellStart, { shell: agent.os === 'windows' ? 'powershell' : 'bash' }, 'Remote shell from UI')} />
+                  onClick={() => setTab('terminal')} />
               </div>
             </Card>
           </div>
+        )}
+
+        {tab === 'terminal' && (
+          <Card>
+            <div className="flex items-center justify-between mb-4">
+              <h3 className="text-sm font-semibold text-reap3r-text flex items-center gap-2">
+                <Terminal className="w-4 h-4" /> Remote Terminal — {agent.hostname}
+              </h3>
+              {termHistory.length > 0 && (
+                <Button variant="ghost" size="sm" onClick={() => setTermHistory([])}>Clear</Button>
+              )}
+            </div>
+
+            {!isOnline && (
+              <div className="mb-4 bg-reap3r-warning/5 border border-reap3r-warning/20 rounded-lg px-3 py-2 text-xs text-reap3r-warning flex items-center gap-2">
+                <AlertCircle className="w-4 h-4" /> Agent is offline. Commands cannot be executed.
+              </div>
+            )}
+
+            {/* Terminal Output Area */}
+            <div className="bg-[#0d1117] border border-reap3r-border rounded-lg mb-3 max-h-[500px] overflow-y-auto font-mono text-xs">
+              {termHistory.length === 0 ? (
+                <div className="p-6 text-center text-gray-500">
+                  <Terminal className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                  <p>No commands yet. Type a command below to get started.</p>
+                </div>
+              ) : (
+                <div className="p-3 space-y-3">
+                  {termHistory.map((entry, i) => (
+                    <div key={i} className="border-b border-gray-800 pb-3 last:border-0 last:pb-0">
+                      {/* Command line */}
+                      <div className="flex items-center gap-2 mb-1">
+                        <span className="text-green-400">$</span>
+                        <span className="text-gray-200 flex-1">{entry.cmd}</span>
+                        <span className="flex items-center gap-1">
+                          {entry.status === 'pending' && <Loader2 className="w-3 h-3 text-yellow-400 animate-spin" />}
+                          {entry.status === 'dispatched' && <Loader2 className="w-3 h-3 text-blue-400 animate-spin" />}
+                          {entry.status === 'running' && <Loader2 className="w-3 h-3 text-cyan-400 animate-spin" />}
+                          {entry.status === 'completed' && entry.exit_code === 0 && <CheckCircle className="w-3 h-3 text-green-400" />}
+                          {entry.status === 'completed' && entry.exit_code !== 0 && <XCircle className="w-3 h-3 text-orange-400" />}
+                          {entry.status === 'failed' && <XCircle className="w-3 h-3 text-red-400" />}
+                          <span className={`text-[10px] ${
+                            entry.status === 'completed' && entry.exit_code === 0 ? 'text-green-500' :
+                            entry.status === 'failed' ? 'text-red-500' :
+                            entry.status === 'completed' ? 'text-orange-500' : 'text-gray-500'
+                          }`}>
+                            {entry.status === 'pending' ? 'queued...' :
+                             entry.status === 'dispatched' ? 'dispatched...' :
+                             entry.status === 'running' ? 'running...' :
+                             entry.status === 'completed' ? `exit ${entry.exit_code} (${entry.duration_ms}ms)` :
+                             'failed'}
+                          </span>
+                        </span>
+                      </div>
+                      {/* stdout */}
+                      {entry.stdout && (
+                        <pre className="text-gray-300 whitespace-pre-wrap ml-4 mt-1">{entry.stdout}</pre>
+                      )}
+                      {/* stderr */}
+                      {entry.stderr && (
+                        <pre className="text-red-400 whitespace-pre-wrap ml-4 mt-1">{entry.stderr}</pre>
+                      )}
+                    </div>
+                  ))}
+                  <div ref={termEndRef} />
+                </div>
+              )}
+            </div>
+
+            {/* Command Input */}
+            <div className="flex gap-2 items-center">
+              <select
+                value={termInterpreter}
+                onChange={(e) => setTermInterpreter(e.target.value as any)}
+                className="px-2 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-xs text-reap3r-text focus:outline-none focus:ring-2 focus:ring-reap3r-accent/50"
+              >
+                <option value="powershell">PowerShell</option>
+                <option value="bash">Bash</option>
+                <option value="cmd">CMD</option>
+                <option value="python">Python</option>
+              </select>
+              <div className="flex-1 relative">
+                <input
+                  ref={termInputRef}
+                  type="text"
+                  value={termCmd}
+                  onChange={(e) => setTermCmd(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); runTerminalCommand(); } }}
+                  placeholder={isOnline ? 'Type a command and press Enter...' : 'Agent offline'}
+                  disabled={!isOnline || termRunning}
+                  className="w-full px-3 py-2 bg-[#0d1117] border border-reap3r-border rounded-lg text-sm text-gray-200 font-mono placeholder:text-gray-600 focus:outline-none focus:ring-2 focus:ring-reap3r-accent/50 disabled:opacity-50"
+                />
+              </div>
+              <Button
+                onClick={() => runTerminalCommand()}
+                disabled={!isOnline || !termCmd.trim() || termRunning}
+                size="sm"
+              >
+                {termRunning ? <Loader2 className="w-4 h-4 animate-spin" /> : <Send className="w-4 h-4" />}
+              </Button>
+            </div>
+
+            {/* Quick commands */}
+            {isOnline && (
+              <div className="flex flex-wrap gap-1.5 mt-3">
+                <span className="text-[10px] text-reap3r-muted uppercase tracking-wider mr-1 self-center">Quick:</span>
+                {[
+                  { label: 'whoami', cmd: 'whoami' },
+                  { label: 'hostname', cmd: 'hostname' },
+                  { label: 'ipconfig', cmd: 'ipconfig' },
+                  { label: 'systeminfo', cmd: 'systeminfo' },
+                  { label: 'tasklist', cmd: 'tasklist' },
+                  { label: 'Get-Process', cmd: 'Get-Process | Select-Object -First 20 Name, Id, CPU, WorkingSet' },
+                  { label: 'Disk', cmd: 'Get-PSDrive -PSProvider FileSystem | Format-Table Name, Used, Free, @{N="Size";E={$_.Used+$_.Free}} -AutoSize'},
+                ].map(q => (
+                  <button key={q.label} onClick={() => runTerminalCommand(q.cmd)}
+                    disabled={termRunning}
+                    className="px-2 py-0.5 text-[10px] bg-reap3r-surface border border-reap3r-border rounded text-reap3r-muted hover:text-reap3r-text hover:border-reap3r-accent/30 transition-colors disabled:opacity-50"
+                  >{q.label}</button>
+                ))}
+              </div>
+            )}
+          </Card>
         )}
 
         {tab === 'inventory' && (
