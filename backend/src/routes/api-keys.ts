@@ -17,7 +17,7 @@ const CreateApiKeySchema = z.object({
 
 export default async function apiKeyRoutes(fastify: FastifyInstance) {
   // ── List API Keys ──
-  fastify.get('/api-keys', {
+  fastify.get('/api/api-keys', {
     preHandler: [fastify.authenticate, fastify.requirePermission(Permission.SettingsView)],
   }, async (request) => {
     const keys = await apiKeySvc.listApiKeys(request.currentUser.org_id);
@@ -25,7 +25,7 @@ export default async function apiKeyRoutes(fastify: FastifyInstance) {
   });
 
   // ── Create API Key ──
-  fastify.post('/api-keys', {
+  fastify.post('/api/api-keys', {
     preHandler: [fastify.authenticate, fastify.requirePermission(Permission.SettingsUpdate)],
   }, async (request, reply) => {
     const body = parseBody(CreateApiKeySchema, request.body, reply);
@@ -53,7 +53,7 @@ export default async function apiKeyRoutes(fastify: FastifyInstance) {
   });
 
   // ── Revoke API Key ──
-  fastify.patch('/api-keys/:id/revoke', {
+  fastify.patch('/api/api-keys/:id/revoke', {
     preHandler: [fastify.authenticate, fastify.requirePermission(Permission.SettingsUpdate)],
   }, async (request, reply) => {
     const id = parseUUID((request.params as any).id, reply);
@@ -75,7 +75,7 @@ export default async function apiKeyRoutes(fastify: FastifyInstance) {
   });
 
   // ── Delete API Key ──
-  fastify.delete('/api-keys/:id', {
+  fastify.delete('/api/api-keys/:id', {
     preHandler: [fastify.authenticate, fastify.requirePermission(Permission.SettingsUpdate)],
   }, async (request, reply) => {
     const id = parseUUID((request.params as any).id, reply);

@@ -108,7 +108,7 @@ export async function updatePolicy(orgId: string, id: string, data: { settings?:
   const vals: unknown[] = [];
   let idx = 1;
   if (data.settings !== undefined) { sets.push(`settings = $${idx}`); vals.push(JSON.stringify(data.settings)); idx++; }
-  if (data.settings !== undefined) { sets.push(`is_active = $${idx}`); vals.push(data.is_active ?? true); idx++; }
+  if (data.is_active !== undefined) { sets.push(`is_active = $${idx}`); vals.push(data.is_active); idx++; }
   vals.push(orgId, id);
   await query(`UPDATE policies SET ${sets.join(', ')} WHERE org_id = $${idx} AND id = $${idx + 1}`, vals);
 }

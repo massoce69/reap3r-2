@@ -41,7 +41,7 @@ export default async function edrRoutes(fastify: FastifyInstance) {
 
   // PATCH /api/edr/detections/:id/status
   fastify.patch('/api/edr/detections/:id/status', {
-    preHandler: [fastify.requirePermission(Permission.EdrDetectionsView)],
+    preHandler: [fastify.requirePermission(Permission.EdrRespond)],
   }, async (request, reply) => {
     const id = parseUUID((request.params as any).id, reply);
     if (!id) return;

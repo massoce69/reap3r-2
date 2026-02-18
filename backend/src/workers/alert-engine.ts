@@ -62,17 +62,17 @@ async function evaluateRule(rule: any): Promise<void> {
 // ── Agent Offline > X minutes ──
 async function evaluateAgentOffline(rule: any): Promise<void> {
   const thresholdMin = rule.params?.threshold_minutes ?? 10;
-  const scopeFilter = buildScopeFilter(rule, 'a');
+  const scope = buildScopeFilter(rule, 'a', 3);
 
   const { rows: offlineAgents } = await query(
     `SELECT a.id, a.hostname, a.company_id, a.last_seen_at, a.org_id
      FROM agents a
      WHERE a.org_id = $1
        AND a.status != 'offline'
-       AND a.last_seen_at < NOW() - INTERVAL '${thresholdMin} minutes'
-       ${scopeFilter}
+       AND a.last_seen_at < NOW() - ($2 * INTERVAL '1 minute')
+       ${scope.sql}
      LIMIT 100`,
-    [rule.org_id]
+    [rule.org_id, thresholdMin, ...scope.params]
   );
 
   for (const agent of offlineAgents) {
@@ -108,7 +108,7 @@ async function evaluateJobFailed(rule: any): Promise<void> {
   let jobTypeFilter = '';
   const params: any[] = [rule.org_id, windowMin, threshold];
   if (jobType) {
-    jobTypeFilter = 'AND j.job_type = $4';
+    jobTypeFilter = `AND j.type = $${params.length + 1}`;
     params.push(jobType);
   }
 
@@ -118,7 +118,7 @@ async function evaluateJobFailed(rule: any): Promise<void> {
      JOIN agents a ON a.id = j.agent_id
      WHERE j.org_id = $1
        AND j.status = 'failed'
-       AND j.completed_at >= NOW() - ($2 || ' minutes')::INTERVAL
+       AND j.completed_at >= NOW() - ($2 * INTERVAL '1 minute')
        ${jobTypeFilter}
      GROUP BY j.agent_id, a.hostname
      HAVING COUNT(*) >= $3
@@ -235,7 +235,6 @@ async function evaluateMetricThreshold(rule: any): Promise<void> {
   const operator = rule.params?.operator ?? 'gt'; // gt | lt | gte | lte
   const threshold = rule.params?.threshold ?? 90;
   const durationMin = rule.params?.duration_minutes ?? 5;
-  const scopeFilter = buildScopeFilter(rule, 'a');
 
   // Map metric name to agent column
   const columnMap: Record<string, string> = {
@@ -248,17 +247,19 @@ async function evaluateMetricThreshold(rule: any): Promise<void> {
   const opMap: Record<string, string> = { gt: '>', lt: '<', gte: '>=', lte: '<=' };
   const op = opMap[operator] ?? '>';
 
+  const scope = buildScopeFilter(rule, 'a', 4);
+
   const { rows: agents } = await query(
     `SELECT a.id, a.hostname, ${column} AS metric_value
      FROM agents a
      WHERE a.org_id = $1
        AND a.status = 'online'
-       AND a.last_seen_at >= NOW() - INTERVAL '${durationMin} minutes'
+       AND a.last_seen_at >= NOW() - ($3 * INTERVAL '1 minute')
        AND ${column} IS NOT NULL
        AND ${column} ${op} $2
-       ${scopeFilter}
+       ${scope.sql}
      LIMIT 100`,
-    [rule.org_id, threshold]
+    [rule.org_id, threshold, durationMin, ...scope.params]
   );
 
   for (const agent of agents) {
@@ -393,17 +394,20 @@ async function processEscalations(): Promise<void> {
 // SCOPE FILTER BUILDER
 // ════════════════════════════════════════════
 
-function buildScopeFilter(rule: any, alias: string): string {
+function buildScopeFilter(rule: any, alias: string, startIdx: number): { sql: string; params: unknown[] } {
   if (rule.scope_type === 'company' && rule.scope_value) {
-    return `AND ${alias}.company_id = '${rule.scope_value}'`;
+    return { sql: `AND ${alias}.company_id = $${startIdx}`, params: [rule.scope_value] };
   }
   if (rule.scope_type === 'folder' && rule.scope_value) {
-    return `AND EXISTS (SELECT 1 FROM agent_folder_membership afm WHERE afm.agent_id = ${alias}.id AND afm.folder_id = '${rule.scope_value}')`;
+    return {
+      sql: `AND EXISTS (SELECT 1 FROM agent_folder_membership afm WHERE afm.agent_id = ${alias}.id AND afm.folder_id = $${startIdx})`,
+      params: [rule.scope_value],
+    };
   }
   if (rule.scope_type === 'tag' && rule.scope_value) {
-    return `AND '${rule.scope_value}' = ANY(${alias}.tags)`;
+    return { sql: `AND $${startIdx} = ANY(${alias}.tags)`, params: [rule.scope_value] };
   }
-  return '';
+  return { sql: '', params: [] };
 }
 
 // ════════════════════════════════════════════

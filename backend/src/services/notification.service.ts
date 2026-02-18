@@ -268,11 +268,14 @@ async function sendWebhook(p: NotifPayload): Promise<void> {
     };
 
     const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    const bodyStr = JSON.stringify(body);
     if (integ.config?.secret) {
-      headers['X-Reap3r-Signature'] = integ.config.secret;
+      // Sign with HMAC-SHA256 so the receiver can verify payload integrity
+      const { createHmac } = await import('crypto');
+      headers['X-Reap3r-Signature'] = 'sha256=' + createHmac('sha256', integ.config.secret).update(bodyStr).digest('hex');
     }
 
-    const resp = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
+    const resp = await fetch(url, { method: 'POST', headers, body: bodyStr });
     if (!resp.ok) throw new Error(`Webhook returned ${resp.status}`);
   }
 }

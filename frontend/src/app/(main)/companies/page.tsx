@@ -9,7 +9,7 @@ export default function CompaniesPage() {
   const [companies, setCompanies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showCreate, setShowCreate] = useState(false);
-  const [form, setForm] = useState({ name: '', domain: '', notes: '' });
+  const [form, setForm] = useState({ name: '', notes: '' });
   const [editId, setEditId] = useState<string | null>(null);
 
   const fetch = () => {
@@ -26,7 +26,7 @@ export default function CompaniesPage() {
     } else {
       await api.companies.create(form);
     }
-    setShowCreate(false); setEditId(null); setForm({ name: '', domain: '', notes: '' }); fetch();
+    setShowCreate(false); setEditId(null); setForm({ name: '', notes: '' }); fetch();
   };
 
   const handleDelete = async (id: string) => {
@@ -37,21 +37,20 @@ export default function CompaniesPage() {
 
   const startEdit = (c: any) => {
     setEditId(c.id);
-    setForm({ name: c.name, domain: c.domain || '', notes: c.notes || '' });
+    setForm({ name: c.name, notes: c.notes || '' });
     setShowCreate(true);
   };
 
   return (
     <>
-      <TopBar title="Companies" actions={<Button size="sm" onClick={() => { setShowCreate(true); setEditId(null); setForm({ name: '', domain: '', notes: '' }); }}><Plus className="w-4 h-4 mr-1" />Add Company</Button>} />
+      <TopBar title="Companies" actions={<Button size="sm" onClick={() => { setShowCreate(true); setEditId(null); setForm({ name: '', notes: '' }); }}><Plus className="w-4 h-4 mr-1" />Add Company</Button>} />
       <div className="p-6 space-y-4">
         {showCreate && (
           <Card>
             <form onSubmit={handleSubmit} className="space-y-3">
               <h3 className="text-sm font-semibold text-reap3r-text">{editId ? 'Edit Company' : 'New Company'}</h3>
               <input className="w-full px-3 py-2 bg-reap3r-bg border border-reap3r-border rounded-lg text-sm text-reap3r-text" placeholder="Company name" value={form.name} onChange={e => setForm({ ...form, name: e.target.value })} required />
-              <input className="w-full px-3 py-2 bg-reap3r-bg border border-reap3r-border rounded-lg text-sm text-reap3r-text" placeholder="Domain (optional)" value={form.domain} onChange={e => setForm({ ...form, domain: e.target.value })} />
-              <textarea className="w-full px-3 py-2 bg-reap3r-bg border border-reap3r-border rounded-lg text-sm text-reap3r-text" placeholder="Notes" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} />
+              <textarea className="w-full px-3 py-2 bg-reap3r-bg border border-reap3r-border rounded-lg text-sm text-reap3r-text" placeholder="Notes (optional)" value={form.notes} onChange={e => setForm({ ...form, notes: e.target.value })} rows={2} />
               <div className="flex gap-2">
                 <Button type="submit" size="sm">{editId ? 'Update' : 'Create'}</Button>
                 <Button type="button" variant="secondary" size="sm" onClick={() => setShowCreate(false)}>Cancel</Button>

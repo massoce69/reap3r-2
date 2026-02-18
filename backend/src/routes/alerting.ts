@@ -2,7 +2,7 @@
 // MASSVISION Reap3r — Alerting Routes
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
-import { Permission, CreateAlertRuleSchema, UpdateAlertRuleSchema, AlertAckSchema, AlertSnoozeSchema, CreateAlertIntegrationSchema } from '@massvision/shared';
+import { Permission, CreateAlertRuleSchema, UpdateAlertRuleSchema, AlertSnoozeSchema, CreateAlertIntegrationSchema } from '@massvision/shared';
 import * as alertSvc from '../services/alerting.service.js';
 import * as notifier from '../services/notification.service.js';
 import { parseUUID, parseBody, clampLimit } from '../lib/validate.js';

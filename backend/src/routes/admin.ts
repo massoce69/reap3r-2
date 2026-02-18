@@ -247,12 +247,37 @@ export default async function adminRoutes(fastify: FastifyInstance) {
     preHandler: [fastify.requirePermission(Permission.UserUpdate)],
   }, async (request, reply) => {
     const { id } = request.params as { id: string };
-    const { secret } = request.body as { secret: string };
-    if (!secret) return reply.status(400).send({ error: 'Secret required' });
-    
-    await admin.setupMFA(id, secret);
+
+    // Generate a cryptographically strong TOTP secret server-side (160-bit / 20 bytes)
+    const { randomBytes } = await import('crypto');
+    const secretBytes = randomBytes(20);
+
+    // Base32-encode for TOTP (RFC 4226)
+    const BASE32_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ234567';
+    let base32 = '';
+    let bits = 0;
+    let value = 0;
+    for (const byte of secretBytes) {
+      value = (value << 8) | byte;
+      bits += 8;
+      while (bits >= 5) {
+        bits -= 5;
+        base32 += BASE32_CHARS[(value >> bits) & 31];
+      }
+    }
+    if (bits > 0) base32 += BASE32_CHARS[(value << (5 - bits)) & 31];
+
+    // Fetch the user's email for the TOTP URI label
+    const { rows } = await fastify.pg.query(`SELECT email FROM users WHERE id = $1`, [id]);
+    const email = rows[0]?.email ?? id;
+
+    const issuer = encodeURIComponent('Reap3r');
+    const account = encodeURIComponent(email);
+    const totpUri = `otpauth://totp/${issuer}:${account}?secret=${base32}&issuer=${issuer}&algorithm=SHA1&digits=6&period=30`;
+
+    await admin.setupMFA(id, base32);
     await request.audit({ action: 'mfa_setup', entity_type: 'user', entity_id: id });
-    return { ok: true };
+    return { ok: true, secret: base32, totp_uri: totpUri };
   });
 
   // POST /api/admin/users/:id/mfa/enable

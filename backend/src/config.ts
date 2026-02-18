@@ -77,8 +77,15 @@ export const config = {
   },
 } as const;
 
-// Validation
-if (nodeEnv === 'production' && !process.env.VAULT_MASTER_KEY) {
-  // Already checked above, but be explicit
-  throw new Error('[FATAL] VAULT_MASTER_KEY must be set in production for secret decryption');
+// Validation — enforce non-default secrets in production
+if (nodeEnv === 'production') {
+  if (!process.env.VAULT_MASTER_KEY) {
+    throw new Error('[FATAL] VAULT_MASTER_KEY must be set in production for secret decryption');
+  }
+  if (!process.env.JWT_SECRET || process.env.JWT_SECRET.startsWith('dev_')) {
+    throw new Error('[FATAL] JWT_SECRET must be set to a strong secret in production');
+  }
+  if (!process.env.HMAC_SECRET || process.env.HMAC_SECRET.startsWith('dev_')) {
+    throw new Error('[FATAL] HMAC_SECRET must be set to a strong secret in production');
+  }
 }

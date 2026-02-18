@@ -37,7 +37,7 @@ export default function JobsPage() {
         {/* Filters */}
         <Card className="flex items-center gap-4 !py-3 flex-wrap">
           <div className="flex gap-1">
-            {['', 'queued', 'assigned', 'running', 'success', 'failed', 'timeout', 'cancelled'].map((s) => (
+            {['', 'pending', 'dispatched', 'running', 'completed', 'failed', 'cancelled'].map((s) => (
               <button
                 key={s}
                 onClick={() => { setStatusFilter(s); setPage(1); }}

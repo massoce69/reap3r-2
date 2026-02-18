@@ -12,7 +12,8 @@ export default async function chatRoutes(fastify: FastifyInstance) {
   fastify.get('/api/chat/channels', {
     preHandler: [fastify.requirePermission(Permission.MessageRead)],
   }, async (request) => {
-    return svc.listChannels(request.currentUser.org_id, request.currentUser.id);
+    const channels = await svc.listChannels(request.currentUser.org_id, request.currentUser.id);
+    return { data: channels };
   });
 
   // POST /api/chat/channels

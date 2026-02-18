@@ -225,10 +225,10 @@ export async function getExpiringSecrets(orgId: string, days: number = 30) {
   const { rows } = await query(
     `SELECT id, name, type, expires_at FROM secrets
      WHERE org_id = $1 AND expires_at IS NOT NULL 
-     AND expires_at <= NOW() + INTERVAL '${days} days' 
+     AND expires_at <= NOW() + ($2 * INTERVAL '1 day')
      AND expires_at > NOW()
      ORDER BY expires_at ASC`,
-    [orgId]
+    [orgId, days]
   );
   return rows;
 }
@@ -236,8 +236,10 @@ export async function getExpiringSecrets(orgId: string, days: number = 30) {
 export async function markSecretAsRotated(secretId: string, userId: string) {
   await query(
     `UPDATE secrets SET 
-      metadata_json = jsonb_set(COALESCE(metadata_json, '{}'::jsonb), '{last_rotation}', to_jsonb(NOW()::text)),
-      metadata_json = jsonb_set(metadata_json, '{rotated_by}', to_jsonb($2::text)),
+      metadata_json = jsonb_set(
+        jsonb_set(COALESCE(metadata_json, '{}'::jsonb), '{last_rotation}', to_jsonb(NOW()::text)),
+        '{rotated_by}', to_jsonb($2::text)
+      ),
       updated_at = NOW()
      WHERE id = $1`,
     [secretId, userId]

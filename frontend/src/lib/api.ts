@@ -240,7 +240,7 @@ export const api = {
       return request<{ data: any[]; total: number }>(`/api/edr/detections${qs}`);
     },
     updateDetection: (id: string, data: any) =>
-      request<any>(`/api/edr/detections/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+      request<any>(`/api/edr/detections/${id}/status`, { method: 'PATCH', body: JSON.stringify(data) }),
     incidents: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<{ data: any[]; total: number }>(`/api/edr/incidents${qs}`);
@@ -248,7 +248,7 @@ export const api = {
     createIncident: (data: any) =>
       request<any>('/api/edr/incidents', { method: 'POST', body: JSON.stringify(data) }),
     updateIncident: (id: string, data: any) =>
-      request<any>(`/api/edr/incidents/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+      request<any>(`/api/edr/incidents/${id}/status`, { method: 'PATCH', body: JSON.stringify(data) }),
     respond: (data: any) =>
       request<any>('/api/edr/respond', { method: 'POST', body: JSON.stringify(data) }),
   },
@@ -271,8 +271,8 @@ export const api = {
         request<any[]>(`/api/admin/users/${id}/sessions`),
       revokeAllSessions: (id: string) =>
         request<any>(`/api/admin/users/${id}/sessions/revoke-all`, { method: 'POST' }),
-      setupMFA: (id: string, secret: string) =>
-        request<any>(`/api/admin/users/${id}/mfa/setup`, { method: 'POST', body: JSON.stringify({ secret }) }),
+      setupMFA: (id: string) =>
+        request<{ ok: boolean; secret: string; totp_uri: string }>(`/api/admin/users/${id}/mfa/setup`, { method: 'POST' }),
       enableMFA: (id: string) =>
         request<any>(`/api/admin/users/${id}/mfa/enable`, { method: 'POST' }),
       disableMFA: (id: string) =>

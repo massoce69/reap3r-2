@@ -22,6 +22,20 @@ export default async function jobRoutes(fastify: FastifyInstance) {
     });
   });
 
+  // ── Job stats — MUST be before /:id to avoid route shadowing ──
+  fastify.get('/api/jobs/stats', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.DashboardView)] }, async (request) => {
+    const orgId = request.currentUser.org_id;
+    const res = await fastify.pg.query(
+      `SELECT status, count(*)::int FROM jobs WHERE org_id = $1 GROUP BY status`,
+      [orgId],
+    );
+    const stats: Record<string, number> = { pending: 0, queued: 0, dispatched: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    for (const r of res.rows) {
+      stats[r.status] = r.count;
+    }
+    return stats;
+  });
+
   // ── Get job ──
   fastify.get('/api/jobs/:id', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.JobView)] }, async (request, reply) => {
     const id = parseUUID((request.params as any).id, reply);
@@ -67,7 +81,6 @@ export default async function jobRoutes(fastify: FastifyInstance) {
     });
 
     // Agent gateway dispatches on the next heartbeat to keep the wire protocol strictly v1 (no ad-hoc messages).
-
     return reply.status(201).send(job);
   });
 
@@ -87,19 +100,5 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       details: null, ip_address: request.ip,
     });
     return { message: 'Job cancelled' };
-  });
-
-  // ── Job stats ──
-  fastify.get('/api/jobs/stats', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.DashboardView)] }, async (request) => {
-    const orgId = request.currentUser.org_id;
-    const res = await fastify.pg.query(
-      `SELECT status, count(*)::int FROM jobs WHERE org_id = $1 GROUP BY status`,
-      [orgId],
-    );
-    const stats: Record<string, number> = { pending: 0, queued: 0, dispatched: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
-    for (const r of res.rows) {
-      stats[r.status] = r.count;
-    }
-    return stats;
   });
 }

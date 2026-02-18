@@ -33,6 +33,7 @@ export default function AdminPage() {
   const [showRoleChange, setShowRoleChange] = useState(false);
   const [sessions, setSessions] = useState<any[]>([]);
   const [mfaSecret, setMfaSecret] = useState('');
+  const [mfaTotpUri, setMfaTotpUri] = useState('');
   const [roles, setRoles] = useState<any[]>([]);
   const [targetRole, setTargetRole] = useState('');
 
@@ -109,9 +110,9 @@ export default function AdminPage() {
   const openMFA = async (user: any) => {
     setSelectedUser(user);
     if (!user.mfa_enabled) {
-      const secret = Math.random().toString(36).substring(7);
-      const res = await api.admin.users.setupMFA(user.id, secret);
-      setMfaSecret(secret);
+      const res = await api.admin.users.setupMFA(user.id);
+      setMfaSecret(res.secret);
+      setMfaTotpUri(res.totp_uri);
     }
     setShowMFA(true);
   };
@@ -342,9 +343,17 @@ export default function AdminPage() {
             ) : (
               <div className="space-y-3">
                 <p className="text-sm text-reap3r-text mb-2">Scan this QR code with your authenticator app:</p>
-                <div className="bg-white p-4 rounded-lg flex items-center justify-center">
-                  <QrCode className="w-32 h-32 text-gray-800" />
-                  <p className="text-xs text-gray-600 mt-2">Secret: {mfaSecret}</p>
+                <div className="bg-white p-4 rounded-lg flex flex-col items-center justify-center">
+                  {mfaTotpUri ? (
+                    <img
+                      src={`https://api.qrserver.com/v1/create-qr-code/?size=160x160&data=${encodeURIComponent(mfaTotpUri)}`}
+                      alt="TOTP QR code"
+                      className="w-40 h-40"
+                    />
+                  ) : (
+                    <QrCode className="w-32 h-32 text-gray-300" />
+                  )}
+                  <p className="text-xs text-gray-600 mt-2 font-mono break-all">Secret: {mfaSecret}</p>
                 </div>
                 <p className="text-xs text-reap3r-muted">After scanning, enable MFA:</p>
                 <Button variant="primary" onClick={() => toggleMFA(true)}>Enable MFA</Button>

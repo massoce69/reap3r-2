@@ -169,7 +169,8 @@ export default async function vaultRoutes(fastify: FastifyInstance) {
   }, async (request) => {
     const q = request.query as any;
     const days = Number(q.days) || 30;
-    return svc.getExpiringSecrets(request.currentUser.org_id, days);
+    const secrets = await svc.getExpiringSecrets(request.currentUser.org_id, days);
+    return { data: secrets };
   });
 
   // POST /api/vault/secrets/:id/rotate
