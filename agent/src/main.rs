@@ -81,9 +81,9 @@ fn flog(level: &str, msg: &str) {
     }
 }
 
-macro_rules! finfo  { ($($arg:tt)*) => { let s = format!($($arg)*); info!("{}", s);  flog("INFO",  &s); } }
-macro_rules! fwarn  { ($($arg:tt)*) => { let s = format!($($arg)*); warn!("{}", s);  flog("WARN",  &s); } }
-macro_rules! ferror { ($($arg:tt)*) => { let s = format!($($arg)*); error!("{}", s); flog("ERROR", &s); } }
+macro_rules! finfo  { ($($arg:tt)*) => {{ let s = format!($($arg)*); info!("{}", s);  flog("INFO",  &s); }} }
+macro_rules! fwarn  { ($($arg:tt)*) => {{ let s = format!($($arg)*); warn!("{}", s);  flog("WARN",  &s); }} }
+macro_rules! ferror { ($($arg:tt)*) => {{ let s = format!($($arg)*); error!("{}", s); flog("ERROR", &s); }} }
 
 // ── CLI Args ──────────────────────────────────────────────
 
