@@ -1063,8 +1063,8 @@ const RD_CAPTURE_PS: &str = r#"
 Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$w = [Math]::Round($s.Width * SCALE_FACTOR)
-$h = [Math]::Round($s.Height * SCALE_FACTOR)
+$w = [int][Math]::Round($s.Width * SCALE_FACTOR)
+$h = [int][Math]::Round($s.Height * SCALE_FACTOR)
 $bmp = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
 $g = [System.Drawing.Graphics]::FromImage($bmp)
 $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
@@ -1075,7 +1075,7 @@ $g2.DrawImage($bmp, 0, 0, $w, $h)
 $ms = New-Object System.IO.MemoryStream
 $enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
 $ep = New-Object System.Drawing.Imaging.EncoderParameters(1)
-$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, QUALITY_VALUE)
+$ep.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, [long]QUALITY_VALUE)
 $resized.Save($ms, $enc, $ep)
 [Convert]::ToBase64String($ms.ToArray())
 $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()
@@ -1146,12 +1146,18 @@ async fn start_remote_desktop(
                             fwarn!("RD: Failed to send frame, stopping");
                             break;
                         }
+                        if sequence % 10 == 0 {
+                            finfo!("RD: frame #{} sent ({} bytes)", sequence, b64.len());
+                        }
                         sequence += 1;
+                    } else {
+                        let stderr = String::from_utf8_lossy(&output.stderr);
+                        fwarn!("RD: Empty capture (stdout={} bytes). stderr: {}", b64.len(), stderr.chars().take(300).collect::<String>());
                     }
                 }
                 Ok(output) => {
                     let stderr = String::from_utf8_lossy(&output.stderr);
-                    fwarn!("RD: PowerShell capture failed: {}", stderr.chars().take(200).collect::<String>());
+                    fwarn!("RD: PowerShell exit code {:?}. stderr: {}", output.status.code(), stderr.chars().take(300).collect::<String>());
                 }
                 Err(e) => {
                     fwarn!("RD: Failed to run PowerShell: {}", e);

@@ -244,9 +244,10 @@ export default function AgentDetailPage() {
   // Subscribe to rd:frame WebSocket events
   useEffect(() => {
     if (!rdStreaming || !agent) return;
-    const unsub = realtime.on('rd:frame', (data: any) => {
-      if (data.agent_id === agent.id) {
-        setRdFrame(`data:image/jpeg;base64,${data.data}`);
+    const unsub = realtime.on('rd:frame', (msg: any) => {
+      const p = msg.payload ?? msg;
+      if (p.agent_id === agent.id) {
+        setRdFrame(`data:image/jpeg;base64,${p.data}`);
         setRdFrameCount(prev => prev + 1);
       }
     });
@@ -266,7 +267,7 @@ export default function AgentDetailPage() {
     setRdLoading(true);
     setRdError(null);
     try {
-      const SCREENSHOT_SCRIPT = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $w=[Math]::Round($s.Width*${rdScale/100}); $h=[Math]::Round($s.Height*${rdScale/100}); $bmp=New-Object System.Drawing.Bitmap($s.Width,$s.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size); $resized=New-Object System.Drawing.Bitmap($w,$h); $g2=[System.Drawing.Graphics]::FromImage($resized); $g2.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $g2.DrawImage($bmp,0,0,$w,$h); $ms=New-Object System.IO.MemoryStream; $enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{$_.MimeType -eq 'image/jpeg'}; $ep=New-Object System.Drawing.Imaging.EncoderParameters(1); $ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,${rdQuality}); $resized.Save($ms,$enc,$ep); [Convert]::ToBase64String($ms.ToArray()); $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()`;
+      const SCREENSHOT_SCRIPT = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $w=[int][Math]::Round($s.Width*${rdScale/100}); $h=[int][Math]::Round($s.Height*${rdScale/100}); $bmp=New-Object System.Drawing.Bitmap($s.Width,$s.Height); $g=[System.Drawing.Graphics]::FromImage($bmp); $g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size); $resized=New-Object System.Drawing.Bitmap($w,$h); $g2=[System.Drawing.Graphics]::FromImage($resized); $g2.InterpolationMode=[System.Drawing.Drawing2D.InterpolationMode]::HighQualityBicubic; $g2.DrawImage($bmp,0,0,$w,$h); $ms=New-Object System.IO.MemoryStream; $enc=[System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders()|Where-Object{$_.MimeType -eq 'image/jpeg'}; $ep=New-Object System.Drawing.Imaging.EncoderParameters(1); $ep.Param[0]=New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality,[long]${rdQuality}); $resized.Save($ms,$enc,$ep); [Convert]::ToBase64String($ms.ToArray()); $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()`;
       const job = await api.jobs.create({
         agent_id: agent.id,
         type: JobType.RunScript,
