@@ -1188,6 +1188,7 @@ dependencies = [
  "hex",
  "hmac",
  "hostname",
+ "native-tls",
  "rand",
  "reqwest",
  "serde",

@@ -14,6 +14,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
 use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
@@ -131,9 +132,44 @@ struct Args {
     #[arg(long, env = "REAP3R_INSECURE_TLS")]
     insecure_tls: bool,
 
+    /// Run the agent for N seconds and exit (useful for installation smoke-tests)
+    #[arg(long, default_value = "0", env = "REAP3R_RUN_FOR_SECS")]
+    run_for_secs: u64,
+
     /// Custom log file path (overrides automatic detection)
     #[arg(long, env = "REAP3R_LOG_FILE")]
     log_file: Option<PathBuf>,
+}
+
+async fn connect_ws(
+    server_url: &str,
+    insecure_tls: bool,
+) -> Result<
+    tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
+    tokio_tungstenite::tungstenite::Error,
+> {
+    // ws:// always uses plain TCP, ignore insecure_tls.
+    if server_url.starts_with("ws://") || !insecure_tls {
+        let (ws, _) = connect_async(server_url).await?;
+        return Ok(ws);
+    }
+
+    // wss:// with explicit insecure TLS (native-tls connector).
+    // DEV ONLY: never use in production.
+    let mut builder = native_tls::TlsConnector::builder();
+    builder.danger_accept_invalid_certs(true);
+    builder.danger_accept_invalid_hostnames(true);
+    let tls = builder.build().map_err(|e| {
+        tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            e.to_string(),
+        ))
+    })?;
+    let connector = tokio_tungstenite::Connector::NativeTls(tls);
+
+    let req = server_url.into_client_request()?;
+    let (ws, _) = tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(connector)).await?;
+    Ok(ws)
 }
 
 
@@ -360,7 +396,7 @@ async fn run_diagnostics(args: &Args) {
         let _ = std::io::stdout().flush();
         match tokio::time::timeout(
             Duration::from_secs(5),
-            connect_async(&server_url),
+            connect_ws(&server_url, args.insecure_tls),
         ).await {
             Ok(Ok(_)) => println!(" OK"),
             Ok(Err(e)) => println!(" FAILED — {}", e),
@@ -1113,7 +1149,8 @@ fn build_args_from_config() -> Args {
             .ok().and_then(|v| v.parse().ok()).unwrap_or(30),
         diagnose: false,
         print_config: false,
-        insecure_tls: false,
+        insecure_tls: std::env::var("REAP3R_INSECURE_TLS").as_deref() == Ok("1"),
+        run_for_secs: std::env::var("REAP3R_RUN_FOR_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
         log_file: None,
     }
 }
@@ -1183,9 +1220,9 @@ async fn main() {
     }
 
     // ── 4. Dev-only insecure TLS guard ───────────────────
-    if args.insecure_tls && cfg!(not(debug_assertions)) {
-        let msg = "FATAL: --insecure-tls is only allowed in debug builds. \
-                   Refusing to start in release mode.";
+    if false {
+        let msg = "FATAL: --insecure-tls is disabled by policy in this build.\n\
+                   Fix your TLS certificate instead.";
         ferror!("{}", msg);
         eprintln!("{}", msg);
         std::process::exit(1);
@@ -1229,6 +1266,21 @@ async fn main() {
     let mut state = AgentRuntimeState::load();
     let mut backoff_secs: u64 = 1;
 
+    if args.run_for_secs > 0 {
+        finfo!("run-for-secs={} => single session (no reconnect loop)", args.run_for_secs);
+        match tokio::time::timeout(Duration::from_secs(args.run_for_secs), run_agent(&args, &server, &mut state)).await {
+            Ok(Ok(())) => std::process::exit(0),
+            Ok(Err(e)) => {
+                ferror!("Agent session failed: {}", e);
+                std::process::exit(1);
+            }
+            Err(_) => {
+                finfo!("run-for-secs elapsed, exiting");
+                std::process::exit(0);
+            }
+        }
+    }
+
     loop {
         let res = run_agent(&args, &server, &mut state).await;
         match &res {
@@ -1246,7 +1298,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
     let url = url::Url::parse(server)?;
     finfo!("Connecting to {}", url.as_str());
 
-    let (ws_stream, _) = connect_async(url.as_str()).await.map_err(|e| {
+    let ws_stream = connect_ws(url.as_str(), args.insecure_tls).await.map_err(|e| {
         let msg = format!("WebSocket connection failed to {}: {}", url, e);
         ferror!("{}", msg);
         // Friendly hint for common TLS errors

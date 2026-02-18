@@ -11,3 +11,4 @@ fix_admin_pass.sql
 *.key
 coverage/
 .turbo/
+.tmp/
