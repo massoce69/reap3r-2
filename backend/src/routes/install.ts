@@ -108,63 +108,108 @@ systemctl --no-pager --full status reap3r-agent.service || true
 
     // Installs a Windows Service; must be run from an elevated PowerShell.
     const ps1 = `param(
-  [string]$Token = "${token}",
+  [string]$Token  = "${token}",
   [string]$Server = "${base}"
 )
 
 $ErrorActionPreference = "Stop"
+[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13
 
-function Assert-Admin {
-  $wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
-  if (-not $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Error "Please run PowerShell as Administrator."
-    exit 1
-  }
+function Write-Step([string]$msg) { Write-Host \`\`n"[reap3r] $msg" -ForegroundColor Cyan }
+function Write-OK([string]$msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }
+function Write-Fail([string]$msg) { Write-Host "    ERR $msg" -ForegroundColor Red }
+
+# ── Admin check ──────────────────────────────────────────────────────────────
+$wp = New-Object Security.Principal.WindowsPrincipal([Security.Principal.WindowsIdentity]::GetCurrent())
+if (-not $wp.IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
+  Write-Fail "Please run PowerShell as Administrator (right-click → Run as administrator)."
+  Read-Host "Press Enter to exit"
+  exit 1
 }
 
-Assert-Admin
-
 if ([string]::IsNullOrWhiteSpace($Token)) {
-  Write-Error "Missing token. Provide ?token=... or -Token ..."
+  Write-Fail "Missing enrollment token. Provide ?token=... in the URL."
+  Read-Host "Press Enter to exit"
   exit 1
 }
 
 $Server = $Server.TrimEnd('/')
-$wsBase = $Server -replace '^http(s?)://', 'ws$1://'
-$wsUrl = "$wsBase/ws/agent"
-
-$installDir = Join-Path $env:ProgramFiles 'MASSVISION\\Reap3r'
-$exePath = Join-Path $installDir 'reap3r-agent.exe'
-$svcName = 'MASSVISION-Reap3r-Agent'
-
-New-Item -ItemType Directory -Force -Path $installDir | Out-Null
-
-Write-Host "[reap3r] Downloading agent..." -ForegroundColor Cyan
-Invoke-WebRequest -UseBasicParsing -Uri "$Server/api/agent-binary/download?os=windows&arch=x86_64" -OutFile $exePath
-
-Write-Host "[reap3r] Installing service $svcName" -ForegroundColor Cyan
-if (Get-Service -Name $svcName -ErrorAction SilentlyContinue) {
-  try { Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue } catch {}
-  sc.exe delete $svcName | Out-Null 2>$null
-  Start-Sleep -Seconds 1
+if (-not ($Server -match '^https?://')) {
+  Write-Fail "Server URL must start with https:// or http://. Got: $Server"
+  Read-Host "Press Enter to exit"
+  exit 1
 }
 
-# Important: the full binary path (exe + args) must be stored as ONE value, otherwise the service will start without
-# args and the agent won't be able to connect/enroll.
+# Convert http(s):// → ws(s)://
+$wsUrl = ($Server -replace '^http://', 'ws://') -replace '^https://', 'wss://'
+$wsUrl = "$wsUrl/ws/agent"
+
+$installDir = Join-Path $env:ProgramFiles 'MASSVISION\\Reap3r'
+$exePath    = Join-Path $installDir 'reap3r-agent.exe'
+$logDir     = Join-Path $env:ProgramData 'Reap3r\\logs'
+$svcName    = 'MASSVISION-Reap3r-Agent'
+
+Write-Step "Creating directories..."
+New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+New-Item -ItemType Directory -Force -Path $logDir     | Out-Null
+Write-OK $installDir
+
+Write-Step "Downloading agent binary from $Server ..."
+try {
+  Invoke-WebRequest -UseBasicParsing \`
+    -Uri "$Server/api/agent-binary/download?os=windows&arch=x86_64" \`
+    -OutFile $exePath
+  $size = (Get-Item $exePath).Length
+  Write-OK "Saved to $exePath ($size bytes)"
+} catch {
+  Write-Fail "Download failed: $_"
+  Write-Fail "Make sure you can reach $Server from this machine."
+  Read-Host "Press Enter to exit"
+  exit 1
+}
+
+Write-Step "Installing Windows service '$svcName' ..."
+$existingSvc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+if ($existingSvc) {
+  try { Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue } catch {}
+  sc.exe delete $svcName | Out-Null
+  Start-Sleep -Seconds 2
+}
+
+# BinaryPathName must include all args as a single string for Windows services.
 $bin = '"' + $exePath + '" --server "' + $wsUrl + '" --token "' + $Token + '"'
-New-Service -Name $svcName -BinaryPathName $bin -DisplayName $svcName -StartupType Automatic | Out-Null
+New-Service -Name $svcName \`
+  -BinaryPathName $bin \`
+  -DisplayName "MASSVISION Reap3r Agent" \`
+  -Description "MASSVISION Reap3r remote-management agent" \`
+  -StartupType Automatic | Out-Null
+
+# Auto-restart on failure (3 times, every 5s)
 sc.exe failure $svcName reset= 0 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+Write-OK "Service created"
 
-Write-Host "[reap3r] Service config:" -ForegroundColor Cyan
-sc.exe qc $svcName | Select-String 'BINARY_PATH_NAME' | ForEach-Object { Write-Host $_.Line }
+Write-Step "Starting service..."
+try {
+  Start-Service -Name $svcName
+  Start-Sleep -Seconds 2
+  $svc = Get-Service -Name $svcName
+  Write-OK "Status: $($svc.Status)"
+} catch {
+  Write-Fail "Failed to start service: $_"
+  Write-Host "Check Event Viewer → Windows Logs → Application for details." -ForegroundColor Yellow
+  Read-Host "Press Enter to exit"
+  exit 1
+}
 
-Write-Host "[reap3r] Starting service..." -ForegroundColor Cyan
-Start-Service -Name $svcName
-
-Write-Host "[reap3r] Done." -ForegroundColor Green
-Write-Host "Service: $svcName"
-Write-Host "Binary:  $exePath"
-Write-Host "Server:  $wsUrl"
+Write-Host \`\`n"═══════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "  Reap3r Agent installed successfully!" -ForegroundColor Green
+Write-Host "═══════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "Service : $svcName"
+Write-Host "Binary  : $exePath"
+Write-Host "Server  : $wsUrl"
+Write-Host ""
+Write-Host "Logs: Get-EventLog -LogName Application -Source $svcName -Newest 20"
+Read-Host \`\`n"Press Enter to close"
 `;
 
     reply.header('Content-Type', 'text/plain; charset=utf-8');
