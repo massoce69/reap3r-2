@@ -146,11 +146,13 @@ $wsUrl = "$wsUrl/ws/agent"
 
 $installDir = Join-Path $env:ProgramFiles 'MASSVISION\\Reap3r'
 $exePath    = Join-Path $installDir 'reap3r-agent.exe'
-$logDir     = Join-Path $env:ProgramData 'Reap3r\\logs'
+$dataDir    = Join-Path $env:ProgramData 'Reap3r'
+$logDir     = Join-Path $dataDir 'logs'
 $svcName    = 'MASSVISION-Reap3r-Agent'
 
 Write-Step "Creating directories..."
 New-Item -ItemType Directory -Force -Path $installDir | Out-Null
+New-Item -ItemType Directory -Force -Path $dataDir    | Out-Null
 New-Item -ItemType Directory -Force -Path $logDir     | Out-Null
 Write-OK $installDir
 
@@ -168,6 +170,16 @@ try {
   exit 1
 }
 
+Write-Step "Writing agent config ($dataDir\\agent.conf)..."
+$agentConf = @{
+  agent_id   = ""
+  hmac_key   = ""
+  server     = $wsUrl
+  enrolled_at = 0
+} | ConvertTo-Json
+Set-Content -Path "$dataDir\\agent.conf" -Value $agentConf -Encoding UTF8
+Write-OK "Config written (will be populated on first enrollment)"
+
 Write-Step "Installing Windows service '$svcName' ..."
 $existingSvc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
 if ($existingSvc) {
@@ -176,13 +188,21 @@ if ($existingSvc) {
   Start-Sleep -Seconds 2
 }
 
-# BinaryPathName must include all args as a single string for Windows services.
-$bin = '"' + $exePath + '" --server "' + $wsUrl + '" --token "' + $Token + '"'
+# The binary runs in service mode: REAP3R_SERVICE_MODE=1 triggers service dispatcher.
+# Pass --server and --token as arguments so first-run enrollment works.
+# After enrollment, agent.conf is written and args are no longer needed.
+$bin = "\`"$exePath\`" --server \`"$wsUrl\`" --token \`"$Token\`""
 New-Service -Name $svcName \`
   -BinaryPathName $bin \`
   -DisplayName "MASSVISION Reap3r Agent" \`
   -Description "MASSVISION Reap3r remote-management agent" \`
   -StartupType Automatic | Out-Null
+
+# Set environment variable for service mode in registry
+$regPath = "HKLM:\\SYSTEM\\CurrentControlSet\\Services\\$svcName"
+New-ItemProperty -Path $regPath -Name "Environment" \`
+  -Value @("REAP3R_SERVICE_MODE=1", "REAP3R_LOG_FILE=$logDir\\agent.log") \`
+  -PropertyType MultiString -Force | Out-Null
 
 # Auto-restart on failure (3 times, every 5s)
 sc.exe failure $svcName reset= 0 actions= restart/5000/restart/5000/restart/5000 | Out-Null
@@ -191,24 +211,37 @@ Write-OK "Service created"
 Write-Step "Starting service..."
 try {
   Start-Service -Name $svcName
-  Start-Sleep -Seconds 2
+  Start-Sleep -Seconds 3
   $svc = Get-Service -Name $svcName
-  Write-OK "Status: $($svc.Status)"
+  if ($svc.Status -eq 'Running') {
+    Write-OK "Status: $($svc.Status)"
+  } else {
+    Write-Fail "Service status: $($svc.Status) (expected Running)"
+    Write-Host "    Check logs at: $logDir\\agent.log" -ForegroundColor Yellow
+    Write-Host "    Or run: Get-WinEvent -LogName System | Where-Object {\\$_.Message -like '*$svcName*'} | Select-Object -First 10" -ForegroundColor Yellow
+    Read-Host "Press Enter to exit"
+    exit 1
+  }
 } catch {
   Write-Fail "Failed to start service: $_"
-  Write-Host "Check Event Viewer → Windows Logs → Application for details." -ForegroundColor Yellow
+  Write-Host "    Check logs at: $logDir\\agent.log" -ForegroundColor Yellow
   Read-Host "Press Enter to exit"
   exit 1
 }
 
 Write-Host \`\`n"═══════════════════════════════════════════════" -ForegroundColor Green
-Write-Host "  Reap3r Agent installed successfully!" -ForegroundColor Green
+Write-Host "  Reap3r Agent installed and running!" -ForegroundColor Green
 Write-Host "═══════════════════════════════════════════════" -ForegroundColor Green
 Write-Host "Service : $svcName"
 Write-Host "Binary  : $exePath"
 Write-Host "Server  : $wsUrl"
+Write-Host "Logs    : $logDir\\agent.log"
 Write-Host ""
-Write-Host "Logs: Get-EventLog -LogName Application -Source $svcName -Newest 20"
+Write-Host "To check logs:"
+Write-Host "  Get-Content '$logDir\\agent.log' -Tail 30"
+Write-Host ""
+Write-Host "To check service status:"
+Write-Host "  Get-Service $svcName"
 Read-Host \`\`n"Press Enter to close"
 `;
 

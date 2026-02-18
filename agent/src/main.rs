@@ -17,6 +17,15 @@ use tokio_tungstenite::{connect_async, tungstenite::Message};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+// ── Windows Service imports ───────────────────
+#[cfg(windows)]
+use windows_service::{
+    define_windows_service,
+    service::{ServiceControl, ServiceControlAccept, ServiceExitCode, ServiceState, ServiceStatus, ServiceType},
+    service_control_handler::{self, ServiceControlHandlerResult},
+    service_dispatcher,
+};
+
 type HmacSha256 = Hmac<Sha256>;
 
 const MAX_JOB_HISTORY: usize = 256;
@@ -1011,8 +1020,131 @@ async fn execute_system_command(action: &str, delay_secs: u64) -> Result<serde_j
     }
 }
 
+// ── Windows Service implementation ───────────────────────
+// Placed here so finfo!/fwarn!/ferror! macros and all agent functions are in scope.
+
+#[cfg(windows)]
+const SERVICE_NAME: &str = "MASSVISION-Reap3r-Agent";
+
+#[cfg(windows)]
+define_windows_service!(ffi_service_main, windows_service_main);
+
+#[cfg(windows)]
+fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
+    let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
+
+    let status_handle = match service_control_handler::register(SERVICE_NAME, move |ctrl| {
+        match ctrl {
+            ServiceControl::Stop | ServiceControl::Shutdown => {
+                let _ = shutdown_tx.send(());
+                ServiceControlHandlerResult::NoError
+            }
+            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+            _ => ServiceControlHandlerResult::NotImplemented,
+        }
+    }) {
+        Ok(h) => h,
+        Err(e) => {
+            flog("ERROR", &format!("SCM register failed: {}", e));
+            return;
+        }
+    };
+
+    let _ = status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Running,
+        controls_accepted: ServiceControlAccept::STOP | ServiceControlAccept::SHUTDOWN,
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    });
+    flog("INFO", "Windows Service: Running");
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(async {
+        let args = build_args_from_config();
+        let server = match args.server.clone().or_else(|| load_config().map(|c| c.server)) {
+            Some(s) => s,
+            None => {
+                flog("ERROR", "No server URL — cannot start");
+                return;
+            }
+        };
+        let mut state = AgentRuntimeState::load();
+        let mut backoff: u64 = 1;
+        loop {
+            if shutdown_rx.try_recv().is_ok() { break; }
+            let res = run_agent(&args, &server, &mut state).await;
+            match &res {
+                Ok(()) => fwarn!("Connection closed. Reconnecting in {}s...", backoff),
+                Err(e) => ferror!("Error: {}. Reconnecting in {}s...", e, backoff),
+            }
+            if shutdown_rx.try_recv().is_ok() { break; }
+            tokio::time::sleep(Duration::from_secs(backoff)).await;
+            backoff = if res.is_ok() { 1 } else { (backoff * 2).min(60) };
+        }
+    });
+
+    let _ = status_handle.set_service_status(ServiceStatus {
+        service_type: ServiceType::OWN_PROCESS,
+        current_state: ServiceState::Stopped,
+        controls_accepted: ServiceControlAccept::empty(),
+        exit_code: ServiceExitCode::Win32(0),
+        checkpoint: 0,
+        wait_hint: Duration::default(),
+        process_id: None,
+    });
+    flog("INFO", "Windows Service: Stopped");
+}
+
+#[cfg(windows)]
+fn build_args_from_config() -> Args {
+    let saved = load_config();
+    Args {
+        server: saved.as_ref().map(|c| c.server.clone())
+            .or_else(|| std::env::var("REAP3R_SERVER").ok()),
+        token: std::env::var("REAP3R_TOKEN").ok(),
+        agent_id: saved.as_ref().map(|c| c.agent_id.clone())
+            .or_else(|| std::env::var("REAP3R_AGENT_ID").ok()),
+        hmac_key: saved.as_ref().map(|c| c.hmac_key.clone())
+            .or_else(|| std::env::var("REAP3R_HMAC_KEY").ok()),
+        heartbeat_interval: std::env::var("REAP3R_HEARTBEAT_INTERVAL")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(30),
+        diagnose: false,
+        print_config: false,
+        insecure_tls: false,
+        log_file: None,
+    }
+}
+
 #[tokio::main]
 async fn main() {
+    // ── Windows: try service dispatcher first ─────────────
+    // When launched by Windows SCM, service_dispatcher::start() will block and
+    // call windows_service_main(). If we're NOT running as a service (e.g. CLI),
+    // it returns an error immediately and we fall through to normal CLI mode.
+    #[cfg(windows)]
+    {
+        // Init file logger early before any other code.
+        let log_path = std::env::var("REAP3R_LOG_FILE")
+            .map(PathBuf::from)
+            .unwrap_or_else(|_| default_log_path());
+        let _ = FILE_LOGGER.set(FileLogger::open(&log_path));
+
+        // If REAP3R_SERVICE_MODE=1, we are running as a Windows service.
+        if std::env::var("REAP3R_SERVICE_MODE").as_deref() == Ok("1") {
+            flog("INFO", "REAP3R_SERVICE_MODE=1 — starting Windows service dispatcher");
+            match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
+                Ok(()) => return,
+                Err(e) => {
+                    flog("ERROR", &format!("service_dispatcher::start failed: {}", e));
+                    // Fall through — will fail at Args::parse() if no args, which is fine
+                }
+            }
+        }
+    }
+
     // ── 1. Init tracing (stdout) ──────────────────────────
     tracing_subscriber::fmt()
         .with_target(false)
