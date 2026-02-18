@@ -23,7 +23,7 @@ const args = process.argv.slice(2).reduce((acc, arg) => {
   return acc;
 }, {} as Record<string, string>);
 
-const SERVER = args.server || 'ws://localhost:4001';
+const SERVER = args.server || 'ws://localhost:4001/ws/agent';
 const TOKEN = args.token || 'test-token-12345';
 const HMAC_SECRET = args.secret || 'dev_hmac_secret_change_in_production_00000000';
 
