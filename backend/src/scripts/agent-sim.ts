@@ -38,7 +38,17 @@ const ws = new WebSocket(SERVER);
 
 function computeHmac(msg: Partial<AgentMessage>): string {
   const { hmac, ...toSign } = msg;
-  const canonical = JSON.stringify(toSign, Object.keys(toSign).sort());
+  // Canonicalize: sort keys recursively to match backend verification
+  const canonicalize = (obj: any): any => {
+    if (obj === null || typeof obj !== 'object') return obj;
+    if (Array.isArray(obj)) return obj.map(canonicalize);
+    const out: Record<string, any> = {};
+    for (const k of Object.keys(obj).sort()) {
+      out[k] = canonicalize(obj[k]);
+    }
+    return out;
+  };
+  const canonical = JSON.stringify(canonicalize(toSign));
   return crypto
     .createHmac('sha256', agentSecret || HMAC_SECRET)
     .update(canonical)
