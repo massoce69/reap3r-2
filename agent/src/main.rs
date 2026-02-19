@@ -1174,21 +1174,60 @@ try {
 } catch {
     $_ | Out-File $errLog -Append
 }
-# Fallback: WMI video controllers (no position info but at least detects count)
+# Fallback: EnumDisplayMonitors via P/Invoke (correct bounds per monitor, works in user session)
 try {
-    $vcs = Get-CimInstance Win32_VideoController -ErrorAction Stop |
-           Where-Object { $_.CurrentHorizontalResolution -gt 0 }
-    if ($vcs) {
+    $monCode = @'
+using System; using System.Collections.Generic; using System.Runtime.InteropServices;
+public static class NativeMon {
+    [StructLayout(LayoutKind.Sequential)] public struct RECT { public int Left, Top, Right, Bottom; }
+    public delegate bool MEP(IntPtr hm, IntPtr hd, ref RECT rc, IntPtr d);
+    [DllImport("user32.dll")] public static extern bool EnumDisplayMonitors(IntPtr hdc, IntPtr clip, MEP fn, IntPtr data);
+}
+'@
+    Add-Type -TypeDefinition $monCode -ErrorAction Stop
+    $script:rects = [System.Collections.Generic.List[object]]::new()
+    $cb = [NativeMon+MEP]{
+        param($hm,$hd,[ref]$rc,$d)
+        $script:rects.Add(@{ L=$rc.Value.Left; T=$rc.Value.Top; R=$rc.Value.Right; B=$rc.Value.Bottom })
+        $true
+    }
+    [NativeMon]::EnumDisplayMonitors([IntPtr]::Zero, [IntPtr]::Zero, $cb, [IntPtr]::Zero) | Out-Null
+    if ($script:rects.Count -gt 0) {
         $monitors = @(); $idx = 0
-        foreach ($v in @($vcs)) {
+        foreach ($r in $script:rects) {
             $monitors += [PSCustomObject]@{
                 index   = $idx
-                name    = $v.Name
+                name    = "DISPLAY$($idx+1)"
+                primary = ($idx -eq 0)
+                x       = [int]$r.L
+                y       = [int]$r.T
+                width   = [int]($r.R - $r.L)
+                height  = [int]($r.B - $r.T)
+            }
+            $idx++
+        }
+        $json = $monitors | ConvertTo-Json -Compress
+        if ($monitors.Count -eq 1) { $json = "[$json]" }
+        [IO.File]::WriteAllText($outPath, $json)
+        exit 0
+    }
+} catch {
+    $_ | Out-File $errLog -Append
+}
+# Fallback: Win32_DesktopMonitor WMI (counts physical monitors, not GPUs)
+try {
+    $vcs = @(Get-CimInstance Win32_DesktopMonitor -ErrorAction Stop)
+    if ($vcs.Count -gt 0) {
+        $monitors = @(); $idx = 0
+        foreach ($v in $vcs) {
+            $monitors += [PSCustomObject]@{
+                index   = $idx
+                name    = if ($v.Name) { $v.Name } else { "DISPLAY$($idx+1)" }
                 primary = ($idx -eq 0)
                 x       = 0
                 y       = 0
-                width   = [int]$v.CurrentHorizontalResolution
-                height  = [int]$v.CurrentVerticalResolution
+                width   = if ($v.ScreenWidth -gt 0) { [int]$v.ScreenWidth } else { 1920 }
+                height  = if ($v.ScreenHeight -gt 0) { [int]$v.ScreenHeight } else { 1080 }
             }
             $idx++
         }
