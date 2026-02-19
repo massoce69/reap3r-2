@@ -202,7 +202,7 @@ export type SecurityEvent = z.infer<typeof SecurityEventPayload>;
 
 export const StreamOutputPayload = z.object({
   session_id: z.string(),
-  stream_type: z.enum(['stdout', 'stderr', 'frame', 'input']),
+  stream_type: z.enum(['stdout', 'stderr', 'frame', 'input', 'error']),
   data: z.string(),
   sequence: z.number().int(),
 });
