@@ -149,7 +149,8 @@ HMAC_SECRET=$(openssl rand -base64 32)
 VAULT_MASTER_KEY=$(openssl rand -base64 32)
 LOG_LEVEL=info
 PORT=4000
-WS_PORT=4001
+# Deprecated legacy var kept for migration compatibility.
+WS_PORT=4000
 EOF
 else
     log_warn "backend/.env existe déjà"
@@ -250,10 +251,6 @@ upstream backend_http {
     server 127.0.0.1:4000;
 }
 
-upstream backend_ws_agent {
-    server 127.0.0.1:4001;
-}
-
 upstream frontend {
     server localhost:3000;
 }
@@ -276,7 +273,7 @@ server {
     }
 
     location /ws/agent {
-        proxy_pass http://backend_ws_agent;
+        proxy_pass http://backend_http;
         proxy_http_version 1.1;
         proxy_set_header Upgrade $http_upgrade;
         proxy_set_header Connection "upgrade";

@@ -38,6 +38,6 @@ curl -s -o /dev/null -w "%{http_code}" \
   -H "Upgrade: websocket" \
   -H "Sec-WebSocket-Version: 13" \
   -H "Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==" \
-  "http://127.0.0.1:4002/ws/ui?token=$TOKEN" \
+  "http://127.0.0.1:4000/ws/ui?token=$TOKEN" \
   --max-time 2 2>&1 || true
 echo ""

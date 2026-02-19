@@ -72,7 +72,8 @@ if [ ! -f "$ENV_FILE" ]; then
   cat > "$ENV_FILE" <<EOF
 NODE_ENV=production
 PORT=4000
-WS_PORT=4001
+# Deprecated legacy var kept for migration compatibility.
+WS_PORT=4000
 API_BASE_URL=http://$($VpsIP)
 DATABASE_URL=postgresql://reap3r:reap3r_secret@localhost:5432/reap3r
 JWT_SECRET=$JWT_SECRET
@@ -189,10 +190,6 @@ upstream backend_http {
     server 127.0.0.1:4000;
 }
 
-upstream backend_ws_agent {
-    server 127.0.0.1:4001;
-}
-
 upstream frontend {
     server 127.0.0.1:3000;
 }
@@ -213,9 +210,9 @@ server {
         proxy_set_header X-Forwarded-Proto \$scheme;
     }
 
-    # Agent WebSocket gateway (separate port)
+    # Agent WebSocket gateway (unified backend port)
     location /ws/agent {
-        proxy_pass http://backend_ws_agent;
+        proxy_pass http://backend_http;
         proxy_http_version 1.1;
         proxy_set_header Upgrade \$http_upgrade;
         proxy_set_header Connection "upgrade";
