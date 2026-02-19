@@ -14,27 +14,28 @@ tokio = { version = "1", features = ["full"] }
 # ── TLS: use rustls (pure-Rust) instead of native-tls ──
 # This eliminates the dependency on Windows SChannel / OpenSSL,
 # ensuring TLS 1.2+ works even on Windows 7 SP1 without KB updates.
-tokio-tungstenite = { version = "0.24", features = ["rustls-tls-webpki-roots"] }
+tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "0.26"
-tokio-rustls = "0.26"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 hmac = "0.12"
 sha2 = "0.10"
 hex = "0.4"
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 chrono = { version = "0.4", features = ["clock", "serde"] }
 sysinfo = "0.31"
 hostname = "0.4"
 rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "charset", "http2", "macos-system-configuration"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["json"] }
 clap = { version = "4", features = ["derive", "env"] }
 dirs = "5"
 futures-util = "0.3"
 url = "2"
+ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"

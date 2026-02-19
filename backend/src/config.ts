@@ -24,6 +24,7 @@ const devDatabaseUrl = `postgresql://reap3r:reap3r_dev_password@${devPgHost}:${d
 export const config = {
   nodeEnv,
   port: envInt('PORT', 4000),
+  // Deprecated legacy dedicated WS ports (WS is now unified on PORT).
   wsPort: envInt('WS_PORT', 4001),
   uiWsPort: envInt('UI_WS_PORT', 4002),
 
@@ -39,6 +40,7 @@ export const config = {
   jwt: {
     secret: env('JWT_SECRET', 'dev_jwt_secret_change_in_production_00000000'),
     expiresIn: env('JWT_EXPIRES_IN', '24h'),
+    refreshExpiresIn: env('JWT_REFRESH_EXPIRES_IN', '30d'),
   },
 
   // Agent HMAC

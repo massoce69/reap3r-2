@@ -16,7 +16,14 @@ export default function ChatPage() {
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const messagingWsRef = useRef<WebSocket | null>(null);
+  const reconnectRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const activeChannelRef = useRef<string | null>(null);
+  const shouldReconnectRef = useRef(true);
+
+  useEffect(() => {
+    activeChannelRef.current = activeChannel;
+  }, [activeChannel]);
 
   const loadChannels = () => {
     api.chat.channels.list().then(r => {
@@ -33,15 +40,67 @@ export default function ChatPage() {
     });
   }, []);
 
-  useEffect(() => { loadChannels(); }, []);
+  const connectMessagingSocket = useCallback(() => {
+    if (messagingWsRef.current && (messagingWsRef.current.readyState === WebSocket.OPEN || messagingWsRef.current.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+
+    const token = localStorage.getItem('reap3r_token');
+    if (!token) return;
+
+    const wsBase =
+      process.env.NEXT_PUBLIC_WS_URL?.trim() ||
+      `${window.location.protocol === 'https:' ? 'wss' : 'ws'}://${window.location.host}`;
+    const ws = new WebSocket(`${wsBase}/ws/messaging?token=${encodeURIComponent(token)}`);
+    messagingWsRef.current = ws;
+
+    ws.onmessage = (event) => {
+      try {
+        const data = JSON.parse(event.data);
+        if (data?.type !== 'chat:message') return;
+        const payload = data.payload;
+        if (!payload?.channel_id || !payload?.message) return;
+
+        setChannels((prev) => prev.map((c) => (
+          c.id === payload.channel_id
+            ? { ...c, last_message_at: payload.message.created_at ?? new Date().toISOString() }
+            : c
+        )));
+
+        if (activeChannelRef.current !== payload.channel_id) return;
+        setMessages((prev) => {
+          if (prev.some((m) => m.id === payload.message.id)) return prev;
+          return [...prev, payload.message];
+        });
+        setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 80);
+      } catch {
+        // Ignore malformed realtime payloads.
+      }
+    };
+
+    ws.onclose = () => {
+      messagingWsRef.current = null;
+      if (!shouldReconnectRef.current) return;
+      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      reconnectRef.current = setTimeout(() => connectMessagingSocket(), 3000);
+    };
+  }, []);
+
+  useEffect(() => {
+    shouldReconnectRef.current = true;
+    loadChannels();
+    connectMessagingSocket();
+    return () => {
+      shouldReconnectRef.current = false;
+      if (reconnectRef.current) clearTimeout(reconnectRef.current);
+      if (messagingWsRef.current) messagingWsRef.current.close();
+    };
+  }, [connectMessagingSocket]);
+
   useEffect(() => {
     if (activeChannel) {
       loadMessages(activeChannel);
-      // Auto-poll every 3 seconds for real-time chat
-      if (pollRef.current) clearInterval(pollRef.current);
-      pollRef.current = setInterval(() => loadMessages(activeChannel), 3000);
     }
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
   }, [activeChannel, loadMessages]);
 
   const sendMessage = async (e: React.FormEvent) => {

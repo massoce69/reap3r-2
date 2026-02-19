@@ -62,8 +62,14 @@ export default function VaultPage() {
 
   const handleReveal = async () => {
     if (!selected) return;
-    const res = await api.vault.reveal(selected.id);
-    setRevealedValue(res.value);
+    const mfaCode = window.prompt('Enter your 6-digit MFA code to reveal this secret');
+    if (!mfaCode) return;
+    try {
+      const res = await api.vault.reveal(selected.id, mfaCode.trim());
+      setRevealedValue(res.value);
+    } catch (err: any) {
+      toast.error('Reveal failed', err.message);
+    }
   };
 
   const handleDelete = async () => {
@@ -295,7 +301,16 @@ export default function VaultPage() {
                   {versions.map(v => (
                     <div key={v.id} className="flex items-center justify-between text-[11px] bg-reap3r-bg border border-reap3r-border p-2 rounded-lg">
                       <span className="text-reap3r-muted font-mono">{new Date(v.created_at).toLocaleString()}</span>
-                      <button onClick={() => api.vault.revealVersion(selected.id, v.id).then(r => alert(`Version: ${r.value}`))}
+                      <button onClick={async () => {
+                        const mfaCode = window.prompt('Enter your 6-digit MFA code to reveal this version');
+                        if (!mfaCode) return;
+                        try {
+                          const r = await api.vault.revealVersion(selected.id, v.id, mfaCode.trim());
+                          alert(`Version: ${r.value}`);
+                        } catch (err: any) {
+                          toast.error('Version reveal failed', err.message);
+                        }
+                      }}
                         className="text-white/60 hover:text-white transition-colors">View</button>
                     </div>
                   ))}

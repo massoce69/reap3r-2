@@ -84,7 +84,11 @@ class RealtimeClient {
           console.log('[WS] Reconnecting...');
           this.connecting = false; // Reset so connect() proceeds
           this.ws = null;          // Reset so guard allows new connection
-          if (this.token) this.connect(this.token);
+          const latestToken =
+            typeof window !== 'undefined'
+              ? localStorage.getItem('reap3r_token')
+              : this.token;
+          if (latestToken) this.connect(latestToken);
         }, 4000);
       }
     };

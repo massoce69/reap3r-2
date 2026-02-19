@@ -494,9 +494,28 @@
 | Rate limiting | ✅ | 200/min global, 10/min auth |
 | Security headers | ✅ | CSP, HSTS, X-Frame-Options |
 | Brute force protection | ✅ | Login event logging + lockout |
-| MFA (TOTP) | ⚠️ | Setup exists, login flow TODO |
-| Session revocation | ⚠️ | Table exists, login integration TODO |
+| MFA (TOTP) | ⚠️ | Login + Vault reveal are enforced with TOTP; org-wide rollout policy pending |
+| Session revocation | ✅ | Access session bound to DB session, refresh rotation + revocation enforced |
 | API keys | ❌ | Migration 005 |
+
+---
+
+## Migration Tickets
+
+- [ ] Remove legacy `WS_PORT` / `UI_WS_PORT` after migration window and config cleanup.
+
+---
+
+## Release Automation
+
+- Signed agent update manifests:
+  - `tools/gen_update_keys.py` generates Ed25519 keypairs (`REAP3R_UPDATE_PRIVKEY_HEX`, `REAP3R_UPDATE_PUBKEY_HEX`).
+  - `tools/sign_update.py` signs agent binaries and writes `<binary>.manifest.json` with `sig_ed25519`.
+  - Backend manifest resolution supports sidecar signed manifests and can enforce signature via `AGENT_UPDATE_REQUIRE_SIGNATURE=true`.
+- Enterprise bundle packaging:
+  - `tools/build_agent_bundle.ps1` creates `dist/Reap3rAgentBundle/` with `agent-x64.exe`, `agent-x86.exe`, `installer.exe`, `install.ps1`, `uninstall.ps1`, `config.json`, `logs/`.
+- CI pipeline:
+  - `.github/workflows/enterprise-ci.yml` builds/lints/tests app, builds agent x64/x86 with static CRT, signs manifests, and publishes bundle artifact.
 
 ---
 

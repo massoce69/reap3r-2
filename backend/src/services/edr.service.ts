@@ -198,12 +198,64 @@ export async function updateIncidentStatus(orgId: string, id: string, status: st
 
 // ── Response actions ──
 export async function createResponseAction(orgId: string, data: {
-  agent_id: string; action: string; job_id?: string; initiated_by: string; reason: string;
+  agent_id: string;
+  action: string;
+  job_id?: string;
+  initiated_by: string;
+  reason: string;
+  status?: string;
+  result?: Record<string, unknown>;
 }) {
   const { rows } = await query<{ id: string }>(
-    `INSERT INTO response_actions (org_id, agent_id, action, job_id, initiated_by, reason)
-     VALUES ($1,$2,$3,$4,$5,$6) RETURNING id`,
-    [orgId, data.agent_id, data.action, data.job_id ?? null, data.initiated_by, data.reason]
+    `INSERT INTO response_actions (org_id, agent_id, action, job_id, initiated_by, reason, status, result)
+     VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+    [
+      orgId,
+      data.agent_id,
+      data.action,
+      data.job_id ?? null,
+      data.initiated_by,
+      data.reason,
+      data.status ?? 'pending',
+      data.result ? JSON.stringify(data.result) : null,
+    ],
   );
   return rows[0];
+}
+
+export type ResponseActionRow = {
+  id: string;
+  org_id: string;
+  agent_id: string;
+  action: string;
+  job_id: string | null;
+  initiated_by: string;
+  reason: string;
+  status: string;
+  result: unknown;
+  created_at: string;
+};
+
+export async function getResponseActionById(orgId: string, id: string): Promise<ResponseActionRow | null> {
+  const { rows } = await query<ResponseActionRow>(
+    `SELECT id, org_id, agent_id, action, job_id, initiated_by, reason, status, result, created_at
+     FROM response_actions
+     WHERE org_id = $1 AND id = $2
+     LIMIT 1`,
+    [orgId, id],
+  );
+  return rows[0] ?? null;
+}
+
+export async function isResponseApprovalConsumed(orgId: string, approvalId: string): Promise<boolean> {
+  const { rowCount } = await query(
+    `SELECT 1
+     FROM response_actions
+     WHERE org_id = $1
+       AND result IS NOT NULL
+       AND result->>'approval_id' = $2
+     LIMIT 1`,
+    [orgId, approvalId],
+  );
+  return (rowCount ?? 0) > 0;
 }

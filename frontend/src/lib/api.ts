@@ -31,20 +31,63 @@ function getToken(): string | null {
   return localStorage.getItem('reap3r_token');
 }
 
-export function setToken(token: string) {
+function getRefreshToken(): string | null {
+  if (typeof window === 'undefined') return null;
+  return localStorage.getItem('reap3r_refresh_token');
+}
+
+export function setToken(token: string, refreshToken?: string) {
   localStorage.setItem('reap3r_token', token);
+  if (refreshToken) localStorage.setItem('reap3r_refresh_token', refreshToken);
 }
 
 export function clearToken() {
   localStorage.removeItem('reap3r_token');
+  localStorage.removeItem('reap3r_refresh_token');
 }
 
-async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
-  const token = getToken();
+let refreshPromise: Promise<string | null> | null = null;
+
+async function refreshAccessToken(): Promise<string | null> {
+  const existingRefreshToken = getRefreshToken();
+  if (!existingRefreshToken) return null;
+  if (refreshPromise) return refreshPromise;
+
+  refreshPromise = (async () => {
+    try {
+      const res = await fetch(`${API_BASE}/api/auth/refresh`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ refresh_token: existingRefreshToken }),
+      });
+      if (!res.ok) {
+        clearToken();
+        return null;
+      }
+      const body = await res.json().catch(() => ({} as any));
+      if (!body?.token || !body?.refresh_token) {
+        clearToken();
+        return null;
+      }
+      setToken(body.token, body.refresh_token);
+      return body.token as string;
+    } catch {
+      clearToken();
+      return null;
+    } finally {
+      refreshPromise = null;
+    }
+  })();
+
+  return refreshPromise;
+}
+
+async function request<T>(path: string, options: RequestInit = {}, allowRefresh = true): Promise<T> {
+  const accessToken = getToken();
   const headers: Record<string, string> = {
     ...(options.headers as Record<string, string> ?? {}),
   };
-  if (token) headers['Authorization'] = `Bearer ${token}`;
+  if (accessToken) headers['Authorization'] = `Bearer ${accessToken}`;
 
   // Only set JSON content-type when we actually send a body.
   // Fastify rejects empty bodies when content-type is application/json.
@@ -55,10 +98,18 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
     headers['Content-Type'] = 'application/json';
   }
 
-  const res = await fetch(`${API_BASE}${path}`, {
+  let res = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers,
   });
+
+  if (res.status === 401 && allowRefresh && path !== '/api/auth/login' && path !== '/api/auth/refresh') {
+    const refreshedToken = await refreshAccessToken();
+    if (refreshedToken) {
+      const retryHeaders: Record<string, string> = { ...headers, Authorization: `Bearer ${refreshedToken}` };
+      res = await fetch(`${API_BASE}${path}`, { ...options, headers: retryHeaders });
+    }
+  }
 
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -76,12 +127,23 @@ async function request<T>(path: string, options: RequestInit = {}): Promise<T> {
 export const api = {
   auth: {
     login: (email: string, password: string, mfa_code?: string) =>
-      request<{ token?: string; user?: any; mfa_required?: boolean }>('/api/auth/login', {
+      request<{ token?: string; refresh_token?: string; user?: any; mfa_required?: boolean }>('/api/auth/login', {
         method: 'POST',
         body: JSON.stringify({ email, password, ...(mfa_code ? { mfa_code } : {}) }),
       }),
-    refresh: () =>
-      request<{ token: string }>('/api/auth/refresh', { method: 'POST' }),
+    refresh: (refresh_token?: string) =>
+      request<{ token: string; refresh_token: string; user?: any }>(
+        '/api/auth/refresh',
+        {
+          method: 'POST',
+          body: JSON.stringify({ refresh_token: refresh_token ?? getRefreshToken() }),
+        },
+        false,
+      ),
+    logout: () =>
+      request<{ ok: boolean }>('/api/auth/logout', { method: 'POST' }),
+    logoutAll: () =>
+      request<{ ok: boolean }>('/api/auth/logout-all', { method: 'POST' }),
     me: () => request<any>('/api/auth/me'),
   },
 
@@ -219,18 +281,33 @@ export const api = {
       request<any>(`/api/vault/secrets/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
     delete: (id: string) =>
       request<any>(`/api/vault/secrets/${id}`, { method: 'DELETE' }),
-    reveal: (id: string) =>
-      request<any>(`/api/vault/secrets/${id}/reveal`, { method: 'POST' }),
-    use: (id: string) =>
-      request<any>(`/api/vault/secrets/${id}/use`, { method: 'POST' }),
+    reveal: (id: string, mfa_code: string) =>
+      request<any>(`/api/vault/secrets/${id}/reveal`, { method: 'POST', body: JSON.stringify({ mfa_code }) }),
+    use: (
+      id: string,
+      data: {
+        agent_id: string;
+        job_type: string;
+        payload: Record<string, unknown>;
+        reason?: string;
+        priority?: number;
+        timeout_sec?: number;
+        injection?: {
+          mode?: 'replace' | 'env';
+          placeholder?: string;
+          target_field?: string;
+          env_key?: string;
+        };
+      },
+    ) => request<any>(`/api/vault/secrets/${id}/use`, { method: 'POST', body: JSON.stringify(data) }),
     accessLogs: (id: string) =>
       request<{ data: any[] }>(`/api/vault/secrets/${id}/access-logs`),
     
     // Premium: Versioning
     versions: (id: string) =>
       request<{ data: any[] }>(`/api/vault/secrets/${id}/versions`),
-    revealVersion: (id: string, versionId: string) =>
-      request<{ value: string }>(`/api/vault/secrets/${id}/versions/${versionId}/reveal`, { method: 'POST' }),
+    revealVersion: (id: string, versionId: string, mfa_code: string) =>
+      request<{ value: string }>(`/api/vault/secrets/${id}/versions/${versionId}/reveal`, { method: 'POST', body: JSON.stringify({ mfa_code }) }),
     
     // Premium: Sharing
     permissions: (id: string) =>

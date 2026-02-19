@@ -3,14 +3,13 @@
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
 import { Permission, RolePermissions, Role, JobTypePermission, JobType, canonicalJsonStringify } from '@massvision/shared';
+import fs from 'node:fs';
 import * as agentService from '../services/agent.service.js';
 import { createAuditLog } from '../services/audit.service.js';
 import * as jobService from '../services/job.service.js';
 import { createHmac, randomUUID } from 'crypto';
 import { config } from '../config.js';
-import crypto from 'crypto';
-import fs from 'fs';
-import path from 'path';
+import { AgentArch, AgentOs, loadAgentUpdateManifest, normalizeArch, resolveBinaryPath } from '../services/agent-update-manifest.service.js';
 
 export default async function agentRoutes(fastify: FastifyInstance) {
   // ── List agents ──
@@ -53,20 +52,29 @@ export default async function agentRoutes(fastify: FastifyInstance) {
   });
 
   // ── Get available update manifest (latest version info) — MUST be before /:id ──
-  fastify.get('/api/agents/update/manifest', { preHandler: [fastify.authenticate] }, async (_request, _reply) => {
-    const version = process.env.AGENT_VERSION || '1.0.0';
-    const winBinaryEnv = process.env.AGENT_BINARY_PATH_WINDOWS_X86_64;
-    let binaryPath = winBinaryEnv;
-    if (!binaryPath) {
-      const crossPath = path.resolve(process.cwd(), '../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe');
-      if (fs.existsSync(crossPath)) {
-        binaryPath = crossPath;
-      } else {
-        binaryPath = path.resolve(process.cwd(), '../agent/target/release/reap3r-agent.exe');
-      }
+  fastify.get('/api/agents/update/manifest', { preHandler: [fastify.authenticate] }, async (request, reply) => {
+    try {
+      const manifest = await loadAgentUpdateManifest({
+        os: 'windows',
+        arch: 'x86_64',
+        request,
+      });
+      return {
+        version: manifest.version,
+        available: true,
+        signed: Boolean(manifest.sig_ed25519),
+        manifest_source: manifest.manifest_source,
+      };
+    } catch (error: any) {
+      const resolved = resolveBinaryPath('windows', 'x86_64');
+      const available = Boolean(resolved && fs.existsSync(resolved.filePath));
+      if (!available) return { version: process.env.AGENT_VERSION || '1.0.0', available: false };
+      return reply.status(503).send({
+        statusCode: 503,
+        error: 'Service Unavailable',
+        message: String(error?.message || 'Update manifest unavailable'),
+      });
     }
-    const available = fs.existsSync(binaryPath!);
-    return { version, available };
   });
 
   // ── Get agent ──
@@ -193,63 +201,42 @@ export default async function agentRoutes(fastify: FastifyInstance) {
     const version = process.env.AGENT_VERSION || '1.0.0';
     const results: any[] = [];
 
-    // Pre-compute binary paths and SHA256 hashes per OS/arch combo (cache outside loop)
-    const binaryCache = new Map<string, { path: string; sha256: string }>();
-    function resolveBinary(osFamily: string, arch: string): { path: string; sha256: string } | null {
+    const manifestCache = new Map<string, Awaited<ReturnType<typeof loadAgentUpdateManifest>>>();
+    async function resolveManifest(osFamily: AgentOs, archRaw: string) {
+      const arch = normalizeArch(archRaw) as AgentArch;
       const cacheKey = `${osFamily}/${arch}`;
-      if (binaryCache.has(cacheKey)) return binaryCache.get(cacheKey)!;
-
-      const binaryKey = `AGENT_BINARY_PATH_${osFamily.toUpperCase()}_${arch.toUpperCase()}`;
-      let binaryPath = process.env[binaryKey];
-      if (!binaryPath) {
-        const ext = osFamily === 'windows' ? '.exe' : '';
-        if (osFamily === 'windows') {
-          const crossPath = path.resolve(process.cwd(), `../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent${ext}`);
-          if (fs.existsSync(crossPath)) {
-            binaryPath = crossPath;
-          } else {
-            binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
-          }
-        } else {
-          binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
-        }
-      }
-
-      if (!fs.existsSync(binaryPath)) return null;
-
-      const hash = crypto.createHash('sha256');
-      const fileBytes = fs.readFileSync(binaryPath);
-      hash.update(fileBytes);
-      const sha256 = hash.digest('hex');
-      const entry = { path: binaryPath, sha256 };
-      binaryCache.set(cacheKey, entry);
-      return entry;
+      if (manifestCache.has(cacheKey)) return manifestCache.get(cacheKey)!;
+      const manifest = await loadAgentUpdateManifest({
+        os: osFamily,
+        arch,
+        request,
+        strictSignature: true,
+      });
+      manifestCache.set(cacheKey, manifest);
+      return manifest;
     }
 
     for (const agent of agents) {
       try {
         // Determine binary OS family
         const osLower = (agent.os || '').toLowerCase();
-        let osFamily: string = 'windows';
+        let osFamily: AgentOs = 'windows';
         if (osLower.includes('linux')) osFamily = 'linux';
         else if (osLower.includes('darwin') || osLower.includes('mac')) osFamily = 'darwin';
-        const arch = agent.arch || 'x86_64';
-
-        const binary = resolveBinary(osFamily, arch);
-        if (!binary) {
-          results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'error', error: `Binary not found for ${osFamily}/${arch}` });
+        const arch = normalizeArch(agent.arch || 'x86_64') as AgentArch;
+        const manifest = await resolveManifest(osFamily, arch);
+        if (!manifest.sig_ed25519) {
+          results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'error', error: `Signed manifest missing for ${osFamily}/${arch}` });
           continue;
         }
 
-        const { sha256 } = binary;
-
-        // Build download URL using the request's base URL
-        const proto = (request.headers['x-forwarded-proto'] || request.protocol || 'https').toString().split(',')[0].trim();
-        const host = (request.headers['x-forwarded-host'] || request.headers.host || '').toString().split(',')[0].trim();
-        const base = host ? `${proto}://${host}` : (process.env.API_BASE_URL || 'http://localhost:4000');
-        const download_url = `${base}/api/agent-binary/download?os=${encodeURIComponent(osFamily)}&arch=${encodeURIComponent(arch)}`;
-
-        const payload = { version, download_url, sha256, force };
+        const payload = {
+          version: manifest.version || version,
+          download_url: manifest.download_url,
+          sha256: manifest.sha256,
+          sig_ed25519: manifest.sig_ed25519,
+          force,
+        };
 
         // Create job
         const job = await jobService.createJob(fastify, {

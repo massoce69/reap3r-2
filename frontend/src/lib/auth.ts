@@ -26,7 +26,7 @@ interface AuthState {
   initialize: () => Promise<void>;
 }
 
-export const useAuth = create<AuthState>((set, get) => ({
+export const useAuth = create<AuthState>((set) => ({
   user: null,
   initialized: false,
   loading: false,
@@ -47,7 +47,7 @@ export const useAuth = create<AuthState>((set, get) => ({
       }
 
       if (res.token && res.user) {
-        setToken(res.token);
+        setToken(res.token, res.refresh_token);
         realtime.connect(res.token);
         set({ user: res.user, loading: false, mfaRequired: false, mfaEmail: null, mfaPassword: null });
         return true;
@@ -62,6 +62,7 @@ export const useAuth = create<AuthState>((set, get) => ({
   },
 
   logout: () => {
+    api.auth.logout().catch(() => {});
     clearToken();
     realtime.disconnect();
     set({ user: null });
@@ -73,13 +74,24 @@ export const useAuth = create<AuthState>((set, get) => ({
     const token = localStorage.getItem('reap3r_token');
     
     if (!token) {
-      set({ initialized: true, user: null });
-      return;
+      try {
+        const refreshed = await api.auth.refresh();
+        if (refreshed?.token) {
+          setToken(refreshed.token, refreshed.refresh_token);
+        } else {
+          set({ initialized: true, user: null });
+          return;
+        }
+      } catch {
+        set({ initialized: true, user: null });
+        return;
+      }
     }
 
     try {
       const user = await api.auth.me();
-      realtime.connect(token);
+      const liveToken = localStorage.getItem('reap3r_token');
+      if (liveToken) realtime.connect(liveToken);
       set({ user, initialized: true });
     } catch {
       clearToken();

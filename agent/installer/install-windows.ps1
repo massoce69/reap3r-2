@@ -154,8 +154,22 @@ Copy-Item -Path $ExeLocal -Destination $ExeDest -Force
 Write-OK "Installed: $ExeDest"
 
 # ─── INSTALL SERVICE ─────────────────────────────────────────────────────────
+Write-Step "Running one-shot enrollment..."
+& $ExeDest --enroll --server $Server --token $Token
+if ($LASTEXITCODE -ne 0) {
+    Write-Fail "Enrollment failed (exit code: $LASTEXITCODE)"
+    exit 1
+}
+Write-OK "Enrollment successful"
+
+if (Test-Path $ConfigFile) {
+    & icacls $ConfigFile /inheritance:r | Out-Null
+    & icacls $ConfigFile /grant:r "SYSTEM:F" "Administrators:F" | Out-Null
+    Write-OK "Applied ACL to $ConfigFile"
+}
+
 Write-Step "Installing Windows service..."
-$BinPath = "`"$ExeDest`" --server `"$Server`" --token `"$Token`""
+$BinPath = "`"$ExeDest`" --run"
 
 New-Service `
     -Name        $ServiceName `
@@ -164,8 +178,8 @@ New-Service `
     -StartupType Automatic `
     -Description $Description
 
-# Recovery: restart on failure (attempt 1 after 5s, attempt 2 after 10s, attempt 3 after 30s)
-sc.exe failure $ServiceName reset= 86400 actions= restart/5000/restart/10000/restart/30000 | Out-Null
+# Recovery: restart on failure
+sc.exe failure $ServiceName reset= 0 actions= restart/5000/restart/5000/restart/5000 | Out-Null
 
 Write-OK "Service '$ServiceName' registered"
 

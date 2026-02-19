@@ -5,7 +5,6 @@ import Fastify, { FastifyBaseLogger, FastifyInstance } from 'fastify';
 import cors from '@fastify/cors';
 import helmet from '@fastify/helmet';
 import rateLimit from '@fastify/rate-limit';
-import websocket from '@fastify/websocket';
 import { config } from './config.js';
 
 // Plugins
@@ -47,6 +46,10 @@ export async function buildApp(opts?: { logger?: boolean | FastifyBaseLogger }) 
     trustProxy: true,
   });
 
+  if (process.env.WS_PORT || process.env.UI_WS_PORT) {
+    fastify.log.warn('WS_PORT/UI_WS_PORT are deprecated. WS now uses unified PORT + /ws/* paths. Remove legacy vars after migration.');
+  }
+
   // Security
   await fastify.register(helmet, { contentSecurityPolicy: false });
   await fastify.register(cors, {
@@ -54,9 +57,6 @@ export async function buildApp(opts?: { logger?: boolean | FastifyBaseLogger }) 
     credentials: true,
   });
   await fastify.register(rateLimit, { max: 200, timeWindow: '1 minute' });
-
-  // WebSocket plugin (used for UI socket upgrade handling)
-  await fastify.register(websocket);
 
   // Database
   await fastify.register(dbPlugin);
@@ -102,4 +102,3 @@ export async function buildApp(opts?: { logger?: boolean | FastifyBaseLogger }) 
 
   return fastify;
 }
-

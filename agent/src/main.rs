@@ -3,13 +3,14 @@
 // ─────────────────────────────────────────────
 
 use clap::Parser;
+use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
 use std::io::Write as IoWrite;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -32,6 +33,12 @@ type HmacSha256 = Hmac<Sha256>;
 
 const MAX_JOB_HISTORY: usize = 256;
 const LOG_MAX_BYTES: u64 = 10 * 1024 * 1024; // 10 MB rotate threshold
+const DEFAULT_MAX_JOB_OUTPUT_BYTES: usize = 1024 * 1024; // 1 MB
+const MAX_JOB_OUTPUT_BYTES_HARD_CAP: usize = 5 * 1024 * 1024; // 5 MB
+const UPDATE_PUBLIC_KEY_HEX: &str = match option_env!("REAP3R_UPDATE_PUBKEY_HEX") {
+    Some(v) => v,
+    None => "",
+};
 
 // ── Remote Desktop global state ───────────────────────────
 static RD_ACTIVE: AtomicBool = AtomicBool::new(false);
@@ -190,6 +197,14 @@ macro_rules! ferror { ($($arg:tt)*) => {{ let s = format!($($arg)*); error!("{}"
 #[derive(Parser, Debug)]
 #[command(name = "reap3r-agent", version, about = "MASSVISION Reap3r Agent")]
 struct Args {
+    /// One-shot enrollment (persist credentials then exit)
+    #[arg(long)]
+    enroll: bool,
+
+    /// Explicit run mode (intended for Windows service binPath)
+    #[arg(long)]
+    run: bool,
+
     /// Server WebSocket URL (e.g., wss://reap3r.example.com/ws/agent)
     #[arg(long, env = "REAP3R_SERVER")]
     server: Option<String>,
@@ -214,6 +229,18 @@ struct Args {
     #[arg(long)]
     diagnose: bool,
 
+    /// Print operational status (enrollment, connectivity, recent errors) and exit
+    #[arg(long)]
+    status: bool,
+
+    /// Print recent log lines and exit
+    #[arg(long)]
+    logs: bool,
+
+    /// Run local health checks (runtime + connectivity) and exit
+    #[arg(long)]
+    self_test: bool,
+
     /// Print current loaded configuration and exit
     #[arg(long)]
     print_config: bool,
@@ -229,6 +256,10 @@ struct Args {
     /// Custom log file path (overrides automatic detection)
     #[arg(long, env = "REAP3R_LOG_FILE")]
     log_file: Option<PathBuf>,
+
+    /// Number of lines to show with --logs
+    #[arg(long, default_value = "200", env = "REAP3R_LOG_LINES")]
+    log_lines: usize,
 
     /// Install the agent as a Windows Service and exit
     #[arg(long)]
@@ -444,6 +475,11 @@ fn save_config(cfg: &AgentConfig) -> Result<(), String> {
         msg
     })?;
 
+    // Harden Windows ACL so only SYSTEM + Administrators can read secrets.
+    if let Err(e) = apply_windows_secret_acl(&path) {
+        fwarn!("Could not enforce secret ACL on {}: {}", path.display(), e);
+    }
+
     // Restrict permissions on Unix
     #[cfg(unix)]
     {
@@ -453,6 +489,180 @@ fn save_config(cfg: &AgentConfig) -> Result<(), String> {
     }
 
     finfo!("Agent config saved to {}", path.display());
+    Ok(())
+}
+
+#[cfg(windows)]
+fn apply_windows_secret_acl(path: &Path) -> Result<(), String> {
+    let p = path
+        .to_str()
+        .ok_or_else(|| format!("Non-UTF8 path not supported for ACL: {}", path.display()))?;
+
+    let inherit = std::process::Command::new("icacls")
+        .args([p, "/inheritance:r"])
+        .output()
+        .map_err(|e| format!("icacls /inheritance:r failed: {}", e))?;
+    if !inherit.status.success() {
+        return Err(format!(
+            "icacls /inheritance:r failed: {}",
+            String::from_utf8_lossy(&inherit.stderr).trim()
+        ));
+    }
+
+    let grant = std::process::Command::new("icacls")
+        .args([p, "/grant:r", "SYSTEM:F", "Administrators:F"])
+        .output()
+        .map_err(|e| format!("icacls /grant:r failed: {}", e))?;
+    if !grant.status.success() {
+        return Err(format!(
+            "icacls /grant:r failed: {}",
+            String::from_utf8_lossy(&grant.stderr).trim()
+        ));
+    }
+    Ok(())
+}
+
+#[cfg(not(windows))]
+fn apply_windows_secret_acl(_path: &Path) -> Result<(), String> {
+    Ok(())
+}
+
+fn bootstrap_path() -> PathBuf {
+    config_dir().join("bootstrap.json")
+}
+
+fn remove_bootstrap_file() {
+    let bp = bootstrap_path();
+    if bp.exists() {
+        if let Err(e) = std::fs::remove_file(&bp) {
+            fwarn!("Could not remove bootstrap token file {}: {}", bp.display(), e);
+        } else {
+            finfo!("Removed bootstrap token file: {}", bp.display());
+        }
+    }
+}
+
+fn truncate_utf8_to_bytes(s: &str, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s.to_string();
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = s[..cut].to_string();
+    out.push_str("\n...[truncated]");
+    out
+}
+
+fn last_error_line(log_path: &Path) -> Option<String> {
+    let data = std::fs::read_to_string(log_path).ok()?;
+    data.lines()
+        .rev()
+        .find(|line| line.contains("[ERROR]"))
+        .map(|s| s.to_string())
+}
+
+fn print_logs_tail(log_path: &Path, lines: usize) -> Result<(), String> {
+    let data = std::fs::read_to_string(log_path)
+        .map_err(|e| format!("Cannot read {}: {}", log_path.display(), e))?;
+    let lines_vec: Vec<&str> = data.lines().collect();
+    let take = lines.max(1).min(10_000);
+    let start = lines_vec.len().saturating_sub(take);
+    println!("Log file: {}", log_path.display());
+    println!("Showing last {} lines:", lines_vec.len().saturating_sub(start));
+    for line in &lines_vec[start..] {
+        println!("{}", line);
+    }
+    Ok(())
+}
+
+async fn check_connectivity(server_url: &str, insecure_tls: bool) -> (bool, bool) {
+    let health_url = server_url
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .replace("/ws/agent", "/api/health");
+
+    let http_ok = match reqwest::Client::builder()
+        .danger_accept_invalid_certs(insecure_tls)
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(client) => matches!(
+            tokio::time::timeout(Duration::from_secs(6), client.get(&health_url).send()).await,
+            Ok(Ok(resp)) if resp.status().is_success()
+        ),
+        Err(_) => false,
+    };
+
+    let ws_ok = matches!(
+        tokio::time::timeout(Duration::from_secs(6), connect_ws(server_url, insecure_tls)).await,
+        Ok(Ok(_))
+    );
+
+    (http_ok, ws_ok)
+}
+
+async fn run_status_command(args: &Args) {
+    let saved = load_config();
+    let log_path = args.log_file.clone().unwrap_or_else(default_log_path);
+    let server = args
+        .server
+        .clone()
+        .or_else(|| saved.as_ref().map(|c| c.server.clone()));
+
+    let enrolled = saved
+        .as_ref()
+        .map(|c| !c.agent_id.is_empty() && !c.hmac_key.is_empty())
+        .unwrap_or(false);
+
+    let mut http_ok = false;
+    let mut ws_ok = false;
+    if let Some(ref s) = server {
+        if s.starts_with("ws://") || s.starts_with("wss://") {
+            (http_ok, ws_ok) = check_connectivity(s, args.insecure_tls).await;
+        }
+    }
+
+    println!("Reap3r Agent status");
+    println!("  enrolled: {}", if enrolled { "yes" } else { "no" });
+    println!("  server reachable: {}", if http_ok { "yes" } else { "no" });
+    println!("  ws connected: {}", if ws_ok { "yes" } else { "no" });
+    println!(
+        "  last error: {}",
+        last_error_line(&log_path).unwrap_or_else(|| "none".to_string())
+    );
+    println!(
+        "  jobs history: {}",
+        if job_history_path().exists() { "ok" } else { "empty" }
+    );
+}
+
+async fn run_self_test_command(args: &Args) -> Result<(), String> {
+    println!("Running self-test...");
+    let metrics = collect_metrics();
+    if metrics["cpu_percent"].is_null() {
+        return Err("Metrics collector failed".to_string());
+    }
+    let inventory = collect_inventory();
+    if inventory["hostname"].as_str().unwrap_or("").is_empty() {
+        return Err("Inventory collector failed".to_string());
+    }
+
+    let server = args
+        .server
+        .clone()
+        .or_else(|| load_config().map(|c| c.server))
+        .ok_or_else(|| "No server configured".to_string())?;
+    let (http_ok, ws_ok) = check_connectivity(&server, args.insecure_tls).await;
+    if !http_ok || !ws_ok {
+        return Err(format!(
+            "Connectivity failed (http_ok={}, ws_ok={})",
+            http_ok, ws_ok
+        ));
+    }
+
+    println!("Self-test passed");
     Ok(())
 }
 
@@ -793,6 +1003,76 @@ fn build_message(
     msg["sig"] = serde_json::Value::String(sig);
 
     serde_json::to_string(&msg).unwrap()
+}
+
+async fn enroll_once(server: &str, token: &str, insecure_tls: bool) -> Result<AgentConfig, String> {
+    let (hostname, os, arch, os_version) = get_system_info();
+    let ws = connect_ws(server, insecure_tls)
+        .await
+        .map_err(|e| format!("Enrollment connection failed: {}", e))?;
+    let (mut write, mut read) = ws.split();
+
+    let enroll_msg = serde_json::json!({
+        "agentId": "00000000-0000-0000-0000-000000000000",
+        "ts": now_ms(),
+        "nonce": Uuid::new_v4().to_string(),
+        "traceId": Uuid::new_v4().to_string(),
+        "type": "enroll_request",
+        "payload": {
+            "hostname": hostname,
+            "os": os,
+            "os_version": os_version,
+            "arch": arch,
+            "agent_version": env!("CARGO_PKG_VERSION"),
+            "enrollment_token": token,
+        },
+    });
+
+    write
+        .send(Message::Text(enroll_msg.to_string()))
+        .await
+        .map_err(|e| format!("Enrollment send failed: {}", e))?;
+
+    let text = tokio::time::timeout(Duration::from_secs(20), async {
+        while let Some(msg) = read.next().await {
+            match msg {
+                Ok(Message::Text(t)) => return Ok(t),
+                Ok(_) => continue,
+                Err(e) => return Err(e),
+            }
+        }
+        Err(tokio_tungstenite::tungstenite::Error::ConnectionClosed)
+    })
+    .await
+    .map_err(|_| "Enrollment timed out waiting for response".to_string())?
+    .map_err(|e| format!("Enrollment read failed: {}", e))?;
+
+    let resp: serde_json::Value =
+        serde_json::from_str(&text).map_err(|e| format!("Invalid enroll response JSON: {}", e))?;
+    if resp["type"] != "enroll_response" {
+        return Err("Unexpected response type during enrollment".to_string());
+    }
+    let payload = &resp["payload"];
+    if let Some(err) = payload["error"].as_str() {
+        return Err(format!("Enrollment failed: {}", err));
+    }
+
+    let agent_id = payload["agent_id"]
+        .as_str()
+        .ok_or_else(|| "Enrollment response missing agent_id".to_string())?
+        .to_string();
+    let hmac_key = payload["hmac_key"]
+        .as_str()
+        .or_else(|| payload["agent_secret"].as_str())
+        .ok_or_else(|| "Enrollment response missing hmac_key/agent_secret".to_string())?
+        .to_string();
+
+    Ok(AgentConfig {
+        agent_id,
+        hmac_key,
+        server: server.to_string(),
+        enrolled_at: now_ms(),
+    })
 }
 
 fn get_system_info() -> (String, String, String, String) {
@@ -1211,13 +1491,22 @@ async fn execute_edr_isolate(payload: &serde_json::Value) -> Result<serde_json::
 
     // Platform-specific firewall rules
     let (cmd, args): (&str, Vec<String>) = if cfg!(target_os = "windows") {
-        ("powershell", vec![
-            "-NoProfile".into(), "-Command".into(),
-            format!(
-                "New-NetFirewallRule -DisplayName 'Reap3r-EDR-Isolate' -Direction Outbound -Action Block -Enabled True; \
-                 New-NetFirewallRule -DisplayName 'Reap3r-EDR-Isolate-In' -Direction Inbound -Action Block -Enabled True"
-            ),
-        ])
+        (
+            "powershell",
+            vec![
+                "-NoProfile".into(),
+                "-ExecutionPolicy".into(),
+                "Bypass".into(),
+                "-Command".into(),
+                "if (Get-Command New-NetFirewallRule -ErrorAction SilentlyContinue) { \
+                    New-NetFirewallRule -DisplayName 'Reap3r-EDR-Isolate-Out' -Direction Outbound -Action Block -Enabled True -ErrorAction Stop | Out-Null; \
+                    New-NetFirewallRule -DisplayName 'Reap3r-EDR-Isolate-In' -Direction Inbound -Action Block -Enabled True -ErrorAction Stop | Out-Null; \
+                 } else { \
+                    netsh advfirewall firewall add rule name='Reap3r-EDR-Isolate-Out' dir=out action=block enable=yes | Out-Null; \
+                    netsh advfirewall firewall add rule name='Reap3r-EDR-Isolate-In' dir=in action=block enable=yes | Out-Null; \
+                 }".into(),
+            ],
+        )
     } else {
         ("bash", vec![
             "-c".into(),
@@ -1325,18 +1614,45 @@ fn check_security_events() -> Vec<serde_json::Value> {
 }
 
 async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let interpreter = payload["interpreter"].as_str().unwrap_or("bash");
+    let default_interpreter = if cfg!(target_os = "windows") { "powershell" } else { "bash" };
+    let interpreter = payload["interpreter"]
+        .as_str()
+        .unwrap_or(default_interpreter)
+        .to_ascii_lowercase();
     let script = payload["script"].as_str().unwrap_or("");
     let timeout_secs = payload["timeout_secs"].as_u64().unwrap_or(300);
+    let max_output_bytes = payload["max_output_bytes"]
+        .as_u64()
+        .map(|v| v as usize)
+        .unwrap_or(DEFAULT_MAX_JOB_OUTPUT_BYTES)
+        .clamp(DEFAULT_MAX_JOB_OUTPUT_BYTES, MAX_JOB_OUTPUT_BYTES_HARD_CAP);
+
+    if script.trim().is_empty() {
+        return Err("Script is empty".to_string());
+    }
 
     let start = std::time::Instant::now();
 
-    let (cmd, args) = match interpreter {
+    let (cmd, args) = match interpreter.as_str() {
         "bash" | "sh" => ("bash", vec!["-c", script]),
-        "powershell" => ("powershell", vec!["-NoProfile", "-NonInteractive", "-Command", script]),
-        "python" => ("python3", vec!["-c", script]),
+        "powershell" | "pwsh" => (
+            "powershell",
+            vec![
+                "-NoProfile",
+                "-NonInteractive",
+                "-ExecutionPolicy",
+                "Bypass",
+                "-Command",
+                script,
+            ],
+        ),
         "cmd" => ("cmd", vec!["/C", script]),
-        _ => return Err(format!("Unknown interpreter: {}", interpreter)),
+        _ => {
+            return Err(format!(
+                "Interpreter '{}' is not allowed. Allowed: powershell, cmd, bash, sh",
+                interpreter
+            ))
+        }
     };
 
     let result = tokio::time::timeout(
@@ -1352,8 +1668,8 @@ async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value
     match result {
         Ok(Ok(output)) => Ok(serde_json::json!({
             "exit_code": output.status.code().unwrap_or(-1),
-            "stdout": String::from_utf8_lossy(&output.stdout).to_string(),
-            "stderr": String::from_utf8_lossy(&output.stderr).to_string(),
+            "stdout": truncate_utf8_to_bytes(&String::from_utf8_lossy(&output.stdout), max_output_bytes),
+            "stderr": truncate_utf8_to_bytes(&String::from_utf8_lossy(&output.stderr), max_output_bytes),
             "duration_ms": duration_ms,
         })),
         Ok(Err(e)) => Err(format!("Failed to execute: {}", e)),
@@ -1538,7 +1854,11 @@ public static class NativeMon {
 }
 # Fallback: Win32_DesktopMonitor WMI (counts physical monitors, not GPUs)
 try {
-    $vcs = @(Get-CimInstance Win32_DesktopMonitor -ErrorAction Stop)
+    if (Get-Command Get-CimInstance -ErrorAction SilentlyContinue) {
+        $vcs = @(Get-CimInstance Win32_DesktopMonitor -ErrorAction Stop)
+    } else {
+        $vcs = @(Get-WmiObject Win32_DesktopMonitor -ErrorAction Stop)
+    }
     if ($vcs.Count -gt 0) {
         $monitors = @(); $idx = 0
         foreach ($v in $vcs) {
@@ -2023,14 +2343,57 @@ async fn list_monitors() -> Result<serde_json::Value, String> {
 
 // ── Self-Update: download new binary, verify SHA256, replace, restart service ──
 
+fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
+    hex::decode(input.trim()).map_err(|e| format!("Invalid hex payload: {}", e))
+}
+
+fn parse_update_signature(sig: &str) -> Result<Signature, String> {
+    use base64::Engine;
+
+    let trimmed = sig.trim();
+    let raw = base64::engine::general_purpose::STANDARD
+        .decode(trimmed)
+        .or_else(|_| decode_hex_bytes(trimmed))
+        .map_err(|e| format!("Invalid update signature (base64 or hex expected): {}", e))?;
+    let raw_len = raw.len();
+    let sig_bytes: [u8; 64] = raw
+        .try_into()
+        .map_err(|_| format!("Invalid Ed25519 signature length: {}", raw_len))?;
+    Ok(Signature::from_bytes(&sig_bytes))
+}
+
+fn parse_update_pubkey() -> Result<VerifyingKey, String> {
+    if UPDATE_PUBLIC_KEY_HEX.trim().is_empty() {
+        return Err("REAP3R_UPDATE_PUBKEY_HEX is not embedded in this build".to_string());
+    }
+    let key_bytes_vec = decode_hex_bytes(UPDATE_PUBLIC_KEY_HEX)?;
+    let key_len = key_bytes_vec.len();
+    let key_bytes: [u8; 32] = key_bytes_vec
+        .try_into()
+        .map_err(|_| format!("Invalid Ed25519 public key length: {}", key_len))?;
+    VerifyingKey::from_bytes(&key_bytes).map_err(|e| format!("Invalid Ed25519 public key: {}", e))
+}
+
+fn verify_update_signature(bytes: &[u8], sig: &str) -> Result<(), String> {
+    let key = parse_update_pubkey()?;
+    let signature = parse_update_signature(sig)?;
+    key.verify(bytes, &signature)
+        .map_err(|e| format!("Ed25519 signature verification failed: {}", e))
+}
+
 async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     let download_url = payload["download_url"].as_str()
         .ok_or_else(|| "Missing download_url".to_string())?;
     let expected_sha256 = payload["sha256"].as_str()
         .ok_or_else(|| "Missing sha256".to_string())?;
+    let signature = payload["sig_ed25519"].as_str()
+        .ok_or_else(|| "Missing sig_ed25519".to_string())?;
     let version = payload["version"].as_str().unwrap_or("unknown");
 
     finfo!("Self-update requested: version={} url={}", version, download_url);
+    if !download_url.starts_with("https://") {
+        return Err("Self-update requires HTTPS download_url".to_string());
+    }
 
     // 1. Determine current binary path
     let current_exe = std::env::current_exe()
@@ -2045,7 +2408,7 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
     // 2. Download the new binary
     finfo!("Downloading new agent binary from {}", download_url);
     let client = reqwest::Client::builder()
-        .danger_accept_invalid_certs(true) // Allow self-signed certs
+        .https_only(true)
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
@@ -2078,6 +2441,9 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
         ));
     }
     finfo!("SHA256 verified OK");
+
+    verify_update_signature(&bytes, signature)?;
+    finfo!("Ed25519 signature verified OK");
 
     // 4. Write new binary to temp file
     std::fs::write(&new_binary_path, &bytes)
@@ -2566,6 +2932,7 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
 fn install_windows_service() {
     let exe = std::env::current_exe().expect("Cannot determine executable path");
     let exe_path = exe.display().to_string();
+    let service_bin_path = format!("\"{}\" --run", exe_path);
     println!("═══════════════════════════════════════════════════════════");
     println!("  MASSVISION Reap3r Agent — Service Installer");
     println!("  Version: {}", env!("CARGO_PKG_VERSION"));
@@ -2588,19 +2955,39 @@ fn install_windows_service() {
     if cli_server.is_none() { cli_server = std::env::var("REAP3R_SERVER").ok(); }
     if cli_token.is_none()  { cli_token = std::env::var("REAP3R_TOKEN").ok(); }
 
-    if let Some(ref server) = cli_server {
+    if let (Some(server), Some(token)) = (cli_server.as_ref(), cli_token.as_ref()) {
+        println!("[*] Running one-shot enrollment before service registration...");
+        match std::process::Command::new(&exe_path)
+            .args(["--enroll", "--server", server, "--token", token])
+            .status()
+        {
+            Ok(status) if status.success() => {
+                println!("[OK] One-shot enrollment successful");
+                remove_bootstrap_file();
+            }
+            Ok(status) => {
+                eprintln!("[ERROR] Enrollment command failed with exit code {:?}", status.code());
+                return;
+            }
+            Err(e) => {
+                eprintln!("[ERROR] Failed to run enrollment command: {}", e);
+                return;
+            }
+        }
+    } else if let Some(ref server) = cli_server {
         println!("[*] Server URL: {}", server);
-        // Pre-save a partial config so the service can auto-enroll
         let cfg_dir = config_dir();
         let _ = std::fs::create_dir_all(&cfg_dir);
-        // Write server URL to a "bootstrap" file the service reads on first start
         let bootstrap_path = cfg_dir.join("bootstrap.json");
         let bootstrap = serde_json::json!({
             "server": server,
             "token": cli_token.as_deref().unwrap_or(""),
         });
         match std::fs::write(&bootstrap_path, serde_json::to_string_pretty(&bootstrap).unwrap_or_default()) {
-            Ok(_) => println!("[OK] Bootstrap config written to {}", bootstrap_path.display()),
+            Ok(_) => {
+                let _ = apply_windows_secret_acl(&bootstrap_path);
+                println!("[OK] Bootstrap config written to {}", bootstrap_path.display());
+            }
             Err(e) => eprintln!("[WARN] Could not write bootstrap: {}", e),
         }
     }
@@ -2623,7 +3010,7 @@ fn install_windows_service() {
     let output = std::process::Command::new("sc.exe")
         .args([
             "create", SERVICE_NAME,
-            "binPath=", &exe_path,
+            "binPath=", &service_bin_path,
             "start=", "auto",
             "DisplayName=", "MASSVISION Reap3r Agent",
         ])
@@ -2640,7 +3027,7 @@ fn install_windows_service() {
                     println!("[OK] Service already exists — updating...");
                     // Update the binPath
                     let _ = std::process::Command::new("sc.exe")
-                        .args(["config", SERVICE_NAME, "binPath=", &exe_path])
+                        .args(["config", SERVICE_NAME, "binPath=", &service_bin_path])
                         .output();
                 } else {
                     eprintln!("[ERROR] sc create failed: {} {}", stdout.trim(), stderr.trim());
@@ -2652,10 +3039,6 @@ fn install_windows_service() {
     }
 
     // ── 3. Set description ──
-    let _ = std::process::Command::new("sc.exe")
-        .args(["description", SERVICE_NAME,
-            "MASSVISION Reap3r remote management agent — Enterprise endpoint management (v", ])
-        .output();
     let desc = format!(
         "MASSVISION Reap3r Agent v{} — Enterprise remote management. Runs as SYSTEM, auto-starts on boot, auto-recovers on failure.",
         env!("CARGO_PKG_VERSION")
@@ -2669,8 +3052,8 @@ fn install_windows_service() {
     println!("[*] Configuring automatic recovery...");
     let _ = std::process::Command::new("sc.exe")
         .args(["failure", SERVICE_NAME,
-            "reset=", "86400",
-            "actions=", "restart/5000/restart/10000/restart/30000"])
+            "reset=", "0",
+            "actions=", "restart/5000/restart/5000/restart/5000"])
         .output();
 
     // Also set failure on non-crash exit (delayed auto-restart covers agent bugs)
@@ -2765,6 +3148,8 @@ fn build_args_from_config() -> Args {
     }).or_else(|| std::env::var("REAP3R_TOKEN").ok());
 
     Args {
+        enroll: false,
+        run: true,
         server,
         token,
         agent_id: saved.as_ref().map(|c| c.agent_id.clone())
@@ -2774,10 +3159,14 @@ fn build_args_from_config() -> Args {
         heartbeat_interval: std::env::var("REAP3R_HEARTBEAT_INTERVAL")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(30),
         diagnose: false,
+        status: false,
+        logs: false,
+        self_test: false,
         print_config: false,
         insecure_tls: std::env::var("REAP3R_INSECURE_TLS").as_deref() == Ok("1"),
         run_for_secs: std::env::var("REAP3R_RUN_FOR_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(0),
         log_file: None,
+        log_lines: std::env::var("REAP3R_LOG_LINES").ok().and_then(|v| v.parse().ok()).unwrap_or(200),
         install: false,
         uninstall: false,
     }
@@ -2840,8 +3229,9 @@ async fn main() {
     // ── 3. URL validation ─────────────────────────────────
     // Do this before anything else so errors are visible in the log.
     let server_url = args.server.clone().or_else(|| load_config().map(|c| c.server));
+    let strict_url_validation = !(args.logs || args.status);
     if let Some(ref url) = server_url {
-        if !url.starts_with("ws://") && !url.starts_with("wss://") {
+        if strict_url_validation && !url.starts_with("ws://") && !url.starts_with("wss://") {
             let msg = format!(
                 "FATAL: Invalid server URL '{}'. Must start with ws:// or wss://. \
                  Use: reap3r-agent.exe --server wss://YOUR_SERVER/ws/agent --token YOUR_TOKEN",
@@ -2851,7 +3241,7 @@ async fn main() {
             eprintln!("{}", msg);
             std::process::exit(1);
         }
-        if cfg!(not(debug_assertions)) && url.starts_with("ws://") {
+        if strict_url_validation && cfg!(not(debug_assertions)) && url.starts_with("ws://") {
             fwarn!("WARNING: Using plain ws:// (unencrypted). Production deployments should use wss://");
         }
     }
@@ -2907,6 +3297,68 @@ async fn main() {
     }
 
     // ── 7. Require server (from args or saved config) ─────
+    if args.logs {
+        match print_logs_tail(&log_path, args.log_lines) {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("{}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if args.status {
+        run_status_command(&args).await;
+        std::process::exit(0);
+    }
+
+    if args.self_test {
+        match run_self_test_command(&args).await {
+            Ok(()) => std::process::exit(0),
+            Err(e) => {
+                eprintln!("Self-test failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if args.enroll {
+        let server = match args.server.clone() {
+            Some(v) => v,
+            None => {
+                eprintln!("Missing --server for --enroll (example: --server wss://host/ws/agent)");
+                std::process::exit(2);
+            }
+        };
+        let token = match args.token.clone() {
+            Some(v) => v,
+            None => {
+                eprintln!("Missing --token for --enroll");
+                std::process::exit(2);
+            }
+        };
+
+        match enroll_once(&server, &token, args.insecure_tls).await {
+            Ok(cfg) => {
+                if let Err(e) = save_config(&cfg) {
+                    eprintln!("Enrollment succeeded but config save failed: {}", e);
+                    std::process::exit(1);
+                }
+                remove_bootstrap_file();
+                println!("Enrollment successful. agent_id={}", cfg.agent_id);
+                std::process::exit(0);
+            }
+            Err(e) => {
+                eprintln!("Enrollment failed: {}", e);
+                std::process::exit(1);
+            }
+        }
+    }
+
+    if !args.run {
+        finfo!("Compatibility mode: running without explicit --run");
+    }
+
     let server = match args.server.clone().or_else(|| load_config().map(|c| c.server)) {
         Some(s) => s,
         None => {
@@ -2972,7 +3424,6 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
 
     let (mut write, mut read) = ws_stream.split();
     finfo!("Connected to server OK");
-
     let (hostname, os, arch, os_version) = get_system_info();
 
     // Determine if we need to enroll or reconnect.
@@ -2989,8 +3440,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
         finfo!("Reconnecting with saved config: agent_id={}", saved.agent_id);
         (saved.agent_id, saved.hmac_key)
     } else if let Some(token) = &args.token {
-        // No saved config → first enrollment with token.
-        finfo!("No saved config found — enrolling with token...");
+        finfo!("No saved config found - enrolling with token...");
         let enroll_msg = serde_json::json!({
             "agentId": "00000000-0000-0000-0000-000000000000",
             "ts": now_ms(),
@@ -3008,13 +3458,10 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
         });
 
         write.send(Message::Text(serde_json::to_string(&enroll_msg)?)).await?;
-
-        // Wait for response
         if let Some(Ok(Message::Text(text))) = read.next().await {
             let resp: serde_json::Value = serde_json::from_str(&text)?;
             if resp["type"] == "enroll_response" {
                 let payload = &resp["payload"];
-
                 if let Some(err) = payload["error"].as_str() {
                     let msg = format!("Enrollment FAILED: {}", err);
                     ferror!("{}", msg);
@@ -3025,23 +3472,24 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                     .as_str()
                     .ok_or("Enrollment response missing agent_id")?
                     .to_string();
-
                 let key = payload["hmac_key"]
                     .as_str()
                     .or_else(|| payload["agent_secret"].as_str())
                     .ok_or("Enrollment response missing hmac_key/agent_secret")?
                     .to_string();
 
-                finfo!("Enrolled OK — agent_id={}", id);
-                // Persist agent_id + hmac_key to config file
-                if let Err(e) = save_config(&AgentConfig {
+                let cfg = AgentConfig {
                     agent_id: id.clone(),
                     hmac_key: key.clone(),
                     server: server.to_string(),
                     enrolled_at: now_ms(),
-                }) {
-                    fwarn!("Failed to save agent config — will need re-enrollment on restart: {}", e);
+                };
+                if let Err(e) = save_config(&cfg) {
+                    fwarn!("Failed to save agent config - will need re-enrollment on restart: {}", e);
+                } else {
+                    remove_bootstrap_file();
                 }
+                finfo!("Enrolled OK - agent_id={}", id);
                 (id, key)
             } else {
                 return Err("Unexpected response type during enrollment".into());

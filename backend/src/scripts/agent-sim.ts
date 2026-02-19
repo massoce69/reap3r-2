@@ -2,7 +2,7 @@
 // ------------------------------------------------------------
 // MASSVISION Reap3r — Agent Simulator (Protocol v1)
 // Usage:
-//   npm -w backend run test:agent-sim -- --server=ws://localhost:4001/ws/agent --token=... --secret=...
+//   npm -w backend run test:agent-sim -- --server=ws://localhost:4000/ws/agent --token=... --secret=...
 // ------------------------------------------------------------
 import WebSocket from 'ws';
 import crypto from 'crypto';
@@ -20,7 +20,7 @@ const argv = process.argv.slice(2).reduce((acc, arg) => {
   return acc;
 }, {} as Record<string, string>);
 
-const SERVER = argv.server || process.env.REAP3R_AGENT_SIM_SERVER || 'ws://localhost:4001/ws/agent';
+const SERVER = argv.server || process.env.REAP3R_AGENT_SIM_SERVER || 'ws://localhost:4000/ws/agent';
 const TOKEN = argv.token || process.env.REAP3R_ENROLLMENT_TOKEN || '';
 const FALLBACK_SECRET = argv.secret || 'dev_hmac_secret_change_in_production_00000000';
 const HEARTBEAT_EVERY_MS = parseInt(argv.heartbeat_ms || '5000', 10);

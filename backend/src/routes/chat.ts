@@ -60,11 +60,13 @@ export default async function chatRoutes(fastify: FastifyInstance) {
     const msg = await svc.createMessage(id, request.currentUser.id, parsed.data.body);
 
     // Broadcast to UI WebSocket clients via /ws/ui endpoint (agent-gateway handles broadcastToUI)
-    fastify.broadcastToUI('chat:message', {
+    const payload = {
       channel_id: id,
       message: { ...msg, user_name: request.currentUser.name, body: parsed.data.body },
       org_id: request.currentUser.org_id,
-    });
+    };
+    fastify.broadcastToUI('chat:message', payload);
+    fastify.broadcastToMessaging('chat:message', payload, request.currentUser.org_id);
 
     return reply.status(201).send(msg);
   });

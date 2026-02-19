@@ -2,13 +2,14 @@
 // MASSVISION Reap3r — Job Routes
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
-import { Permission, JobTypePermission, JobType, CreateJobSchema, canonicalJsonStringify } from '@massvision/shared';
+import { Permission, JobPayloadSchemas, JobTypePermission, JobType, CreateJobSchema, canonicalJsonStringify } from '@massvision/shared';
 import { RolePermissions, Role } from '@massvision/shared';
 import * as jobService from '../services/job.service.js';
 import { createAuditLog } from '../services/audit.service.js';
 import { parseUUID, parseBody, clampLimit } from '../lib/validate.js';
 import { createHmac, randomUUID } from 'crypto';
 import { config } from '../config.js';
+import { hydrateJobPayloadForDispatch } from '../services/job-dispatch.service.js';
 
 export default async function jobRoutes(fastify: FastifyInstance) {
   // ── List jobs ──
@@ -52,7 +53,8 @@ export default async function jobRoutes(fastify: FastifyInstance) {
   fastify.post('/api/jobs', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.JobCreate)] }, async (request, reply) => {
     const body = parseBody(CreateJobSchema, request.body, reply);
     if (!body) return;
-    const { agent_id, job_type, payload, reason, priority, timeout_sec } = body;
+    const { agent_id, job_type, reason, priority, timeout_sec } = body;
+    let payloadInput = body.payload ?? {};
 
     // Check job-type specific permission
     const requiredPerm = JobTypePermission[job_type as JobType];
@@ -66,10 +68,23 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       }
     }
 
+    const payloadSchema = JobPayloadSchemas[job_type as JobType];
+    if (payloadSchema) {
+      const payloadParsed = payloadSchema.safeParse(payloadInput);
+      if (!payloadParsed.success) {
+        return reply.status(400).send({
+          statusCode: 400,
+          error: 'Bad Request',
+          message: payloadParsed.error.message,
+        });
+      }
+      payloadInput = payloadParsed.data;
+    }
+
     const job = await jobService.createJob(fastify, {
       agent_id,
       job_type,
-      payload: payload ?? {},
+      payload: payloadInput,
       created_by: request.currentUser.id,
       org_id: request.currentUser.org_id,
       reason,
@@ -89,10 +104,11 @@ export default async function jobRoutes(fastify: FastifyInstance) {
     try {
       const agentWs = fastify.agentSockets?.get(agent_id);
       if (agentWs && agentWs.readyState === 1) {
+        const hydratedArgs = await hydrateJobPayloadForDispatch(fastify, request.currentUser.org_id, payloadInput);
         const jobPayload = {
           job_id: job.id,
           name: job_type,
-          args: payload ?? {},
+          args: hydratedArgs,
           timeout_sec: timeout_sec ?? 300,
           created_at: new Date(job.created_at).toISOString(),
         };

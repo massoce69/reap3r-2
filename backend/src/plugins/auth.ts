@@ -7,6 +7,7 @@ import jwt from '@fastify/jwt';
 import { config } from '../config.js';
 import { RolePermissions, Role, Permission } from '@massvision/shared';
 import { validateApiKey } from '../services/apikey.service.js';
+import { authenticateAccessToken } from '../services/auth-session.service.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
@@ -20,6 +21,7 @@ declare module 'fastify' {
       name: string;
       role: Role;
       org_id: string;
+      session_id?: string;
     };
     authMethod?: 'jwt' | 'api_key';
   }
@@ -53,13 +55,26 @@ async function authPlugin(fastify: FastifyInstance) {
     }
 
     // Fall back to JWT
-    try {
-      const decoded = await request.jwtVerify();
-      request.currentUser = decoded as any;
-      request.authMethod = 'jwt';
-    } catch {
+    const bearerToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (!bearerToken) {
       reply.status(401).send({ statusCode: 401, error: 'Unauthorized', message: 'Invalid or missing token' });
+      return;
     }
+
+    const sessionUser = await authenticateAccessToken(fastify, bearerToken);
+    if (!sessionUser) {
+      reply.status(401).send({ statusCode: 401, error: 'Unauthorized', message: 'Session expired or revoked' });
+      return;
+    }
+    request.currentUser = {
+      id: sessionUser.id,
+      email: sessionUser.email,
+      name: sessionUser.name,
+      role: sessionUser.role,
+      org_id: sessionUser.org_id,
+      session_id: sessionUser.session_id,
+    };
+    request.authMethod = 'jwt';
   });
 
   fastify.decorate('requirePermission', (permission: Permission) => {

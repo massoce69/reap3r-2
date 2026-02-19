@@ -13,8 +13,10 @@ import { WebSocketServer, WebSocket as WS, RawData } from 'ws';
 import crypto from 'crypto';
 import { v4 as uuidv4 } from 'uuid';
 import { FastifyInstance } from 'fastify';
+import { IncomingMessage } from 'node:http';
 import { config } from '../config.js';
 import {
+  Permission,
   MessageType,
   ANTI_REPLAY_WINDOW_MS,
   MessageEnvelopeSchema,
@@ -27,24 +29,28 @@ import {
   JobAckPayload,
   JobResultPayload,
   StreamOutputPayload,
-  RdInputPayload,
 } from '@massvision/shared';
 
 import * as agentService from '../services/agent.service.js';
 import * as jobService from '../services/job.service.js';
+import { hydrateJobPayloadForDispatch } from '../services/job-dispatch.service.js';
 import { ingestSecurityEvent } from '../services/edr.service.js';
+import * as chatService from '../services/chat.service.js';
+import { authenticateAccessToken, hasPermission, isSessionActive } from '../services/auth-session.service.js';
 
 declare module 'fastify' {
   interface FastifyInstance {
     agentSockets: Map<string, WS>;
     uiSockets: Set<WS>;
+    messagingSockets: Set<WS>;
     broadcastToUI: (event: string, data: unknown) => void;
+    broadcastToMessaging: (event: string, data: unknown, orgId?: string) => void;
     agentWsPort?: number;
   }
 }
 
-// Nonce replay cache (best-effort).
-const recentNonces = new Set<string>();
+// Nonce replay cache with TTL eviction (no global clear).
+const recentNonces = new Map<string, number>();
 const NONCE_CLEANUP_INTERVAL_MS = 60_000;
 
 function safeTimingEqualHex(aHex: string, bHex: string): boolean {
@@ -99,36 +105,118 @@ function nowEnvelopeBase(agentId: string, type: string, payload: any, extra?: Pa
   };
 }
 
+function tokenFromRequest(request: IncomingMessage): string | null {
+  const url = new URL(request.url ?? '/', `http://${request.headers.host || 'localhost'}`);
+  const queryToken = url.searchParams.get('token');
+  if (queryToken) return queryToken;
+
+  const auth = request.headers.authorization;
+  if (auth?.startsWith('Bearer ')) return auth.slice(7);
+  return null;
+}
+
+function orgIdFromPayload(data: unknown): string | undefined {
+  if (!data || typeof data !== 'object') return undefined;
+  const o = data as Record<string, unknown>;
+  const v = o.org_id ?? o.orgId;
+  return typeof v === 'string' ? v : undefined;
+}
+
+function uiEventPermission(event: string): Permission | null {
+  if (event === 'chat:message') return Permission.MessageRead;
+  if (event === 'edr:event') return Permission.EdrEventsView;
+  if (event.startsWith('rd:')) return Permission.RemoteDesktop;
+  if (event === 'stream:output') return Permission.JobView;
+  if (event.startsWith('agent:')) return Permission.AgentView;
+  if (event.startsWith('job:')) return Permission.JobView;
+  return null;
+}
+
 export function setupAgentGateway(fastify: FastifyInstance) {
   const agentSockets = new Map<string, WS>();
   const uiSockets = new Set<WS>();
+  const messagingSockets = new Set<WS>();
+  const uiSocketOrg = new Map<WS, string>();
+  const messagingSocketOrg = new Map<WS, string>();
+  const uiSocketSession = new Map<WS, string>();
+  const messagingSocketSession = new Map<WS, string>();
+  const uiSocketPerms = new Map<WS, Set<Permission>>();
+  const messagingSocketPerms = new Map<WS, Set<Permission>>();
 
   fastify.decorate('agentSockets', agentSockets);
   fastify.decorate('uiSockets', uiSockets);
+  fastify.decorate('messagingSockets', messagingSockets);
   fastify.decorate('broadcastToUI', (event: string, data: unknown) => {
+    const targetOrg = orgIdFromPayload(data);
+    const requiredPermission = uiEventPermission(event);
     const msg = JSON.stringify({ type: event, payload: data });
     for (const ws of uiSockets) {
-      if (ws.readyState === WS.OPEN) ws.send(msg);
+      if (ws.readyState !== WS.OPEN) continue;
+      if (targetOrg && uiSocketOrg.get(ws) !== targetOrg) continue;
+      if (requiredPermission) {
+        const perms = uiSocketPerms.get(ws);
+        if (!perms?.has(requiredPermission)) continue;
+      }
+      ws.send(msg);
+    }
+  });
+  fastify.decorate('broadcastToMessaging', (event: string, data: unknown, orgId?: string) => {
+    const targetOrg = orgId ?? orgIdFromPayload(data);
+    const msg = JSON.stringify({ type: event, payload: data });
+    for (const ws of messagingSockets) {
+      if (ws.readyState !== WS.OPEN) continue;
+      if (targetOrg && messagingSocketOrg.get(ws) !== targetOrg) continue;
+      ws.send(msg);
     }
   });
 
-  // Agent WS server is on a dedicated port (proxies should forward /ws/agent to it).
-  const wss = new WebSocketServer({ port: config.wsPort, path: '/ws/agent' });
-  const addr: any = wss.address();
-  const actualPort = typeof addr === 'object' && addr ? Number(addr.port) : config.wsPort;
-  fastify.decorate('agentWsPort', actualPort);
-  fastify.log.info(`Agent WS gateway listening on port ${actualPort}`);
+  // Unified WS on the main Fastify HTTP server.
+  const wss = new WebSocketServer({ noServer: true });
+  const uiWss = new WebSocketServer({ noServer: true });
+  const messagingWss = new WebSocketServer({ noServer: true });
+
+  fastify.decorate('agentWsPort', 0);
+  fastify.addHook('onListen', async () => {
+    const addr = fastify.server.address();
+    const port = typeof addr === 'object' && addr ? Number(addr.port) : config.port;
+    fastify.agentWsPort = port;
+    fastify.log.info(`Unified WS gateway listening on port ${port} (/ws/agent, /ws/ui, /ws/messaging)`);
+  });
+
+  const upgradeHandler = (request: IncomingMessage, socket: any, head: Buffer) => {
+    let pathname = '/';
+    try {
+      pathname = new URL(request.url ?? '/', `http://${request.headers.host || 'localhost'}`).pathname;
+    } catch {
+      socket.destroy();
+      return;
+    }
+
+    const handle = (server: WebSocketServer) => {
+      server.handleUpgrade(request, socket, head, (ws) => {
+        server.emit('connection', ws, request);
+      });
+    };
+
+    if (pathname === '/ws/agent') return handle(wss);
+    if (pathname === '/ws/ui') return handle(uiWss);
+    if (pathname === '/ws/messaging') return handle(messagingWss);
+    socket.destroy();
+  };
+  fastify.server.on('upgrade', upgradeHandler);
 
   // Ping/pong keepalive.
   const pingInterval = setInterval(() => {
-    for (const ws of wss.clients) {
-      const anyWs: any = ws as any;
-      if (anyWs.isAlive === false) {
-        try { ws.terminate(); } catch {}
-        continue;
+    for (const server of [wss, uiWss, messagingWss]) {
+      for (const ws of server.clients) {
+        const anyWs: any = ws as any;
+        if (anyWs.isAlive === false) {
+          try { ws.terminate(); } catch {}
+          continue;
+        }
+        anyWs.isAlive = false;
+        try { ws.ping(); } catch {}
       }
-      anyWs.isAlive = false;
-      try { ws.ping(); } catch {}
     }
   }, 30_000);
 
@@ -163,17 +251,19 @@ export function setupAgentGateway(fastify: FastifyInstance) {
           }
 
           // Anti-replay.
-          if (recentNonces.has(msg.nonce)) {
+          const now = Date.now();
+          const seenAt = recentNonces.get(msg.nonce);
+          if (seenAt && now - seenAt <= ANTI_REPLAY_WINDOW_MS) {
             ws.send(JSON.stringify({ type: 'error', payload: { message: 'Nonce replay detected' } }));
             ws.close();
             return;
           }
-          if (Date.now() - msg.ts > ANTI_REPLAY_WINDOW_MS) {
+          if (now - msg.ts > ANTI_REPLAY_WINDOW_MS) {
             ws.send(JSON.stringify({ type: 'error', payload: { message: 'Message expired' } }));
             ws.close();
             return;
           }
-          recentNonces.add(msg.nonce);
+          recentNonces.set(msg.nonce, now);
         }
 
         switch (msg.type) {
@@ -262,10 +352,18 @@ export function setupAgentGateway(fastify: FastifyInstance) {
             // Dispatch pending jobs.
             const pending = await jobService.getPendingJobs(fastify, aid);
             for (const job of pending) {
+              let args: Record<string, unknown>;
+              try {
+                args = await hydrateJobPayloadForDispatch(fastify, String(job.org_id), job.payload ?? {});
+              } catch (err: any) {
+                await jobService.updateJobStatus(fastify, job.id, 'failed', { error: String(err?.message || err) });
+                fastify.log.error({ err, job_id: job.id }, 'Failed to hydrate job payload for dispatch');
+                continue;
+              }
               const payload = {
                 job_id: job.id,
                 name: job.type,
-                args: job.payload ?? {},
+                args,
                 timeout_sec: job.timeout_secs ?? 300,
                 created_at: new Date(job.created_at).toISOString(),
               };
@@ -478,40 +576,47 @@ export function setupAgentGateway(fastify: FastifyInstance) {
       fastify.log.error({ err, agentId }, 'Agent WS error');
     });
   });
-
-  // UI WS — dedicated port so it works regardless of PM2 mode (cluster/fork)
-  const uiWss = new WebSocketServer({ port: config.uiWsPort, path: '/ws/ui' });
-  const uiAddr: any = uiWss.address();
-  const uiActualPort = typeof uiAddr === 'object' && uiAddr ? Number(uiAddr.port) : config.uiWsPort;
-  fastify.log.info(`UI WS gateway listening on port ${uiActualPort}`);
-
-  uiWss.on('connection', (ws: WS, request: any) => {
-    const url = new URL(request.url, `http://${request.headers.host || 'localhost'}`);
-    const token = url.searchParams.get('token');
+  uiWss.on('connection', async (ws: WS, request: IncomingMessage) => {
+    const token = tokenFromRequest(request);
     if (!token) {
       ws.close(4001, 'No token');
       return;
     }
-    try {
-      (fastify as any).jwt.verify(token);
-    } catch {
-      ws.close(4001, 'Invalid token');
+
+    const auth = await authenticateAccessToken(fastify, token);
+    if (!auth) {
+      ws.close(4001, 'Invalid or revoked session');
       return;
     }
-    uiSockets.add(ws);
-    fastify.log.info({ uiClients: uiSockets.size }, 'UI WS client connected');
+    if (!hasPermission(auth, Permission.DashboardView)) {
+      ws.close(4003, 'Missing dashboard:view');
+      return;
+    }
 
-    // Handle UI → Agent messages (rd:input relay)
+    const orgId = auth.org_id;
+    uiSockets.add(ws);
+    uiSocketOrg.set(ws, orgId);
+    uiSocketSession.set(ws, auth.session_id);
+    uiSocketPerms.set(ws, new Set(auth.permissions));
+    (ws as any).isAlive = true;
+    ws.on('pong', () => { (ws as any).isAlive = true; });
+    fastify.log.info({ uiClients: uiSockets.size, orgId }, 'UI WS client connected');
+
+    // Handle UI -> Agent messages (rd:input relay)
     ws.on('message', (raw: RawData) => {
       try {
         const msg = JSON.parse(raw.toString());
         if (msg.type === 'rd:input') {
+          const perms = uiSocketPerms.get(ws);
+          if (!perms?.has(Permission.RemoteDesktop)) {
+            ws.send(JSON.stringify({ type: 'error', payload: { message: 'Missing permission: remote:desktop' } }));
+            return;
+          }
           const p = msg.payload;
           if (!p?.agent_id) return;
           const agentWs = agentSockets.get(String(p.agent_id));
           if (!agentWs || agentWs.readyState !== WS.OPEN) return;
 
-          // Relay as rd_input message to agent (signed)
           const env = nowEnvelopeBase(String(p.agent_id), MessageType.RdInput, {
             input_type: p.input_type,
             x: p.x,
@@ -531,13 +636,99 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
     ws.on('close', () => {
       uiSockets.delete(ws);
+      uiSocketOrg.delete(ws);
+      uiSocketSession.delete(ws);
+      uiSocketPerms.delete(ws);
       fastify.log.info({ uiClients: uiSockets.size }, 'UI WS client disconnected');
     });
-    ws.on('error', () => uiSockets.delete(ws));
+    ws.on('error', () => {
+      uiSockets.delete(ws);
+      uiSocketOrg.delete(ws);
+      uiSocketSession.delete(ws);
+      uiSocketPerms.delete(ws);
+    });
+  });
+
+  messagingWss.on('connection', async (ws: WS, request: IncomingMessage) => {
+    const token = tokenFromRequest(request);
+    if (!token) {
+      ws.close(4001, 'No token');
+      return;
+    }
+
+    const auth = await authenticateAccessToken(fastify, token);
+    if (!auth) {
+      ws.close(4001, 'Invalid or revoked session');
+      return;
+    }
+    if (!hasPermission(auth, Permission.MessageRead)) {
+      ws.close(4003, 'Missing message:read');
+      return;
+    }
+
+    const orgId = auth.org_id;
+    const userId = auth.id;
+    const userName = auth.name || 'Unknown';
+
+    messagingSockets.add(ws);
+    messagingSocketOrg.set(ws, orgId);
+    messagingSocketSession.set(ws, auth.session_id);
+    messagingSocketPerms.set(ws, new Set(auth.permissions));
+    (ws as any).isAlive = true;
+    ws.on('pong', () => { (ws as any).isAlive = true; });
+    fastify.log.info({ messagingClients: messagingSockets.size, orgId }, 'Messaging WS client connected');
+
+    ws.on('message', async (raw: RawData) => {
+      // Optional client -> server messaging path (REST remains primary).
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg?.type !== 'chat:send') return;
+        const perms = messagingSocketPerms.get(ws);
+        if (!perms?.has(Permission.MessageWrite)) {
+          ws.send(JSON.stringify({ type: 'error', payload: { message: 'Missing permission: message:write' } }));
+          return;
+        }
+
+        const p = msg.payload || {};
+        const channelId = String(p.channel_id || '');
+        const body = String(p.body || '').trim();
+        if (!channelId || !body) return;
+
+        const created = await chatService.createMessage(channelId, userId, body);
+        const payload = {
+          channel_id: channelId,
+          message: { ...created, user_name: userName, body },
+          org_id: orgId,
+        };
+        fastify.broadcastToMessaging('chat:message', payload, orgId);
+        fastify.broadcastToUI('chat:message', payload);
+      } catch {
+        // Ignore malformed ws message
+      }
+    });
+
+    ws.on('close', () => {
+      messagingSockets.delete(ws);
+      messagingSocketOrg.delete(ws);
+      messagingSocketSession.delete(ws);
+      messagingSocketPerms.delete(ws);
+      fastify.log.info({ messagingClients: messagingSockets.size }, 'Messaging WS client disconnected');
+    });
+    ws.on('error', () => {
+      messagingSockets.delete(ws);
+      messagingSocketOrg.delete(ws);
+      messagingSocketSession.delete(ws);
+      messagingSocketPerms.delete(ws);
+    });
   });
 
   // Cleanup.
-  const nonceCleanup = setInterval(() => recentNonces.clear(), NONCE_CLEANUP_INTERVAL_MS);
+  const nonceCleanup = setInterval(() => {
+    const cutoff = Date.now() - ANTI_REPLAY_WINDOW_MS;
+    for (const [nonce, ts] of recentNonces.entries()) {
+      if (ts < cutoff) recentNonces.delete(nonce);
+    }
+  }, NONCE_CLEANUP_INTERVAL_MS);
   const staleInterval = setInterval(async () => {
     try {
       await agentService.markStaleAgentsOffline(fastify, config.agentOfflineThresholdSecs);
@@ -552,15 +743,37 @@ export function setupAgentGateway(fastify: FastifyInstance) {
       fastify.log.error({ err }, 'Error timing out expired jobs');
     }
   }, 60_000);
+  const wsSessionRevalidateInterval = setInterval(async () => {
+    try {
+      for (const [ws, sessionId] of uiSocketSession.entries()) {
+        if (ws.readyState !== WS.OPEN) continue;
+        if (!(await isSessionActive(fastify, sessionId))) {
+          ws.close(4001, 'Session revoked');
+        }
+      }
+      for (const [ws, sessionId] of messagingSocketSession.entries()) {
+        if (ws.readyState !== WS.OPEN) continue;
+        if (!(await isSessionActive(fastify, sessionId))) {
+          ws.close(4001, 'Session revoked');
+        }
+      }
+    } catch (err) {
+      fastify.log.warn({ err }, 'WS session revalidation failed');
+    }
+  }, 60_000);
 
   fastify.addHook('onClose', async () => {
     clearInterval(pingInterval);
     clearInterval(nonceCleanup);
     clearInterval(staleInterval);
     clearInterval(jobTimeoutInterval);
+    clearInterval(wsSessionRevalidateInterval);
+    fastify.server.off('upgrade', upgradeHandler);
     wss.close();
     uiWss.close();
+    messagingWss.close();
   });
 
   return wss;
 }
+

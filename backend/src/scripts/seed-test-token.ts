@@ -60,7 +60,7 @@ async function run() {
     console.log(`  Token Value: ${record.token}`);
     console.log(`  Expires:     ${record.expires_at}`);
     console.log(`\n[seed-test-token] Use this token in agent-sim:`);
-    console.log(`  npm run test:agent-sim -- --server=ws://localhost:4001 --token=${record.token}`);
+    console.log(`  npm run test:agent-sim -- --server=ws://localhost:4000/ws/agent --token=${record.token}`);
 
   } finally {
     client.release();

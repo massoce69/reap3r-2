@@ -1,7 +1,7 @@
 // Reap3r Agent Simulator (Protocol v1)
 //
 // Example:
-//   npx tsx tools/agent-sim/index.ts --server=ws://localhost:4001/ws/agent --token=... 
+//   npx tsx tools/agent-sim/index.ts --server=ws://localhost:4000/ws/agent --token=... 
 //
 import WebSocket from 'ws';
 import crypto from 'crypto';
@@ -14,7 +14,7 @@ const argv = process.argv.slice(2).reduce((acc, arg) => {
   return acc;
 }, {} as Record<string, string>);
 
-const server = argv.server || process.env.REAP3R_AGENT_SIM_SERVER || 'ws://localhost:4001/ws/agent';
+const server = argv.server || process.env.REAP3R_AGENT_SIM_SERVER || 'ws://localhost:4000/ws/agent';
 const token = argv.token || process.env.REAP3R_ENROLLMENT_TOKEN || '';
 const heartbeatMs = parseInt(argv.heartbeat_ms || '5000', 10);
 

@@ -3,35 +3,14 @@
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
 import bcrypt from 'bcrypt';
-import crypto from 'node:crypto';
-import { Permission, Role, LoginRequestSchema, CreateUserSchema, UpdateUserSchema } from '@massvision/shared';
+import { z } from 'zod';
+import { Permission, LoginRequestSchema, CreateUserSchema, UpdateUserSchema } from '@massvision/shared';
 import { config } from '../config.js';
 import { createAuditLog } from '../services/audit.service.js';
 import { logLoginEvent } from '../services/admin.service.js';
-import { parseUUID, parseBody, clampLimit, clampOffset } from '../lib/validate.js';
-
-// TOTP implementation (RFC 6238)
-function generateTOTP(secret: string, window = 0): string {
-  const epoch = Math.floor(Date.now() / 1000);
-  const counter = Math.floor(epoch / 30) + window;
-  const buf = Buffer.alloc(8);
-  buf.writeUInt32BE(Math.floor(counter / 0x100000000), 0);
-  buf.writeUInt32BE(counter & 0xffffffff, 4);
-  const hmac = crypto.createHmac('sha1', Buffer.from(secret, 'hex'));
-  hmac.update(buf);
-  const hash = hmac.digest();
-  const offset = hash[hash.length - 1] & 0xf;
-  const code = ((hash[offset] & 0x7f) << 24 | (hash[offset + 1] & 0xff) << 16 | (hash[offset + 2] & 0xff) << 8 | (hash[offset + 3] & 0xff)) % 1000000;
-  return code.toString().padStart(6, '0');
-}
-
-function verifyTOTP(secret: string, code: string): boolean {
-  // Check current window and ±1 for clock drift tolerance
-  for (let w = -1; w <= 1; w++) {
-    if (generateTOTP(secret, w) === code) return true;
-  }
-  return false;
-}
+import { createSessionAndIssueTokens, rotateSessionAndIssueTokens } from '../services/auth-session.service.js';
+import { parseUUID, parseBody, clampLimit } from '../lib/validate.js';
+import { verifyTOTP } from '../lib/totp.js';
 
 export default async function authRoutes(fastify: FastifyInstance) {
   // ── Login ──
@@ -107,18 +86,19 @@ export default async function authRoutes(fastify: FastifyInstance) {
 
     await logLoginEvent(user.org_id, { user_id: user.id, email, success: true, ip_address: ip });
 
-    // Create session record
-    const sessionToken = crypto.randomBytes(32).toString('hex');
-    const sessionHash = crypto.createHash('sha256').update(sessionToken).digest('hex');
-    await fastify.pg.query(
-      `INSERT INTO sessions (user_id, token_hash, ip_address, user_agent, expires_at, last_used_at)
-       VALUES ($1, $2, $3, $4, NOW() + INTERVAL '24 hours', NOW())`,
-      [user.id, sessionHash, ip, request.headers['user-agent'] ?? ''],
-    );
-
-    const token = fastify.jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role, org_id: user.org_id },
-      { expiresIn: config.jwt.expiresIn },
+    const tokens = await createSessionAndIssueTokens(
+      fastify,
+      {
+        id: user.id,
+        email: user.email,
+        name: user.name,
+        role: user.role,
+        org_id: user.org_id,
+      },
+      {
+        ip,
+        userAgent: request.headers['user-agent'] ?? '',
+      },
     );
 
     await createAuditLog(fastify, {
@@ -127,17 +107,78 @@ export default async function authRoutes(fastify: FastifyInstance) {
       details: { mfa_used: !!user.mfa_enabled }, ip_address: ip,
     });
 
-    return { token, user: { id: user.id, email: user.email, name: user.name, role: user.role, org_id: user.org_id } };
+    return {
+      token: tokens.token,
+      refresh_token: tokens.refresh_token,
+      expires_in: tokens.access_expires_in_sec,
+      refresh_expires_in: tokens.refresh_expires_in_sec,
+      user: { id: user.id, email: user.email, name: user.name, role: user.role, org_id: user.org_id },
+    };
   });
 
   // ── Refresh Token ──
-  fastify.post('/api/auth/refresh', { preHandler: [fastify.authenticate] }, async (request) => {
-    const user = request.currentUser;
-    const token = fastify.jwt.sign(
-      { id: user.id, email: user.email, name: user.name, role: user.role, org_id: user.org_id },
-      { expiresIn: config.jwt.expiresIn },
-    );
-    return { token };
+  fastify.post('/api/auth/refresh', async (request, reply) => {
+    const bodySchema = z.object({ refresh_token: z.string().min(64) });
+    const parsed = bodySchema.safeParse(request.body ?? {});
+    if (!parsed.success) {
+      return reply.status(400).send({ statusCode: 400, error: 'Bad Request', message: 'refresh_token is required' });
+    }
+
+    const rotated = await rotateSessionAndIssueTokens(fastify, parsed.data.refresh_token, {
+      ip: request.ip,
+      userAgent: request.headers['user-agent'] ?? null,
+    });
+    if (!rotated) {
+      return reply.status(401).send({ statusCode: 401, error: 'Unauthorized', message: 'Invalid or expired refresh token' });
+    }
+
+    await createAuditLog(fastify, {
+      user_id: rotated.user.id,
+      org_id: rotated.user.org_id,
+      action: 'auth.refresh',
+      entity_type: 'session',
+      entity_id: rotated.session_id,
+      details: {},
+      ip_address: request.ip,
+    });
+
+    return {
+      token: rotated.token,
+      refresh_token: rotated.refresh_token,
+      expires_in: rotated.access_expires_in_sec,
+      refresh_expires_in: rotated.refresh_expires_in_sec,
+      user: rotated.user,
+    };
+  });
+
+  fastify.post('/api/auth/logout', { preHandler: [fastify.authenticate] }, async (request) => {
+    if (request.authMethod === 'jwt' && request.currentUser.session_id) {
+      await fastify.pg.query(`UPDATE sessions SET is_active = false WHERE id = $1`, [request.currentUser.session_id]);
+      await createAuditLog(fastify, {
+        user_id: request.currentUser.id,
+        org_id: request.currentUser.org_id,
+        action: 'auth.logout',
+        entity_type: 'session',
+        entity_id: request.currentUser.session_id,
+        details: {},
+        ip_address: request.ip,
+      });
+    }
+    return { ok: true };
+  });
+
+  fastify.post('/api/auth/logout-all', { preHandler: [fastify.authenticate] }, async (request) => {
+    await fastify.pg.query(`UPDATE sessions SET is_active = false WHERE user_id = $1`, [request.currentUser.id]);
+    await createAuditLog(fastify, {
+      user_id: request.currentUser.id,
+      org_id: request.currentUser.org_id,
+      action: 'auth.logout_all',
+      entity_type: 'user',
+      entity_id: request.currentUser.id,
+      details: {},
+      ip_address: request.ip,
+    });
+    return { ok: true };
   });
 
   // ── Me ──
@@ -221,3 +262,4 @@ export default async function authRoutes(fastify: FastifyInstance) {
     return rows[0];
   });
 }
+

@@ -11,6 +11,7 @@ describe.runIf(RUN)('Backend E2E', () => {
   let fastify: any;
   let apiUrl = '';
   let token = '';
+  let refreshToken = '';
 
   async function api(path: string, options: RequestInit = {}) {
     const headers: Record<string, string> = {
@@ -71,10 +72,41 @@ describe.runIf(RUN)('Backend E2E', () => {
     });
     expect(status).toBe(200);
     expect(body.token).toBeDefined();
+    expect(body.refresh_token).toBeDefined();
     token = body.token;
+    refreshToken = body.refresh_token;
+  });
+
+  it('POST /api/auth/refresh rotates refresh token', async () => {
+    const { status, body } = await api('/api/auth/refresh', {
+      method: 'POST',
+      body: JSON.stringify({ refresh_token: refreshToken }),
+    });
+    expect(status).toBe(200);
+    expect(body.token).toBeDefined();
+    expect(body.refresh_token).toBeDefined();
+    token = body.token;
+    refreshToken = body.refresh_token;
+  });
+
+  it('POST /api/auth/logout revokes current session', async () => {
+    const out = await api('/api/auth/logout', { method: 'POST' });
+    expect(out.status).toBe(200);
+    const me = await api('/api/auth/me');
+    expect(me.status).toBe(401);
   });
 
   it('POST /api/enrollment/tokens creates a token', async () => {
+    const relogin = await api('/api/auth/login', {
+      method: 'POST',
+      body: JSON.stringify({
+        email: 'admin@massvision.local',
+        password: 'Admin123!@#',
+      }),
+    });
+    expect(relogin.status).toBe(200);
+    token = relogin.body.token;
+
     const { status, body } = await api('/api/enrollment/tokens', {
       method: 'POST',
       body: JSON.stringify({
@@ -92,4 +124,3 @@ describe.runIf(RUN)('Backend E2E', () => {
     expect(cmdRes.body.linux_oneliner).toContain('api/install/linux');
   });
 });
-

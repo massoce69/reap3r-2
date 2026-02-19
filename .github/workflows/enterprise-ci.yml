@@ -1,0 +1,114 @@
+name: Reap3r Enterprise CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  platform-checks:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Lint (shared/backend/frontend)
+        run: npm run lint
+
+      - name: Backend tests
+        run: npm -w backend run test
+
+      - name: Frontend build
+        run: npm -w frontend run build
+
+  agent-windows-bundle:
+    runs-on: windows-latest
+    env:
+      UPDATE_DOWNLOAD_BASE_URL: ${{ vars.UPDATE_DOWNLOAD_BASE_URL || 'https://updates.example.invalid' }}
+      REAP3R_UPDATE_PRIVKEY_HEX: ${{ secrets.REAP3R_UPDATE_PRIVKEY_HEX }}
+      REAP3R_UPDATE_PUBKEY_HEX: ${{ secrets.REAP3R_UPDATE_PUBKEY_HEX }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Add Windows targets
+        run: |
+          rustup target add x86_64-pc-windows-msvc
+          rustup target add i686-pc-windows-msvc
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install Python dependencies
+        run: pip install cryptography
+
+      - name: Ensure update signing keys
+        shell: pwsh
+        run: |
+          $tmpDir = Join-Path $env:RUNNER_TEMP "reap3r-update-keys"
+          New-Item -ItemType Directory -Path $tmpDir -Force | Out-Null
+
+          if (-not $env:REAP3R_UPDATE_PRIVKEY_HEX -or -not $env:REAP3R_UPDATE_PUBKEY_HEX) {
+            python tools/gen_update_keys.py --out-dir $tmpDir
+            if (-not $env:REAP3R_UPDATE_PRIVKEY_HEX) {
+              $env:REAP3R_UPDATE_PRIVKEY_HEX = (Get-Content (Join-Path $tmpDir "reap3r_update_private_key.hex") -Raw).Trim()
+            }
+            if (-not $env:REAP3R_UPDATE_PUBKEY_HEX) {
+              $env:REAP3R_UPDATE_PUBKEY_HEX = (Get-Content (Join-Path $tmpDir "reap3r_update_public_key.hex") -Raw).Trim()
+            }
+          }
+
+          "REAP3R_UPDATE_PRIVKEY_HEX=$($env:REAP3R_UPDATE_PRIVKEY_HEX)" >> $env:GITHUB_ENV
+          "REAP3R_UPDATE_PUBKEY_HEX=$($env:REAP3R_UPDATE_PUBKEY_HEX)" >> $env:GITHUB_ENV
+
+      - name: Build agent x64/x86 (static CRT)
+        shell: pwsh
+        run: |
+          Push-Location agent
+          $env:RUSTFLAGS = "-C target-feature=+crt-static"
+          $env:REAP3R_UPDATE_PUBKEY_HEX = "$env:REAP3R_UPDATE_PUBKEY_HEX"
+          cargo build --release --target x86_64-pc-windows-msvc
+          cargo build --release --target i686-pc-windows-msvc
+          Pop-Location
+
+      - name: Sign update manifests
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path "agent/Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          python tools/sign_update.py `
+            --binary "agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe" `
+            --version $version `
+            --os windows `
+            --arch x86_64 `
+            --download-url "$env:UPDATE_DOWNLOAD_BASE_URL/api/agent-binary/download?os=windows&arch=x86_64"
+          python tools/sign_update.py `
+            --binary "agent/target/i686-pc-windows-msvc/release/reap3r-agent.exe" `
+            --version $version `
+            --os windows `
+            --arch x86 `
+            --download-url "$env:UPDATE_DOWNLOAD_BASE_URL/api/agent-binary/download?os=windows&arch=x86"
+
+      - name: Build enterprise bundle
+        shell: pwsh
+        run: |
+          $version = (Select-String -Path "agent/Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          ./tools/build_agent_bundle.ps1 -Version $version
+
+      - name: Upload bundle artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: Reap3rAgentBundle
+          path: dist/Reap3rAgentBundle/**
