@@ -4,6 +4,7 @@
 // ─────────────────────────────────────────────
 import { query, transaction } from '../db/pool.js';
 import { ZabbixClient, ZabbixApiError, ZabbixCircuitOpenError } from './zabbix-client.js';
+import * as XLSX from 'xlsx';
 import {
   DeployBatchMode, DeployBatchStatus, DeployItemStatus,
   DeployImportError, DeployBatch, DeployItem,
@@ -22,6 +23,48 @@ interface ParsedRow {
   dat: string;
 }
 
+const DAT_HEX_64_RE = /^[A-Fa-f0-9]{64}$/;
+const HOST_COLUMNS = ['zabbix_host', 'host', 'hostname', 'server'];
+const DAT_COLUMNS = ['dat', 'token', 'key', 'code'];
+
+function parseInputRows(input: Array<{ row: number; zabbix_host: string; dat: string }>): { rows: ParsedRow[]; errors: DeployImportError[] } {
+  const rows: ParsedRow[] = [];
+  const errors: DeployImportError[] = [];
+  const seenHosts = new Set<string>();
+  const seenDats = new Set<string>();
+
+  for (const current of input) {
+    const zabbix_host = (current.zabbix_host ?? '').trim();
+    const dat = (current.dat ?? '').trim();
+    const rowNum = current.row;
+
+    if (!zabbix_host) {
+      errors.push({ row: rowNum, zabbix_host, dat, error: 'Missing zabbix_host' });
+      continue;
+    }
+    if (!DAT_HEX_64_RE.test(dat)) {
+      errors.push({ row: rowNum, zabbix_host, dat, error: 'Invalid DAT format (expected 64 hex chars)' });
+      continue;
+    }
+
+    const hostKey = zabbix_host.toLowerCase();
+    if (seenHosts.has(hostKey)) {
+      errors.push({ row: rowNum, zabbix_host, dat, error: 'Duplicate zabbix_host in file' });
+      continue;
+    }
+    if (seenDats.has(dat.toLowerCase())) {
+      errors.push({ row: rowNum, zabbix_host, dat, error: 'Duplicate DAT in file' });
+      continue;
+    }
+
+    seenHosts.add(hostKey);
+    seenDats.add(dat.toLowerCase());
+    rows.push({ row: rowNum, zabbix_host, dat });
+  }
+
+  return { rows, errors };
+}
+
 /**
  * Parse CSV text content into rows.
  * Expected columns: zabbix_host (or host/hostname), dat (or token/key)
@@ -37,43 +80,86 @@ export function parseCsv(content: string): { rows: ParsedRow[]; errors: DeployIm
 
   // Parse header
   const headers = firstLine.split(sep).map(h => h.trim().toLowerCase().replace(/['"]/g, ''));
-  const hostCol = headers.findIndex(h => ['zabbix_host', 'host', 'hostname', 'server'].includes(h));
-  const datCol = headers.findIndex(h => ['dat', 'token', 'key', 'code'].includes(h));
+  let hostCol = headers.findIndex(h => HOST_COLUMNS.includes(h));
+  let datCol = headers.findIndex(h => DAT_COLUMNS.includes(h));
+
+  // Heuristic: if headers missing, check if first line looks like data (hex64 + hostname)
+  let startIdx = 1;
+  if (hostCol === -1 || datCol === -1) {
+    const p1 = headers[0];
+    const p2 = headers[1];
+    if (headers.length >= 2) {
+       // Check if col 0 is DAT
+       if (DAT_HEX_64_RE.test(p1)) {
+         datCol = 0;
+         hostCol = 1;
+         startIdx = 0; // First line is data
+       } else if (DAT_HEX_64_RE.test(p2)) {
+         datCol = 1;
+         hostCol = 0;
+         startIdx = 0;
+       }
+    }
+  }
 
   if (hostCol === -1 || datCol === -1) {
     return { rows: [], errors: [{ row: 1, error: `Missing required columns. Need: zabbix_host (or host/hostname), dat (or token/key). Found: ${headers.join(', ')}` }] };
   }
 
-  const rows: ParsedRow[] = [];
-  const errors: DeployImportError[] = [];
-  const seen = new Set<string>();
+  const input: Array<{ row: number; zabbix_host: string; dat: string }> = [];
 
-  for (let i = 1; i < lines.length; i++) {
+  for (let i = startIdx; i < lines.length; i++) {
     const cols = lines[i].split(sep).map(c => c.trim().replace(/^["']|["']$/g, ''));
     const zabbix_host = (cols[hostCol] ?? '').trim();
     const dat = (cols[datCol] ?? '').trim();
     const rowNum = i + 1;
-
-    if (!zabbix_host) {
-      errors.push({ row: rowNum, zabbix_host, dat, error: 'Missing zabbix_host' });
-      continue;
-    }
-    if (!dat || !/^[A-Za-z0-9._-]+$/.test(dat)) {
-      errors.push({ row: rowNum, zabbix_host, dat, error: 'Invalid or missing DAT format' });
-      continue;
-    }
-
-    const key = `${zabbix_host.toLowerCase()}`;
-    if (seen.has(key)) {
-      errors.push({ row: rowNum, zabbix_host, dat, error: 'Duplicate host in file' });
-      continue;
-    }
-    seen.add(key);
-
-    rows.push({ row: rowNum, zabbix_host, dat });
+    input.push({ row: rowNum, zabbix_host, dat });
   }
 
-  return { rows, errors };
+  return parseInputRows(input);
+}
+
+export function parseXlsxBuffer(content: Buffer): { rows: ParsedRow[]; errors: DeployImportError[] } {
+  const wb = XLSX.read(content, { type: 'buffer' });
+  const firstSheetName = wb.SheetNames[0];
+  if (!firstSheetName) return { rows: [], errors: [{ row: 0, error: 'Empty workbook' }] };
+  const sheet = wb.Sheets[firstSheetName];
+  const jsonRows = XLSX.utils.sheet_to_json<Record<string, unknown>>(sheet, { defval: '' });
+  if (jsonRows.length === 0) return { rows: [], errors: [{ row: 0, error: 'Empty sheet' }] };
+
+  const rawHeaders = Object.keys(jsonRows[0]);
+  const normalizedToRaw = new Map<string, string>();
+  for (const raw of rawHeaders) {
+    normalizedToRaw.set(raw.trim().toLowerCase(), raw);
+  }
+  const hostHeaderNorm = HOST_COLUMNS.find((h) => normalizedToRaw.has(h));
+  const datHeaderNorm = DAT_COLUMNS.find((h) => normalizedToRaw.has(h));
+  const hostHeader = hostHeaderNorm ? normalizedToRaw.get(hostHeaderNorm) : undefined;
+  const datHeader = datHeaderNorm ? normalizedToRaw.get(datHeaderNorm) : undefined;
+
+  if (!hostHeader || !datHeader) {
+    return {
+      rows: [],
+      errors: [{ row: 1, error: `Missing required columns. Need: zabbix_host (or host/hostname), dat (or token/key). Found: ${rawHeaders.join(', ')}` }],
+    };
+  }
+
+  const input = jsonRows.map((r, idx) => ({
+    row: idx + 2,
+    zabbix_host: String(r[hostHeader] ?? '').trim(),
+    dat: String(r[datHeader] ?? '').trim(),
+  }));
+  return parseInputRows(input);
+}
+
+export function parseImportFile(filename: string, raw: Buffer | string): { rows: ParsedRow[]; errors: DeployImportError[] } {
+  const lower = filename.toLowerCase();
+  if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
+    const buf = Buffer.isBuffer(raw) ? raw : Buffer.from(raw);
+    return parseXlsxBuffer(buf);
+  }
+  const text = Buffer.isBuffer(raw) ? raw.toString('utf8') : raw;
+  return parseCsv(text);
 }
 
 // ═══════════════════════════════════════════
@@ -89,6 +175,7 @@ export interface CreateBatchInput {
   zabbix_url: string;
   zabbix_user: string;
   zabbix_script: string;
+  zabbix_password?: string;
   items: ParsedRow[];
 }
 
@@ -126,8 +213,29 @@ export async function createBatch(input: CreateBatchInput): Promise<{ batch: Dep
       );
     }
 
+    if (input.zabbix_password) {
+      await client.query(
+        `INSERT INTO deploy_batch_secrets (batch_id, tenant_id, zabbix_password)
+         VALUES ($1, $2, $3)
+         ON CONFLICT (batch_id)
+         DO UPDATE SET zabbix_password = EXCLUDED.zabbix_password, updated_at = NOW()`,
+        [batchId, input.tenant_id, input.zabbix_password],
+      );
+    }
+
     return { batch, item_count: input.items.length };
   });
+}
+
+async function getBatchSecret(batchId: string, tenantId: string): Promise<string | null> {
+  const { rows } = await query<{ zabbix_password: string }>(
+    `SELECT zabbix_password
+     FROM deploy_batch_secrets
+     WHERE batch_id = $1 AND tenant_id = $2
+     LIMIT 1`,
+    [batchId, tenantId],
+  );
+  return rows[0]?.zabbix_password ?? null;
 }
 
 /**
@@ -182,62 +290,97 @@ export async function getBatchItems(batchId: string, tenantId: string, statusFil
  * Validate a batch: resolve hosts in Zabbix, check script exists.
  * This is the dry_run phase — NO script.execute is ever called here.
  */
-export async function validateBatch(batchId: string, tenantId: string, zabbixPassword: string): Promise<{
+export async function validateBatch(batchId: string, tenantId: string, zabbixPassword?: string): Promise<{
   valid: number; invalid: number; errors: DeployImportError[];
 }> {
   const batch = await getBatch(batchId, tenantId);
   if (!batch) throw new Error('Batch not found');
   if (!['created', 'ready'].includes(batch.status)) throw new Error(`Cannot validate batch in status: ${batch.status}`);
+  if (!batch.zabbix_url || !batch.zabbix_user || !batch.zabbix_script) {
+    throw new Error('Missing Zabbix configuration on batch');
+  }
 
   // Update status to validating
   await query(`UPDATE deploy_batches SET status = 'validating', updated_at = NOW() WHERE batch_id = $1`, [batchId]);
 
+  const effectivePassword = zabbixPassword || (await getBatchSecret(batchId, tenantId)) || process.env.ZABBIX_PASSWORD;
+  if (!effectivePassword) {
+    throw new Error('Missing Zabbix password for validation');
+  }
+
   const zbx = new ZabbixClient({
-    url: batch.zabbix_url!,
-    user: batch.zabbix_user!,
-    password: zabbixPassword,
+    url: batch.zabbix_url,
+    user: batch.zabbix_user,
+    password: effectivePassword,
   });
 
   try {
     await zbx.login();
 
-    // Resolve script
-    const script = await zbx.scriptGet(batch.zabbix_script!);
-    if (!script) {
+    // Resolve script by exact name and reject ambiguity.
+    const scriptResult = await zbx.scriptResolveExact(batch.zabbix_script);
+    if (scriptResult.state !== 'ok' || !scriptResult.entity) {
+      const scriptErr =
+        scriptResult.state === 'ambiguous'
+          ? `Zabbix global script "${batch.zabbix_script}" is ambiguous (${scriptResult.matches?.length ?? 0} matches)`
+          : `Zabbix global script "${batch.zabbix_script}" not found`;
+
+      await query(
+        `UPDATE deploy_items
+           SET status = 'invalid', validation_error = $2, updated_at = NOW()
+         WHERE batch_id = $1 AND tenant_id = $3`,
+        [batchId, scriptErr, tenantId],
+      );
       await query(
         `UPDATE deploy_batches SET status = 'failed', error = $2, updated_at = NOW() WHERE batch_id = $1`,
-        [batchId, `Zabbix global script "${batch.zabbix_script}" not found`],
+        [batchId, scriptErr],
       );
-      return { valid: 0, invalid: 0, errors: [{ row: 0, error: `Script "${batch.zabbix_script}" not found in Zabbix` }] };
+      const items = await getBatchItems(batchId, tenantId);
+      return {
+        valid: 0,
+        invalid: items.length,
+        errors: [{ row: 0, error: scriptErr }],
+      };
     }
+    const script = scriptResult.entity;
 
     // Fetch all items
     const items = await getBatchItems(batchId, tenantId);
 
     // Batch resolve hosts
     const hostnames = items.map(i => i.zabbix_host);
-    const hostMap = await zbx.hostGetBatch(hostnames);
+    const hostMap = await zbx.hostResolveBatchExact(hostnames);
 
     const errors: DeployImportError[] = [];
     let valid = 0;
     let invalid = 0;
 
     for (const item of items) {
-      const host = hostMap.get(item.zabbix_host);
-      if (host) {
+      const resolution = hostMap.get(item.zabbix_host);
+      if (resolution?.state === 'ok' && resolution.entity) {
         await query(
-          `UPDATE deploy_items SET status = 'valid', zabbix_hostid = $2, zabbix_scriptid = $3, updated_at = NOW()
+          `UPDATE deploy_items
+             SET status = 'valid', validation_error = NULL,
+                 zabbix_hostid = $2, zabbix_scriptid = $3, updated_at = NOW()
            WHERE id = $1`,
-          [item.id, host.hostid, script.scriptid],
+          [item.id, resolution.entity.hostid, script.scriptid],
         );
         valid++;
       } else {
+        const hostError =
+          resolution?.state === 'ambiguous'
+            ? `Host "${item.zabbix_host}" is ambiguous in Zabbix`
+            : `Host "${item.zabbix_host}" not found in Zabbix`;
         await query(
           `UPDATE deploy_items SET status = 'invalid', validation_error = $2, updated_at = NOW()
            WHERE id = $1`,
-          [item.id, `Host "${item.zabbix_host}" not found in Zabbix`],
+          [item.id, hostError],
         );
-        errors.push({ row: item.row_number, zabbix_host: item.zabbix_host, error: 'Host not found in Zabbix' });
+        errors.push({
+          row: item.row_number,
+          zabbix_host: item.zabbix_host,
+          error: resolution?.state === 'ambiguous' ? 'Host ambiguous in Zabbix' : 'Host not found in Zabbix',
+        });
         invalid++;
       }
     }
@@ -399,7 +542,12 @@ export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, ser
       '{$SERVER}': serverUrl,
       '{$BATCH_ID}': item.batch_id,
       '{$CALLBACK_KEY}': callbackKey,
+      DAT: item.dat,
+      SERVER_URL: serverUrl,
+      BATCH_ID: item.batch_id,
+      CALLBACK_KEY: callbackKey,
     });
+    const execId = String(result?.value ?? result?.response ?? `exec-${Date.now()}`);
 
     // Update item: script was sent
     await query(
@@ -407,7 +555,7 @@ export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, ser
          zabbix_exec_id = $2, updated_at = NOW(),
          lock_until = $3
        WHERE id = $1`,
-      [item.id, `exec-${Date.now()}`, new Date(Date.now() + DEPLOY_LOCK_TTL_MINUTES * 60 * 1000).toISOString()],
+      [item.id, execId, new Date(Date.now() + DEPLOY_LOCK_TTL_MINUTES * 60 * 1000).toISOString()],
     );
 
     // Note: item stays in 'running' status until callback arrives or watchdog times it out
@@ -449,13 +597,44 @@ export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, ser
 
 export interface CallbackData {
   batch_id: string;
-  zabbix_host: string;
+  zabbix_host?: string;
+  computername?: string;
   exit_code: number;
   status: string;
   message?: string;
+  log_tail?: string;
+  os_version?: string;
   agent_id?: string;
   hostname?: string;
   version?: string;
+}
+
+async function resolveCallbackItem(data: CallbackData): Promise<DeployItem | null> {
+  const candidates = Array.from(
+    new Set([data.zabbix_host, data.computername, data.hostname].filter((v): v is string => !!v && v.trim().length > 0)),
+  );
+
+  for (const hostCandidate of candidates) {
+    const byHost = await query<DeployItem>(
+      `SELECT * FROM deploy_items
+       WHERE batch_id = $1 AND lower(zabbix_host) = lower($2)
+         AND status = 'running'
+       ORDER BY updated_at DESC
+       LIMIT 1`,
+      [data.batch_id, hostCandidate],
+    );
+    if (byHost.rows[0]) return byHost.rows[0];
+  }
+
+  const fallback = await query<DeployItem>(
+    `SELECT * FROM deploy_items
+     WHERE batch_id = $1 AND status = 'running'
+     ORDER BY updated_at DESC
+     LIMIT 2`,
+    [data.batch_id],
+  );
+  if (fallback.rows.length === 1) return fallback.rows[0];
+  return null;
 }
 
 /**
@@ -464,11 +643,19 @@ export interface CallbackData {
 export async function processCallback(data: CallbackData): Promise<void> {
   const exitInfo = DEPLOY_EXIT_CODES[data.exit_code] ?? { label: 'UNKNOWN', retryable: false };
   const isSuccess = data.exit_code === 0 || data.exit_code === 10;
+  const callbackHost = data.computername || data.hostname || data.zabbix_host || 'unknown';
+  const item = await resolveCallbackItem(data);
+  if (!item) {
+    throw new Error(`No running deploy item found for callback (batch=${data.batch_id}, host=${callbackHost})`);
+  }
 
   const proof = {
     exit_code: data.exit_code,
     status: data.status,
     message: data.message,
+    log_tail: data.log_tail,
+    os_version: data.os_version,
+    computername: callbackHost,
     agent_id: data.agent_id,
     hostname: data.hostname,
     version: data.version,
@@ -479,41 +666,49 @@ export async function processCallback(data: CallbackData): Promise<void> {
     await query(
       `UPDATE deploy_items SET
          status = 'success', callback_received = TRUE, callback_at = NOW(),
-         callback_exit = $3, callback_status = $4, callback_message = $5,
-         proof = $6, finished_at = NOW(), lock_owner = NULL, lock_until = NULL, updated_at = NOW()
-       WHERE batch_id = $1 AND zabbix_host = $2 AND status = 'running'`,
-      [data.batch_id, data.zabbix_host, data.exit_code, data.status, data.message ?? '', JSON.stringify(proof)],
+         callback_exit = $2, callback_status = $3, callback_message = $4,
+         proof = $5, finished_at = NOW(), lock_owner = NULL, lock_until = NULL, updated_at = NOW()
+       WHERE id = $1`,
+      [item.id, data.exit_code, data.status, data.message ?? data.log_tail ?? '', JSON.stringify(proof)],
     );
   } else if (exitInfo.retryable) {
     // Check attempt count and decide retry vs final fail
-    const { rows } = await query<DeployItem>(
-      `SELECT * FROM deploy_items WHERE batch_id = $1 AND zabbix_host = $2 AND status = 'running' LIMIT 1`,
-      [data.batch_id, data.zabbix_host],
-    );
-    const item = rows[0];
     if (item && item.attempt_count < item.max_attempts) {
       const backoff = DEPLOY_RETRY_BACKOFF_MINUTES[Math.min(item.attempt_count - 1, DEPLOY_RETRY_BACKOFF_MINUTES.length - 1)];
       const nextRetry = new Date(Date.now() + backoff * 60 * 1000).toISOString();
       await query(
         `UPDATE deploy_items SET
            status = 'ready', callback_received = TRUE, callback_at = NOW(),
-           callback_exit = $3, callback_status = $4, callback_message = $5,
-           last_error = $6, error_category = 'retryable', next_retry_at = $7,
-           lock_owner = NULL, lock_until = NULL, updated_at = NOW()
-         WHERE id = $8`,
-        [data.batch_id, data.zabbix_host, data.exit_code, data.status, data.message ?? '',
-         `${exitInfo.label}: ${data.message ?? ''}`, nextRetry, item.id],
+           callback_exit = $2, callback_status = $3, callback_message = $4,
+           last_error = $5, error_category = 'retryable', next_retry_at = $6,
+           lock_owner = NULL, lock_until = NULL, proof = $7, updated_at = NOW()
+         WHERE id = $1`,
+        [
+          item.id,
+          data.exit_code,
+          data.status,
+          data.message ?? data.log_tail ?? '',
+          `${exitInfo.label}: ${data.message ?? data.status}`,
+          nextRetry,
+          JSON.stringify(proof),
+        ],
       );
     } else {
       await query(
         `UPDATE deploy_items SET
            status = 'failed', callback_received = TRUE, callback_at = NOW(),
-           callback_exit = $3, callback_status = $4, callback_message = $5,
-           last_error = $6, error_category = 'non_retryable', proof = $7,
+           callback_exit = $2, callback_status = $3, callback_message = $4,
+           last_error = $5, error_category = 'non_retryable', proof = $6,
            finished_at = NOW(), lock_owner = NULL, lock_until = NULL, updated_at = NOW()
-         WHERE batch_id = $1 AND zabbix_host = $2 AND status = 'running'`,
-        [data.batch_id, data.zabbix_host, data.exit_code, data.status, data.message ?? '',
-         `${exitInfo.label}: ${data.message ?? ''}`, JSON.stringify(proof)],
+         WHERE id = $1`,
+        [
+          item.id,
+          data.exit_code,
+          data.status,
+          data.message ?? data.log_tail ?? '',
+          `${exitInfo.label}: ${data.message ?? data.status}`,
+          JSON.stringify(proof),
+        ],
       );
     }
   } else {
@@ -521,12 +716,18 @@ export async function processCallback(data: CallbackData): Promise<void> {
     await query(
       `UPDATE deploy_items SET
          status = 'failed', callback_received = TRUE, callback_at = NOW(),
-         callback_exit = $3, callback_status = $4, callback_message = $5,
-         last_error = $6, error_category = 'non_retryable', proof = $7,
+         callback_exit = $2, callback_status = $3, callback_message = $4,
+         last_error = $5, error_category = 'non_retryable', proof = $6,
          finished_at = NOW(), lock_owner = NULL, lock_until = NULL, updated_at = NOW()
-       WHERE batch_id = $1 AND zabbix_host = $2 AND status = 'running'`,
-      [data.batch_id, data.zabbix_host, data.exit_code, data.status, data.message ?? '',
-       `${exitInfo.label}: ${data.message ?? ''}`, JSON.stringify(proof)],
+       WHERE id = $1`,
+      [
+        item.id,
+        data.exit_code,
+        data.status,
+        data.message ?? data.log_tail ?? '',
+        `${exitInfo.label}: ${data.message ?? data.status}`,
+        JSON.stringify(proof),
+      ],
     );
   }
 
@@ -559,20 +760,34 @@ export async function updateBatchCounters(batchId: string): Promise<void> {
   const failed = counts['failed'] ?? 0;
   const skipped = counts['skipped'] ?? 0;
   const cancelled = counts['cancelled'] ?? 0;
+  const running = counts['running'] ?? 0;
+  const ready = counts['ready'] ?? 0;
+  const pending = counts['pending'] ?? 0;
   const valid = counts['valid'] ?? 0;
   const invalid = counts['invalid'] ?? 0;
 
-  const terminal = success + failed + skipped + cancelled + invalid;
-  const allDone = terminal >= total && total > 0;
+  const nonTerminal = running + ready + pending + valid;
+  const allDone = nonTerminal === 0 && total > 0;
+  const nextStatus = allDone ? (failed > 0 ? 'failed' : 'done') : null;
+  const validCount = total - invalid - pending;
 
-  await query(
-    `UPDATE deploy_batches SET
-       valid_count = $2, invalid_count = $3, success_count = $4, failed_count = $5, skipped_count = $6,
-       ${allDone ? "status = CASE WHEN failed_count > 0 THEN 'failed'::deploy_batch_status ELSE 'done'::deploy_batch_status END, finished_at = NOW()," : ''}
-       updated_at = NOW()
-     WHERE batch_id = $1`,
-    [batchId, valid + success + failed + skipped, invalid, success, failed, skipped],
-  );
+  if (nextStatus) {
+    await query(
+      `UPDATE deploy_batches SET
+         valid_count = $2, invalid_count = $3, success_count = $4, failed_count = $5, skipped_count = $6,
+         status = $7::deploy_batch_status, finished_at = NOW(), updated_at = NOW()
+       WHERE batch_id = $1`,
+      [batchId, validCount, invalid, success, failed, skipped, nextStatus],
+    );
+  } else {
+    await query(
+      `UPDATE deploy_batches SET
+         valid_count = $2, invalid_count = $3, success_count = $4, failed_count = $5, skipped_count = $6,
+         updated_at = NOW()
+       WHERE batch_id = $1`,
+      [batchId, validCount, invalid, success, failed, skipped],
+    );
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -586,7 +801,7 @@ export async function updateBatchCounters(batchId: string): Promise<void> {
 export async function watchdogSweep(): Promise<number> {
   const { rowCount } = await query(
     `UPDATE deploy_items SET
-       status = 'failed', last_error = 'TIMEOUT_STUCK: Lock expired without callback',
+       status = 'failed', last_error = 'STUCK_TIMEOUT: Lock expired without callback',
        error_category = 'retryable', lock_owner = NULL, lock_until = NULL,
        finished_at = NOW(), updated_at = NOW()
      WHERE status = 'running' AND lock_until IS NOT NULL AND lock_until < NOW()`,
@@ -597,7 +812,7 @@ export async function watchdogSweep(): Promise<number> {
     // Update batch counters for affected batches
     const { rows: batches } = await query<{ batch_id: string }>(
       `SELECT DISTINCT batch_id FROM deploy_items
-       WHERE status = 'failed' AND last_error LIKE 'TIMEOUT_STUCK%'
+       WHERE status = 'failed' AND last_error LIKE 'STUCK_TIMEOUT%'
          AND updated_at > NOW() - INTERVAL '1 minute'`,
     );
     for (const b of batches) {
