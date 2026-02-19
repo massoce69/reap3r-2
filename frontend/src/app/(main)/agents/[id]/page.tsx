@@ -360,6 +360,24 @@ export default function AgentDetailPage() {
     }
   }, [tab]);
 
+  // Auto-restart stream when settings change mid-stream
+  const rdSettingsRef = useRef({ quality: rdQuality, scale: rdScale, fps: rdFps, monitor: rdSelectedMonitor });
+  useEffect(() => {
+    const prev = rdSettingsRef.current;
+    const changed = prev.quality !== rdQuality || prev.scale !== rdScale || prev.fps !== rdFps || prev.monitor !== rdSelectedMonitor;
+    rdSettingsRef.current = { quality: rdQuality, scale: rdScale, fps: rdFps, monitor: rdSelectedMonitor };
+    if (changed && rdStreaming && !rdLoading && agent) {
+      console.log('[RD] Settings changed mid-stream, restarting with new params');
+      // Stop then restart with new settings
+      (async () => {
+        await stopRdStream();
+        // Small delay to let the stop propagate
+        await new Promise(r => setTimeout(r, 500));
+        startRdStream();
+      })();
+    }
+  }, [rdQuality, rdScale, rdFps, rdSelectedMonitor]);
+
   // Also keep the single screenshot capture as fallback
   const captureScreenshot = async () => {
     if (!agent || rdLoading) return;
@@ -911,8 +929,8 @@ export default function AgentDetailPage() {
                 {/* Quality */}
                 <label className="text-[10px] text-reap3r-muted flex items-center gap-1">
                   Quality
-                  <select value={rdQuality} onChange={e => setRdQuality(Number(e.target.value))} disabled={rdStreaming}
-                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text disabled:opacity-50">
+                  <select value={rdQuality} onChange={e => setRdQuality(Number(e.target.value))}
+                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text">
                     <option value={30}>Low</option>
                     <option value={50}>Medium</option>
                     <option value={70}>High</option>
@@ -922,8 +940,8 @@ export default function AgentDetailPage() {
                 {/* Scale */}
                 <label className="text-[10px] text-reap3r-muted flex items-center gap-1">
                   Scale
-                  <select value={rdScale} onChange={e => setRdScale(Number(e.target.value))} disabled={rdStreaming}
-                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text disabled:opacity-50">
+                  <select value={rdScale} onChange={e => setRdScale(Number(e.target.value))}
+                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text">
                     <option value={30}>30%</option>
                     <option value={40}>40%</option>
                     <option value={50}>50%</option>
@@ -934,8 +952,8 @@ export default function AgentDetailPage() {
                 {/* FPS */}
                 <label className="text-[10px] text-reap3r-muted flex items-center gap-1">
                   FPS
-                  <select value={rdFps} onChange={e => setRdFps(Number(e.target.value))} disabled={rdStreaming}
-                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text disabled:opacity-50">
+                  <select value={rdFps} onChange={e => setRdFps(Number(e.target.value))}
+                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text">
                     <option value={1}>1</option>
                     <option value={2}>2</option>
                     <option value={3}>3</option>
@@ -949,8 +967,7 @@ export default function AgentDetailPage() {
                   <select
                     value={rdSelectedMonitor}
                     onChange={e => setRdSelectedMonitor(Number(e.target.value))}
-                    disabled={rdStreaming}
-                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text disabled:opacity-50"
+                    className="px-1 py-0.5 bg-reap3r-surface border border-reap3r-border rounded text-xs text-reap3r-text"
                   >
                     <option value={-1}>All screens</option>
                     {rdMonitors.map(m => (
@@ -962,7 +979,7 @@ export default function AgentDetailPage() {
                   {rdMonitorsLoading && <Loader2 className="w-3 h-3 animate-spin text-reap3r-accent" />}
                   <button
                     onClick={fetchMonitors}
-                    disabled={rdMonitorsLoading || rdStreaming}
+                    disabled={rdMonitorsLoading}
                     className="p-0.5 text-reap3r-muted hover:text-reap3r-accent transition-colors disabled:opacity-50"
                     title="Refresh monitor list"
                   >

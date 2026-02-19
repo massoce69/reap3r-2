@@ -115,7 +115,7 @@ systemctl --no-pager --full status reap3r-agent.service || true
       `)`,
       ``,
       `$ErrorActionPreference = "Stop"`,
-      `[System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13`,
+      `try { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 -bor [System.Net.SecurityProtocolType]::Tls13 } catch { [System.Net.ServicePointManager]::SecurityProtocol = [System.Net.SecurityProtocolType]::Tls12 }`,
       ``,
       `function Write-Step([string]$msg) { Write-Host "" ; Write-Host "[reap3r] $msg" -ForegroundColor Cyan }`,
       `function Write-OK([string]$msg)   { Write-Host "    OK  $msg" -ForegroundColor Green }`,
