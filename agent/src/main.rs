@@ -2791,6 +2791,11 @@ async fn main() {
     // it returns an error immediately and we fall through to normal CLI mode.
     #[cfg(windows)]
     {
+        // Install rustls CryptoProvider early (ring) — must happen before any TLS ops.
+        // When both 'ring' and 'aws-lc-rs' features are active (pulled by tokio-tungstenite),
+        // rustls cannot auto-detect which provider to use and panics.
+        let _ = rustls::crypto::ring::default_provider().install_default();
+
         // Init file logger early before any other code.
         let log_path = std::env::var("REAP3R_LOG_FILE")
             .map(PathBuf::from)
@@ -2807,6 +2812,12 @@ async fn main() {
             }
         }
     }
+
+    // ── 0. Install rustls CryptoProvider (ring) ───────────
+    // Must happen before any TLS operation. When both 'ring' and 'aws-lc-rs'
+    // features are active, rustls cannot auto-detect and panics.
+    #[cfg(not(windows))]
+    { let _ = rustls::crypto::ring::default_provider().install_default(); }
 
     // ── 1. Init tracing (stdout) ──────────────────────────
     tracing_subscriber::fmt()
