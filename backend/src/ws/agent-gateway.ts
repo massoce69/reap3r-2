@@ -435,6 +435,14 @@ export function setupAgentGateway(fastify: FastifyInstance) {
                 data: so.data,
                 sequence: so.sequence,
               });
+            } else if (so.stream_type === 'error') {
+              // RD capture error → relay to UI as rd:error
+              fastify.log.warn({ agent: msg.agentId, error: so.data }, 'RD capture error');
+              fastify.broadcastToUI('rd:error', {
+                agent_id: msg.agentId,
+                session_id: so.session_id,
+                error: so.data,
+              });
             } else {
               // stdout/stderr stream → broadcast as generic stream event
               fastify.broadcastToUI('stream:output', {

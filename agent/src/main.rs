@@ -1082,17 +1082,29 @@ async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value
 /// Placeholders __SCALE__, __QUALITY__, __FPS__, __DIR__, __MONITOR__ are replaced at runtime.
 /// __MONITOR__ = -1 means capture ALL screens combined, 0..N captures a specific screen.
 const RD_CAPTURE_LOOP_PS: &str = r#"
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
 $dir = '__DIR__'
 $stop = "$dir\rd_stop.flag"
+$errLog = "$dir\rd_capture_error.log"
 Remove-Item $stop -ErrorAction SilentlyContinue
+Remove-Item $errLog -ErrorAction SilentlyContinue
 $scale = [double]__SCALE__
 $quality = [int]__QUALITY__
 $fps = [int]__FPS__
 $monIdx = [int]__MONITOR__
 $interval = [int](1000 / $fps)
 $seq = 0
+$errCount = 0
+# Log session info for diagnostics
+$sid = [System.Diagnostics.Process]::GetCurrentProcess().SessionId
+"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Capture started in session $sid (PID $PID)" | Out-File $errLog -Append
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type -AssemblyName System.Drawing -ErrorAction Stop
+    "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Assemblies loaded OK" | Out-File $errLog -Append
+} catch {
+    "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] FATAL: Failed to load assemblies: $_" | Out-File $errLog -Append
+    exit 1
+}
 while (-not (Test-Path $stop)) {
     try {
         if ($monIdx -ge 0) {
@@ -1116,6 +1128,10 @@ while (-not (Test-Path $stop)) {
         }
         $w = [int]($bounds.Width * $scale)
         $h = [int]($bounds.Height * $scale)
+        if ($w -le 0 -or $h -le 0) {
+            if ($errCount -eq 0) { "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Invalid bounds: w=$w h=$h bounds=$bounds" | Out-File $errLog -Append }
+            $errCount++; Start-Sleep -Milliseconds 500; continue
+        }
         $bmp = New-Object System.Drawing.Bitmap($bounds.Width, $bounds.Height)
         $g = [System.Drawing.Graphics]::FromImage($bmp)
         $g.CopyFromScreen($bounds.Location, [System.Drawing.Point]::Empty, $bounds.Size)
@@ -1134,8 +1150,20 @@ while (-not (Test-Path $stop)) {
         [System.IO.File]::WriteAllText($tmp, "$seq|$b64")
         Move-Item $tmp $out -Force
         $g.Dispose(); $g2.Dispose(); $bmp.Dispose(); $resized.Dispose(); $ms.Dispose()
+        if ($seq -eq 0) { "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] First frame captured OK (${w}x${h})" | Out-File $errLog -Append }
         $seq++
-    } catch { Start-Sleep -Milliseconds 200 }
+        $errCount = 0
+    } catch {
+        $errCount++
+        if ($errCount -le 3) {
+            "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] CopyFromScreen error #$errCount : $_" | Out-File $errLog -Append
+        }
+        if ($errCount -gt 50) {
+            "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Too many errors ($errCount), giving up" | Out-File $errLog -Append
+            break
+        }
+        Start-Sleep -Milliseconds 500
+    }
     Start-Sleep -Milliseconds $interval
 }
 Remove-Item "$dir\rd_frame.dat" -ErrorAction SilentlyContinue
@@ -1286,6 +1314,17 @@ mod user_session {
         dwThreadId: DWORD,
     }
 
+    #[repr(C)]
+    #[allow(non_snake_case)]
+    struct WTS_SESSION_INFOW {
+        SessionId: DWORD,
+        pWinStationName: *const u16,
+        State: DWORD,
+    }
+
+    const WTS_CURRENT_SERVER_HANDLE: HANDLE = 0 as HANDLE;
+    const WTS_ACTIVE: DWORD = 0; // WTSActive
+
     #[link(name = "kernel32")]
     extern "system" {
         fn WTSGetActiveConsoleSessionId() -> DWORD;
@@ -1295,6 +1334,14 @@ mod user_session {
     #[link(name = "wtsapi32")]
     extern "system" {
         fn WTSQueryUserToken(SessionId: DWORD, phToken: *mut HANDLE) -> BOOL;
+        fn WTSEnumerateSessionsW(
+            hServer: HANDLE,
+            Reserved: DWORD,
+            Version: DWORD,
+            ppSessionInfo: *mut *mut WTS_SESSION_INFOW,
+            pCount: *mut DWORD,
+        ) -> BOOL;
+        fn WTSFreeMemory(pMemory: *mut std::ffi::c_void);
     }
 
     #[link(name = "advapi32")]
@@ -1327,15 +1374,65 @@ mod user_session {
         std::ffi::OsStr::new(s).encode_wide().chain(Some(0)).collect()
     }
 
-    /// Launch a command in the active console user's session.
+    /// Find the best interactive user session.
+    /// Tries the physical console first, then enumerates all sessions
+    /// to find an active one (covers RDP sessions too).
+    fn find_user_session() -> Result<DWORD, String> {
+        unsafe {
+            // 1. Try the physical console session first
+            let console_sid = WTSGetActiveConsoleSessionId();
+            if console_sid != 0xFFFF_FFFF && console_sid != 0 {
+                // Verify there's a user logged in on this session
+                let mut token: HANDLE = ptr::null_mut();
+                if WTSQueryUserToken(console_sid, &mut token) != 0 {
+                    CloseHandle(token);
+                    return Ok(console_sid);
+                }
+            }
+
+            // 2. Enumerate all sessions and find an active one
+            let mut session_info: *mut WTS_SESSION_INFOW = ptr::null_mut();
+            let mut count: DWORD = 0;
+            if WTSEnumerateSessionsW(
+                WTS_CURRENT_SERVER_HANDLE,
+                0,
+                1,
+                &mut session_info,
+                &mut count,
+            ) == 0 {
+                return Err(format!(
+                    "WTSEnumerateSessionsW failed (error {})",
+                    std::io::Error::last_os_error()
+                ));
+            }
+
+            let mut best_session: Option<DWORD> = None;
+            for i in 0..count {
+                let info = &*session_info.offset(i as isize);
+                // State == WTSActive (0) and session > 0 (not Session 0 which is services)
+                if info.State == WTS_ACTIVE && info.SessionId > 0 {
+                    // Verify we can get a user token for this session
+                    let mut token: HANDLE = ptr::null_mut();
+                    if WTSQueryUserToken(info.SessionId, &mut token) != 0 {
+                        CloseHandle(token);
+                        best_session = Some(info.SessionId);
+                        break;
+                    }
+                }
+            }
+            WTSFreeMemory(session_info as *mut std::ffi::c_void);
+
+            best_session.ok_or_else(|| "No active user session found (no user logged in?)".into())
+        }
+    }
+
+    /// Launch a command in an interactive user session.
+    /// Tries console session first, then any active session (RDP included).
     /// Requires SYSTEM privileges (service account).
     /// Returns the child PID on success.
     pub fn launch_in_user_session(command: &str) -> Result<u32, String> {
         unsafe {
-            let session_id = WTSGetActiveConsoleSessionId();
-            if session_id == 0xFFFF_FFFF {
-                return Err("No active console session found".into());
-            }
+            let session_id = find_user_session()?;
 
             let mut user_token: HANDLE = ptr::null_mut();
             if WTSQueryUserToken(session_id, &mut user_token) == 0 {
@@ -1541,6 +1638,8 @@ async fn start_remote_desktop(
     // Clean up old files
     let _ = std::fs::remove_file(rd_stop_flag_path());
     let _ = std::fs::remove_file(rd_frame_data_path());
+    let capture_err_log = config_dir().join("rd_capture_error.log");
+    let _ = std::fs::remove_file(&capture_err_log);
 
     // Start new session
     RD_ACTIVE.store(true, Ordering::SeqCst);
@@ -1576,9 +1675,15 @@ async fn start_remote_desktop(
             Err(e) => {
                 fwarn!("RD: Cannot launch in user session: {}. Falling back to local session.", e);
                 // Fallback: run locally (works when agent is NOT a service)
-                let _ = tokio::process::Command::new("powershell")
+                match tokio::process::Command::new("powershell")
                     .args(["-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-NoProfile", "-File", &script_path.display().to_string()])
-                    .spawn();
+                    .spawn() {
+                    Ok(_) => finfo!("RD: Capture process launched locally"),
+                    Err(e2) => {
+                        ferror!("RD: Failed to launch capture process: {}", e2);
+                        return Err(format!("Cannot launch RD capture: session={}, local={}", e, e2));
+                    }
+                }
             }
         }
     }
@@ -1595,14 +1700,41 @@ async fn start_remote_desktop(
 
     // Spawn background frame-reader loop
     let frame_path = rd_frame_data_path();
+    let err_log_path = config_dir().join("rd_capture_error.log");
     let check_interval = Duration::from_millis((1000 / fps).max(100) / 2); // poll at 2× fps
 
     tokio::spawn(async move {
         let mut sequence: u64 = 0;
         let mut last_seq: i64 = -1;
         let mut empty_count: u64 = 0;
+        let mut error_reported = false;
 
         while RD_ACTIVE.load(Ordering::SeqCst) {
+            // Check for capture error log (PS script logs errors there)
+            if !error_reported && empty_count > 10 {
+                if let Ok(err_log) = tokio::fs::read_to_string(&err_log_path).await {
+                    if err_log.contains("FATAL") || err_log.contains("CopyFromScreen error") || err_log.contains("Too many errors") {
+                        ferror!("RD: Capture script reported errors:\n{}", err_log.trim());
+                        // Send error message to UI
+                        let err_msg = build_message(
+                            &agent_id,
+                            "stream_output",
+                            serde_json::json!({
+                                "session_id": session_id,
+                                "stream_type": "error",
+                                "data": format!("Capture failed: {}", err_log.lines().last().unwrap_or("unknown error")),
+                                "sequence": 0,
+                            }),
+                            &secret,
+                        );
+                        let _ = tx.send(err_msg).await;
+                        error_reported = true;
+                        // Stop after reporting error
+                        break;
+                    }
+                }
+            }
+
             // Read frame data file
             match tokio::fs::read_to_string(&frame_path).await {
                 Ok(data) if data.contains('|') => {

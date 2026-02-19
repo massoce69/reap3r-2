@@ -350,7 +350,16 @@ export default function AgentDetailPage() {
         setRdFrameCount(prev => prev + 1);
       }
     });
-    return () => { console.log('[RD] Unsubscribing from rd:frame'); unsub(); };
+    // Also listen for RD capture errors
+    const unsubErr = realtime.on('rd:error', (msg: any) => {
+      const p = msg.payload ?? msg;
+      if (p.agent_id === agent.id) {
+        console.error('[RD] Capture error from agent:', p.error);
+        setRdError(p.error || 'Remote desktop capture failed on agent');
+        setRdStreaming(false);
+      }
+    });
+    return () => { console.log('[RD] Unsubscribing from rd:frame'); unsub(); unsubErr(); };
   }, [rdStreaming, agent?.id]);
 
   // Stop stream when leaving tab
