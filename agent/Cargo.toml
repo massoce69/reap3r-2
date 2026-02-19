@@ -1,6 +1,6 @@
 [package]
 name = "reap3r-agent"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 description = "MASSVISION Reap3r Agent — Remote management agent"
 license = "Proprietary"
