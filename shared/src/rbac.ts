@@ -107,6 +107,9 @@ export enum Permission {
 
   // Deployment
   DeploymentView = 'deployment:view',
+  DeploymentCreate = 'deployment:create',
+  DeploymentExecute = 'deployment:execute',
+  DeploymentCancel = 'deployment:cancel',
 
   // Alerting
   AlertRuleList = 'alert:rule_list',
@@ -152,7 +155,7 @@ export const RolePermissions: Record<Role, Permission[]> = {
     Permission.MessageRead, Permission.MessageWrite,
     Permission.EdrEventsView, Permission.EdrDetectionsView,
     Permission.ArtifactUpload, Permission.ArtifactDownload,
-    Permission.DeploymentView,
+    Permission.DeploymentView, Permission.DeploymentCreate, Permission.DeploymentExecute, Permission.DeploymentCancel,
     Permission.AlertRuleList, Permission.AlertEventList, Permission.AlertEventAck,
   ],
 

@@ -4,6 +4,7 @@
 import { config } from './config.js';
 import { buildApp } from './app.js';
 import { startAlertEngine, stopAlertEngine } from './workers/alert-engine.js';
+import { startDeployWorker, stopDeployWorker } from './workers/deploy-worker.js';
 
 async function main() {
   const fastify = await buildApp();
@@ -13,9 +14,11 @@ async function main() {
     fastify.log.info(`MASSVISION Reap3r API running on port ${config.port}`);
 
     startAlertEngine();
+    startDeployWorker();
 
     const shutdown = async () => {
       stopAlertEngine();
+      stopDeployWorker();
       await fastify.close();
       process.exit(0);
     };
