@@ -100,6 +100,7 @@ function ZabbixDeployTab() {
 
   // Import form state
   const [csvContent, setCsvContent] = useState('');
+  const [fileBase64, setFileBase64] = useState('');
   const [filename, setFilename] = useState('');
   const [mode, setMode] = useState<'dry_run' | 'live'>('dry_run');
   const [zabbixUrl, setZabbixUrl] = useState('');
@@ -109,6 +110,17 @@ function ZabbixDeployTab() {
   const [serverUrl, setServerUrl] = useState('');
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
+
+  const toBase64 = (buffer: ArrayBuffer) => {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    const chunkSize = 0x8000;
+    for (let i = 0; i < bytes.length; i += chunkSize) {
+      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
+      binary += String.fromCharCode(...chunk);
+    }
+    return btoa(binary);
+  };
 
   const loadBatches = useCallback(async () => {
     try {
@@ -150,13 +162,27 @@ function ZabbixDeployTab() {
     const file = e.target.files?.[0];
     if (!file) return;
     setFilename(file.name);
+    const lower = file.name.toLowerCase();
+    if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
+      const reader = new FileReader();
+      reader.onload = (ev) => {
+        const result = ev.target?.result as ArrayBuffer;
+        setFileBase64(toBase64(result));
+        setCsvContent('');
+      };
+      reader.readAsArrayBuffer(file);
+      return;
+    }
     const reader = new FileReader();
-    reader.onload = (ev) => { setCsvContent(ev.target?.result as string); };
+    reader.onload = (ev) => {
+      setCsvContent(ev.target?.result as string);
+      setFileBase64('');
+    };
     reader.readAsText(file);
   };
 
   const handleImport = async () => {
-    if (!csvContent || !zabbixUrl || !zabbixUser || !zabbixPassword || !serverUrl) {
+    if ((!csvContent && !fileBase64) || !zabbixUrl || !zabbixUser || !zabbixPassword || !serverUrl) {
       setImportError('All fields are required');
       return;
     }
@@ -164,7 +190,8 @@ function ZabbixDeployTab() {
     setImportError('');
     try {
       const result = await api.deploy.import({
-        csv_content: csvContent,
+        csv_content: csvContent || undefined,
+        file_base64: fileBase64 || undefined,
         filename,
         mode,
         zabbix_url: zabbixUrl,
@@ -174,7 +201,9 @@ function ZabbixDeployTab() {
         server_url: serverUrl,
       });
       setShowImport(false);
-      setCsvContent(''); setFilename('');
+      setCsvContent('');
+      setFileBase64('');
+      setFilename('');
       loadBatches();
       // Auto-select the new batch
       if (result.batch_id) {
@@ -260,11 +289,11 @@ function ZabbixDeployTab() {
           </div>
           <div>
             <h3 className="text-[12px] font-bold text-white uppercase tracking-[0.08em]">Zabbix DAT Deployment</h3>
-            <p className="text-[10px] text-reap3r-muted">Import CSV → Validate → Execute via Zabbix</p>
+            <p className="text-[10px] text-reap3r-muted">Import CSV/XLSX → Validate → Execute via Zabbix</p>
           </div>
         </div>
         <Button size="sm" onClick={() => setShowImport(true)}>
-          <Upload style={{ width: '12px', height: '12px', marginRight: '4px' }} />Import CSV
+          <Upload style={{ width: '12px', height: '12px', marginRight: '4px' }} />Import CSV/XLSX
         </Button>
       </div>
 
@@ -414,16 +443,16 @@ function ZabbixDeployTab() {
       )}
 
       {/* Import Modal */}
-      <Modal open={showImport} onClose={() => setShowImport(false)} title="Import CSV for Zabbix Deploy" maxWidth="max-w-2xl">
+      <Modal open={showImport} onClose={() => setShowImport(false)} title="Import CSV/XLSX for Zabbix Deploy" maxWidth="max-w-2xl">
         <div className="space-y-4">
           {/* File upload */}
           <div>
-            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">CSV File</label>
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">CSV/XLSX File</label>
             <div className="flex items-center gap-2">
               <label className="flex-1 flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-reap3r-border rounded-xl cursor-pointer hover:border-white/20 transition-colors">
                 <Upload style={{ width: '14px', height: '14px' }} className="text-reap3r-muted" />
-                <span className="text-[11px] text-reap3r-muted">{filename || 'Choose CSV file (host, dat columns)'}</span>
-                <input type="file" accept=".csv,.txt,.tsv" onChange={handleFileUpload} className="hidden" />
+                <span className="text-[11px] text-reap3r-muted">{filename || 'Choose CSV/XLSX file (zabbix_host, dat)'}</span>
+                <input type="file" accept=".csv,.txt,.tsv,.xlsx,.xls" onChange={handleFileUpload} className="hidden" />
               </label>
             </div>
           </div>
@@ -483,7 +512,7 @@ function ZabbixDeployTab() {
 
           <div className="flex gap-2 justify-end">
             <Button variant="secondary" onClick={() => setShowImport(false)}>Cancel</Button>
-            <Button onClick={handleImport} loading={importing} disabled={!csvContent || !zabbixUrl || !zabbixUser || !zabbixPassword || !serverUrl}>
+            <Button onClick={handleImport} loading={importing} disabled={(!csvContent && !fileBase64) || !zabbixUrl || !zabbixUser || !zabbixPassword || !serverUrl}>
               <Upload style={{ width: '12px', height: '12px', marginRight: '4px' }} />Import & Create Batch
             </Button>
           </div>

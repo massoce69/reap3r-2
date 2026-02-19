@@ -482,19 +482,24 @@ export const api = {
   // ── Zabbix Deploy ──
   deploy: {
     import: (data: {
-      csv_content: string; filename: string; mode: string;
-      zabbix_url: string; zabbix_user: string; zabbix_password: string;
+      csv_content?: string;
+      file_base64?: string;
+      filename: string;
+      mode: string;
+      zabbix_url: string;
+      zabbix_user: string;
+      zabbix_password?: string;
       zabbix_script?: string; server_url: string;
     }) =>
       request<any>('/api/deploy/zabbix/import', { method: 'POST', body: JSON.stringify(data) }),
     validate: (batchId: string, zabbix_password: string) =>
-      request<any>(`/api/deploy/zabbix/validate/${batchId}`, { method: 'POST', body: JSON.stringify({ zabbix_password }) }),
+      request<any>(`/api/deploy/zabbix/batches/${batchId}/validate`, { method: 'POST', body: JSON.stringify({ zabbix_password }) }),
     start: (batchId: string) =>
-      request<any>(`/api/deploy/zabbix/start/${batchId}`, { method: 'POST' }),
+      request<any>(`/api/deploy/zabbix/batches/${batchId}/start`, { method: 'POST' }),
     retry: (batchId: string) =>
-      request<any>(`/api/deploy/zabbix/retry/${batchId}`, { method: 'POST' }),
+      request<any>(`/api/deploy/zabbix/batches/${batchId}/retry`, { method: 'POST' }),
     cancel: (batchId: string) =>
-      request<any>(`/api/deploy/zabbix/cancel/${batchId}`, { method: 'POST' }),
+      request<any>(`/api/deploy/zabbix/batches/${batchId}/cancel`, { method: 'POST' }),
     batches: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<{ data: any[]; total: number }>(`/api/deploy/zabbix/batches${qs}`);

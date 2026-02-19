@@ -2954,9 +2954,9 @@ async fn execute_system_command(action: &str, delay_secs: u64) -> Result<serde_j
 // Placed here so finfo!/fwarn!/ferror! macros and all agent functions are in scope.
 
 #[cfg(windows)]
-const SERVICE_NAME: &str = "Reap3rAgent";
+const SERVICE_NAME: &str = "MASSVISION-Reap3r-Agent";
 #[cfg(windows)]
-const LEGACY_SERVICE_NAMES: [&str; 2] = ["MASSVISION-Reap3r-Agent", "ReaP3rAgent"];
+const LEGACY_SERVICE_NAMES: [&str; 2] = ["Reap3rAgent", "ReaP3rAgent"];
 
 #[cfg(windows)]
 fn service_name_candidates() -> Vec<&'static str> {

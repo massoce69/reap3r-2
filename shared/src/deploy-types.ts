@@ -39,8 +39,8 @@ export enum DeployItemStatus {
 // ZOD SCHEMAS
 // ═══════════════════════════════════════════
 
-/** DAT format: 6+ alphanumeric characters (some may include dashes/dots) */
-export const DatSchema = z.string().min(3).max(64).regex(/^[A-Za-z0-9._-]+$/, 'Invalid DAT format');
+/** DAT format: strict 64 hex chars (one-time token) */
+export const DatSchema = z.string().regex(/^[A-Fa-f0-9]{64}$/, 'DAT must be 64 hexadecimal characters');
 
 /** Single row in an imported CSV/XLSX file */
 export const DeployImportRowSchema = z.object({
@@ -68,12 +68,15 @@ export const DeployImportResultSchema = z.object({
 /** Callback body from the PowerShell script */
 export const DeployCallbackSchema = z.object({
   batch_id: z.string().uuid(),
-  zabbix_host: z.string().min(1),
+  zabbix_host: z.string().min(1).optional(),
+  computername: z.string().min(1).optional(),
   exit_code: z.number().int(),
   status: z.string().min(1).max(64),
   message: z.string().max(2000).optional(),
+  log_tail: z.string().max(20000).optional(),
+  os_version: z.string().max(512).optional(),
   agent_id: z.string().uuid().optional(),
-  hostname: z.string().optional(),
+  hostname: z.string().max(255).optional(),
   version: z.string().optional(),
 });
 
@@ -82,7 +85,7 @@ export const CreateDeployBatchSchema = z.object({
   mode: z.nativeEnum(DeployBatchMode),
   zabbix_url: z.string().url(),
   zabbix_user: z.string().min(1),
-  zabbix_password: z.string().min(1),
+  zabbix_password: z.string().min(1).optional(),
   zabbix_script: z.string().min(1).default('Reap3r Enrollment'),
   server_url: z.string().url(),
 });

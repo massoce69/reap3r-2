@@ -6,7 +6,6 @@
 import { query } from '../db/pool.js';
 import { ZabbixClient } from '../services/zabbix-client.js';
 import * as deploySvc from '../services/deploy.service.js';
-import { config } from '../config.js';
 
 let workerTimer: ReturnType<typeof setInterval> | null = null;
 let watchdogTimer: ReturnType<typeof setInterval> | null = null;
@@ -23,10 +22,13 @@ async function processTick(): Promise<void> {
     // Check if there are any running batches
     const { rows: batches } = await query<{
       batch_id: string; zabbix_url: string; zabbix_user: string;
-      server_url: string; zabbix_script: string;
+      server_url: string; zabbix_script: string; zabbix_password: string | null;
     }>(
-      `SELECT batch_id, zabbix_url, zabbix_user, server_url, zabbix_script
-       FROM deploy_batches WHERE status = 'running' LIMIT 5`,
+      `SELECT b.batch_id, b.zabbix_url, b.zabbix_user, b.server_url, b.zabbix_script, s.zabbix_password
+       FROM deploy_batches b
+       LEFT JOIN deploy_batch_secrets s ON s.batch_id = b.batch_id
+       WHERE b.status = 'running'
+       LIMIT 5`,
     );
 
     if (batches.length === 0) {
@@ -62,7 +64,7 @@ async function processTick(): Promise<void> {
           url: batchInfo.zabbix_url,
           user: batchInfo.zabbix_user,
           // Note: password is not stored in DB for security — use env var
-          password: process.env.ZABBIX_PASSWORD ?? '',
+          password: batchInfo.zabbix_password || process.env.ZABBIX_PASSWORD || '',
         });
         try {
           await zbx.login();

@@ -10,14 +10,14 @@ interface ZabbixConfig {
   timeout?: number;   // ms, default 15000
 }
 
-interface ZabbixHost {
+export interface ZabbixHost {
   hostid: string;
   host: string;
   name: string;
   status: string;
 }
 
-interface ZabbixScript {
+export interface ZabbixScript {
   scriptid: string;
   name: string;
   type: string;
@@ -27,6 +27,12 @@ interface ZabbixScriptExecResult {
   response: string;   // 'success' | 'failed'
   value?: string;
   debug?: string[];
+}
+
+export interface ZabbixExactResolveResult<T> {
+  state: 'ok' | 'not_found' | 'ambiguous';
+  entity?: T;
+  matches?: T[];
 }
 
 // ── Circuit Breaker ──
@@ -252,6 +258,74 @@ export class ZabbixClient {
     return map;
   }
 
+  /**
+   * Resolve hostnames with exact match semantics and ambiguity detection.
+   * - 1 exact match on host -> ok
+   * - 0 on host, then exact name lookup:
+   *   - 1 exact name match -> ok
+   *   - >1 -> ambiguous
+   *   - 0 -> not_found
+   */
+  async hostResolveBatchExact(hostnames: string[]): Promise<Map<string, ZabbixExactResolveResult<ZabbixHost>>> {
+    await this.ensureAuth();
+    const uniq = Array.from(new Set(hostnames.map((h) => h.trim()).filter(Boolean)));
+    const out = new Map<string, ZabbixExactResolveResult<ZabbixHost>>();
+    if (uniq.length === 0) return out;
+
+    const byHost = await this.rpc<ZabbixHost[]>('host.get', {
+      filter: { host: uniq },
+      output: ['hostid', 'host', 'name', 'status'],
+    });
+
+    const hostIdx = new Map<string, ZabbixHost[]>();
+    for (const h of byHost) {
+      const k = h.host;
+      const list = hostIdx.get(k) ?? [];
+      list.push(h);
+      hostIdx.set(k, list);
+    }
+
+    const unresolved: string[] = [];
+    for (const wanted of uniq) {
+      const matches = hostIdx.get(wanted) ?? [];
+      if (matches.length === 1) {
+        out.set(wanted, { state: 'ok', entity: matches[0], matches });
+      } else if (matches.length > 1) {
+        out.set(wanted, { state: 'ambiguous', matches });
+      } else {
+        unresolved.push(wanted);
+      }
+    }
+
+    if (unresolved.length > 0) {
+      const byName = await this.rpc<ZabbixHost[]>('host.get', {
+        filter: { name: unresolved },
+        output: ['hostid', 'host', 'name', 'status'],
+      });
+
+      const nameIdx = new Map<string, ZabbixHost[]>();
+      for (const h of byName) {
+        const k = h.name;
+        const list = nameIdx.get(k) ?? [];
+        list.push(h);
+        nameIdx.set(k, list);
+      }
+
+      for (const wanted of unresolved) {
+        const matches = nameIdx.get(wanted) ?? [];
+        if (matches.length === 1) {
+          out.set(wanted, { state: 'ok', entity: matches[0], matches });
+        } else if (matches.length > 1) {
+          out.set(wanted, { state: 'ambiguous', matches });
+        } else {
+          out.set(wanted, { state: 'not_found', matches: [] });
+        }
+      }
+    }
+
+    return out;
+  }
+
   // ════════════════════════════════════════
   // SCRIPT
   // ════════════════════════════════════════
@@ -267,6 +341,19 @@ export class ZabbixClient {
       limit: 1,
     });
     return scripts.length > 0 ? scripts[0] : null;
+  }
+
+  async scriptResolveExact(name: string): Promise<ZabbixExactResolveResult<ZabbixScript>> {
+    await this.ensureAuth();
+    const scripts = await this.rpc<ZabbixScript[]>('script.get', {
+      filter: { name: [name] },
+      output: ['scriptid', 'name', 'type'],
+    });
+
+    const exact = scripts.filter((s) => s.name === name);
+    if (exact.length === 1) return { state: 'ok', entity: exact[0], matches: exact };
+    if (exact.length > 1) return { state: 'ambiguous', matches: exact };
+    return { state: 'not_found', matches: [] };
   }
 
   /**
