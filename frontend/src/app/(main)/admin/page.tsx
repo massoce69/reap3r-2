@@ -26,8 +26,9 @@ export default function AdminPage() {
   const [showCreateUser, setShowCreateUser] = useState(false);
   const [showCreateTeam, setShowCreateTeam] = useState(false);
   const [newUserEmail, setNewUserEmail] = useState('');
+  const [newUserName, setNewUserName] = useState('');
   const [newUserPassword, setNewUserPassword] = useState('');
-  const [newUserRole, setNewUserRole] = useState('user');
+  const [newUserRole, setNewUserRole] = useState('operator');
   const [teamName, setTeamName] = useState('');
   const [teamDesc, setTeamDesc] = useState('');
 
@@ -55,7 +56,8 @@ export default function AdminPage() {
   }, [tab]);
 
   const toggleSuspend = async (u: any) => {
-    try { await api.admin.users.suspend(u.id, !u.is_suspended); toast.success(u.is_suspended ? 'User activated' : 'User suspended'); loadUsers(); }
+    const isCurrentlyActive = u.is_active !== false;
+    try { await api.admin.users.suspend(u.id, !isCurrentlyActive); toast.success(isCurrentlyActive ? 'User suspended' : 'User activated'); loadUsers(); }
     catch (err: any) { toast.error('Failed', err.message); }
   };
 
@@ -67,9 +69,9 @@ export default function AdminPage() {
   };
 
   const createUser = async () => {
-    if (!newUserEmail || !newUserPassword) return;
-    try { await api.admin.users.create({ email: newUserEmail, password: newUserPassword, role: newUserRole }); toast.success('User created');
-      setShowCreateUser(false); setNewUserEmail(''); setNewUserPassword(''); setNewUserRole('user'); loadUsers();
+    if (!newUserEmail || !newUserName || !newUserPassword) return;
+    try { await api.admin.users.create({ email: newUserEmail, name: newUserName, password: newUserPassword, role: newUserRole }); toast.success('User created');
+      setShowCreateUser(false); setNewUserEmail(''); setNewUserName(''); setNewUserPassword(''); setNewUserRole('operator'); loadUsers();
     } catch (err: any) { toast.error('Failed', err.message); }
   };
 
@@ -126,8 +128,8 @@ export default function AdminPage() {
 
   const handleExportUsers = () => {
     exportToCSV(filteredUsers, 'users', [
-      { key: 'email', label: 'Email' }, { key: 'role', label: 'Role' },
-      { key: 'mfa_enabled', label: 'MFA' }, { key: 'is_suspended', label: 'Suspended' },
+      { key: 'email', label: 'Email' }, { key: 'name', label: 'Name' }, { key: 'role', label: 'Role' },
+      { key: 'mfa_enabled', label: 'MFA' }, { key: 'is_active', label: 'Active' },
     ]);
     toast.info('Exported', `${filteredUsers.length} users exported`);
   };
@@ -196,18 +198,19 @@ export default function AdminPage() {
                 <Card key={u.id} className="flex items-center justify-between !py-3 group hover:border-reap3r-border-light transition-all">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-xl bg-white/6 border border-white/10 flex items-center justify-center text-[12px] font-bold text-white">
-                      {u.email?.charAt(0).toUpperCase()}
+                      {(u.name || u.email)?.charAt(0).toUpperCase()}
                     </div>
                     <div>
-                      <p className="text-[12px] font-semibold text-white">{u.email}</p>
+                      <p className="text-[12px] font-semibold text-white">{u.name || u.email}</p>
                       <div className="flex items-center gap-2 mt-0.5">
+                        {u.name && <span className="text-[10px] text-reap3r-muted">{u.email}</span>}
                         <Badge variant="default">{u.role}</Badge>
                         {u.mfa_enabled && <Badge variant="accent">MFA</Badge>}
                       </div>
                     </div>
                   </div>
                   <div className="flex items-center gap-2">
-                    <Badge variant={u.is_suspended ? 'danger' : 'success'}>{u.is_suspended ? 'Suspended' : 'Active'}</Badge>
+                    <Badge variant={u.is_active === false ? 'danger' : 'success'}>{u.is_active === false ? 'Suspended' : 'Active'}</Badge>
                     <div className="flex gap-1 opacity-60 group-hover:opacity-100 transition-opacity">
                       <button onClick={() => openSessions(u)} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all" title="Sessions">
                         <Clock style={{ width: '12px', height: '12px' }} />
@@ -219,10 +222,10 @@ export default function AdminPage() {
                         <Settings style={{ width: '12px', height: '12px' }} />
                       </button>
                       <button onClick={() => toggleSuspend(u)}
-                        className={`p-1.5 rounded-lg transition-all ${u.is_suspended ? 'text-reap3r-success hover:bg-reap3r-success/10' : 'text-reap3r-danger hover:bg-reap3r-danger/10'}`}
-                        title={u.is_suspended ? 'Activate' : 'Suspend'}
+                        className={`p-1.5 rounded-lg transition-all ${u.is_active === false ? 'text-reap3r-success hover:bg-reap3r-success/10' : 'text-reap3r-danger hover:bg-reap3r-danger/10'}`}
+                        title={u.is_active === false ? 'Activate' : 'Suspend'}
                       >
-                        {u.is_suspended ? <UserCheck style={{ width: '12px', height: '12px' }} /> : <UserX style={{ width: '12px', height: '12px' }} />}
+                        {u.is_active === false ? <UserCheck style={{ width: '12px', height: '12px' }} /> : <UserX style={{ width: '12px', height: '12px' }} />}
                       </button>
                     </div>
                   </div>
@@ -300,6 +303,11 @@ export default function AdminPage() {
       <Modal open={showCreateUser} onClose={() => setShowCreateUser(false)} title="Create User">
         <div className="space-y-4">
           <div className="space-y-1.5">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Full Name</label>
+            <input value={newUserName} onChange={e => setNewUserName(e.target.value)} placeholder="John Doe"
+              className="w-full px-3 py-2.5 bg-reap3r-surface border border-reap3r-border rounded-lg text-sm text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20" />
+          </div>
+          <div className="space-y-1.5">
             <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Email</label>
             <input value={newUserEmail} onChange={e => setNewUserEmail(e.target.value)} placeholder="user@company.com"
               className="w-full px-3 py-2.5 bg-reap3r-surface border border-reap3r-border rounded-lg text-sm text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20" />
@@ -313,14 +321,16 @@ export default function AdminPage() {
             <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Role</label>
             <select value={newUserRole} onChange={e => setNewUserRole(e.target.value)}
               className="w-full px-3 py-2.5 bg-reap3r-surface border border-reap3r-border rounded-lg text-sm text-white focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20">
-              <option value="user">User</option>
-              <option value="admin">Admin</option>
               <option value="super_admin">Super Admin</option>
+              <option value="org_admin">Org Admin</option>
+              <option value="operator">Operator</option>
+              <option value="soc_analyst">SOC Analyst</option>
+              <option value="viewer">Viewer</option>
             </select>
           </div>
           <div className="flex gap-2 justify-end">
             <Button variant="secondary" onClick={() => setShowCreateUser(false)}>Cancel</Button>
-            <Button onClick={createUser} disabled={!newUserEmail || !newUserPassword}>Create</Button>
+            <Button onClick={createUser} disabled={!newUserEmail || !newUserName || !newUserPassword}>Create</Button>
           </div>
         </div>
       </Modal>

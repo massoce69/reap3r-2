@@ -192,13 +192,13 @@ export async function getMFASecret(userId: string): Promise<string | null> {
 
 // ── Roles & Permissions ──
 export async function getAllRoles() {
-  // Return hardcoded roles from RBAC (could be from DB later)
+  // Return roles with proper enum keys matching the Role enum in shared/rbac.ts
   return [
-    { name: 'SuperAdmin', description: 'Full system access' },
-    { name: 'OrgAdmin', description: 'Organization administrator' },
-    { name: 'Operator', description: 'Standard operator' },
-    { name: 'SocAnalyst', description: 'Security analyst' },
-    { name: 'Viewer', description: 'View-only access' },
+    { key: 'super_admin', name: 'Super Admin', description: 'Full system access' },
+    { key: 'org_admin', name: 'Org Admin', description: 'Organization administrator' },
+    { key: 'operator', name: 'Operator', description: 'Standard operator' },
+    { key: 'soc_analyst', name: 'SOC Analyst', description: 'Security analyst' },
+    { key: 'viewer', name: 'Viewer', description: 'View-only access' },
   ];
 }
 
