@@ -26,6 +26,7 @@ export enum Permission {
   AgentDelete = 'agent:delete',
   AgentMove = 'agent:move',
   AgentEnroll = 'agent:enroll',
+  AgentUpdate = 'agent:update',
 
   // Jobs
   JobList = 'job:list',
@@ -137,7 +138,7 @@ export const RolePermissions: Record<Role, Permission[]> = {
 
   [Role.Operator]: [
     Permission.DashboardView,
-    Permission.AgentList, Permission.AgentView, Permission.AgentMove,
+    Permission.AgentList, Permission.AgentView, Permission.AgentMove, Permission.AgentUpdate,
     Permission.JobList, Permission.JobView, Permission.JobCreate, Permission.JobCancel,
     Permission.JobRunScript, Permission.JobReboot, Permission.JobShutdown,
     Permission.RemoteShell, Permission.RemoteDesktop, Permission.RemotePower,

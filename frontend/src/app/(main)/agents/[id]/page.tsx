@@ -78,6 +78,11 @@ export default function AgentDetailPage() {
   const [fePath, setFePath] = useState(agent?.os === 'windows' ? 'C:\\' : '/');
   const [feFiles, setFeFiles] = useState<FileEntry[]>([]);
   const [feLoading, setFeLoading] = useState(false);
+
+  // Agent update state
+  const [updateAvailable, setUpdateAvailable] = useState<{ version: string; available: boolean } | null>(null);
+  const [agentUpdating, setAgentUpdating] = useState(false);
+  const [agentUpdateResult, setAgentUpdateResult] = useState<string | null>(null);
   const [feError, setFeError] = useState<string | null>(null);
   const [feHistory, setFeHistory] = useState<string[]>([]);
   const [feUploading, setFeUploading] = useState(false);
@@ -107,6 +112,11 @@ export default function AgentDetailPage() {
 
   useEffect(() => { refresh(); }, [refresh]);
 
+  // Load update manifest
+  useEffect(() => {
+    api.agents.updateManifest().then(setUpdateAvailable).catch(() => {});
+  }, []);
+
   // Load inventory when tab switches
   useEffect(() => {
     if (tab === 'inventory' && id && !inventory) {
@@ -127,6 +137,28 @@ export default function AgentDetailPage() {
     if (Array.isArray(caps)) return caps.includes(cap);
     if (caps?.modules) return caps.modules.includes(cap);
     return false;
+  };
+
+  const isOutdated = updateAvailable && agent && agent.agent_version !== updateAvailable.version;
+
+  const triggerAgentUpdate = async () => {
+    if (!agent || agentUpdating) return;
+    setAgentUpdating(true);
+    setAgentUpdateResult(null);
+    try {
+      const res = await api.agents.updateBulk([agent.id], false);
+      const r = res.results?.[0];
+      if (r?.status === 'queued') {
+        setAgentUpdateResult(`Mise à jour v${res.version} lancée`);
+        setTimeout(refresh, 3000);
+      } else {
+        setAgentUpdateResult(`Erreur: ${r?.error || 'Unknown'}`);
+      }
+    } catch (err: any) {
+      setAgentUpdateResult(`Erreur: ${err.message}`);
+    } finally {
+      setAgentUpdating(false);
+    }
   };
 
   const pollJobResult = async (jobId: string, historyIdx: number) => {
@@ -697,6 +729,15 @@ export default function AgentDetailPage() {
             </div>
             <div className="flex gap-2 items-center">
               <Badge variant={isOnline ? 'success' : 'default'}>{agent.agent_version}</Badge>
+              {isOutdated && updateAvailable?.available && (
+                <Button size="sm" variant="secondary" onClick={triggerAgentUpdate} disabled={agentUpdating || !isOnline}>
+                  {agentUpdating ? <RefreshCw className="w-3 h-3 animate-spin mr-1" /> : <Download className="w-3 h-3 mr-1" />}
+                  ⬆ v{updateAvailable.version}
+                </Button>
+              )}
+              {agentUpdateResult && (
+                <span className={`text-xs ${agentUpdateResult.startsWith('Erreur') ? 'text-red-400' : 'text-green-400'}`}>{agentUpdateResult}</span>
+              )}
             </div>
           </div>
           <div className="grid grid-cols-2 md:grid-cols-5 gap-4 mt-4">

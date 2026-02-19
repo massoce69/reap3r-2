@@ -113,6 +113,10 @@ export const api = {
       ),
     collectInventory: (id: string) =>
       request<any>(`/api/agents/${id}/collect-inventory`, { method: 'POST' }),
+    updateBulk: (agentIds: string[], force = false) =>
+      request<any>('/api/agents/update', { method: 'POST', body: JSON.stringify({ agent_ids: agentIds, force }) }),
+    updateManifest: () =>
+      request<{ version: string; available: boolean }>('/api/agents/update/manifest'),
   },
 
   jobs: {

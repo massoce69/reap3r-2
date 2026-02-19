@@ -180,7 +180,7 @@ export const JobTypePermission: Record<JobType, string> = {
   [JobType.RemoteDesktopPrivacyModeSet]: 'remote:privacy_mode',
   [JobType.RemoteDesktopInputLockSet]: 'remote:input_lock',
   [JobType.WakeOnLan]: 'remote:wake_on_lan',
-  [JobType.UpdateAgent]: 'settings:update',
+  [JobType.UpdateAgent]: 'agent:update',
   [JobType.ListMonitors]: 'remote:desktop',
   [JobType.CollectInventory]: 'agent:view',
   [JobType.CollectMetrics]: 'agent:view',

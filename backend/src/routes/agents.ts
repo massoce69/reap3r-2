@@ -2,9 +2,15 @@
 // MASSVISION Reap3r — Agent Routes
 // ─────────────────────────────────────────────
 import { FastifyInstance } from 'fastify';
-import { Permission } from '@massvision/shared';
+import { Permission, RolePermissions, Role, JobTypePermission, JobType, canonicalJsonStringify } from '@massvision/shared';
 import * as agentService from '../services/agent.service.js';
 import { createAuditLog } from '../services/audit.service.js';
+import * as jobService from '../services/job.service.js';
+import { createHmac, randomUUID } from 'crypto';
+import { config } from '../config.js';
+import crypto from 'crypto';
+import fs from 'fs';
+import path from 'path';
 
 export default async function agentRoutes(fastify: FastifyInstance) {
   // ── List agents ──
@@ -44,6 +50,23 @@ export default async function agentRoutes(fastify: FastifyInstance) {
       isolated: isolatedRes.rows[0].count,
       by_os: Object.fromEntries(osRes.rows.map((r: any) => [r.os_family, r.count])),
     };
+  });
+
+  // ── Get available update manifest (latest version info) — MUST be before /:id ──
+  fastify.get('/api/agents/update/manifest', { preHandler: [fastify.authenticate] }, async (_request, _reply) => {
+    const version = process.env.AGENT_VERSION || '1.0.0';
+    const winBinaryEnv = process.env.AGENT_BINARY_PATH_WINDOWS_X86_64;
+    let binaryPath = winBinaryEnv;
+    if (!binaryPath) {
+      const crossPath = path.resolve(process.cwd(), '../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe');
+      if (fs.existsSync(crossPath)) {
+        binaryPath = crossPath;
+      } else {
+        binaryPath = path.resolve(process.cwd(), '../agent/target/release/reap3r-agent.exe');
+      }
+    }
+    const available = fs.existsSync(binaryPath!);
+    return { version, available };
   });
 
   // ── Get agent ──
@@ -135,5 +158,137 @@ export default async function agentRoutes(fastify: FastifyInstance) {
     });
 
     return reply.status(201).send(job);
+  });
+
+  // ── Bulk update agents ──
+  // Creates update_agent jobs for one or more agents. Resolves the binary manifest automatically.
+  fastify.post('/api/agents/update', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.AgentUpdate)] }, async (request, reply) => {
+    const body = request.body as any;
+    const agentIds: string[] = body.agent_ids;
+    const force: boolean = body.force ?? false;
+
+    if (!Array.isArray(agentIds) || agentIds.length === 0) {
+      return reply.status(400).send({ statusCode: 400, error: 'Bad Request', message: 'agent_ids is required (non-empty array)' });
+    }
+
+    // Permission check for update_agent job type
+    const requiredPerm = JobTypePermission[JobType.UpdateAgent];
+    if (requiredPerm) {
+      const userPerms = RolePermissions[request.currentUser.role as Role] ?? [];
+      if (!userPerms.includes(requiredPerm as any)) {
+        return reply.status(403).send({ statusCode: 403, error: 'Forbidden', message: `Missing permission: ${requiredPerm}` });
+      }
+    }
+
+    // Fetch agents to get their OS/arch
+    const { rows: agents } = await fastify.pg.query(
+      `SELECT id, hostname, os, arch, agent_version, status FROM agents WHERE id = ANY($1) AND org_id = $2`,
+      [agentIds, request.currentUser.org_id],
+    );
+
+    if (agents.length === 0) {
+      return reply.status(404).send({ statusCode: 404, error: 'Not Found', message: 'No matching agents found' });
+    }
+
+    const version = process.env.AGENT_VERSION || '1.0.0';
+    const results: any[] = [];
+
+    for (const agent of agents) {
+      try {
+        // Determine binary OS family
+        const osLower = (agent.os || '').toLowerCase();
+        let osFamily: string = 'windows';
+        if (osLower.includes('linux')) osFamily = 'linux';
+        else if (osLower.includes('darwin') || osLower.includes('mac')) osFamily = 'darwin';
+        const arch = agent.arch || 'x86_64';
+
+        // Resolve binary and compute sha256
+        // Reuse the same logic: look for the binary on disk
+        const binaryKey = `AGENT_BINARY_PATH_${osFamily.toUpperCase()}_${arch.toUpperCase()}`;
+        let binaryPath = process.env[binaryKey];
+        if (!binaryPath) {
+          const ext = osFamily === 'windows' ? '.exe' : '';
+          if (osFamily === 'windows') {
+            const crossPath = path.resolve(process.cwd(), `../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent${ext}`);
+            if (fs.existsSync(crossPath)) {
+              binaryPath = crossPath;
+            } else {
+              binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
+            }
+          } else {
+            binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
+          }
+        }
+
+        if (!fs.existsSync(binaryPath)) {
+          results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'error', error: `Binary not found for ${osFamily}/${arch}` });
+          continue;
+        }
+
+        // Compute SHA256
+        const hash = crypto.createHash('sha256');
+        const fileBytes = await fs.promises.readFile(binaryPath);
+        hash.update(fileBytes);
+        const sha256 = hash.digest('hex');
+
+        // Build download URL using the request's base URL
+        const proto = (request.headers['x-forwarded-proto'] || request.protocol || 'https').toString().split(',')[0].trim();
+        const host = (request.headers['x-forwarded-host'] || request.headers.host || '').toString().split(',')[0].trim();
+        const base = host ? `${proto}://${host}` : (process.env.API_BASE_URL || 'http://localhost:4000');
+        const download_url = `${base}/api/agent-binary/download?os=${encodeURIComponent(osFamily)}&arch=${encodeURIComponent(arch)}`;
+
+        const payload = { version, download_url, sha256, force };
+
+        // Create job
+        const job = await jobService.createJob(fastify, {
+          agent_id: agent.id,
+          job_type: 'update_agent',
+          payload,
+          created_by: request.currentUser.id,
+          org_id: request.currentUser.org_id,
+          reason: `Remote update to v${version}`,
+        });
+
+        // Proactive push if agent online
+        try {
+          const agentWs = fastify.agentSockets?.get(agent.id);
+          if (agentWs && agentWs.readyState === 1) {
+            const jobPayload = {
+              job_id: job.id,
+              name: 'update_agent',
+              args: payload,
+              timeout_sec: 300,
+              created_at: new Date(job.created_at).toISOString(),
+            };
+            const envelope = {
+              type: 'job_assign' as const,
+              ts: Date.now(),
+              nonce: randomUUID(),
+              traceId: randomUUID(),
+              agentId: agent.id,
+              payload: jobPayload,
+            };
+            const sig = createHmac('sha256', config.hmac.secret)
+              .update(canonicalJsonStringify(envelope)).digest('hex');
+            agentWs.send(JSON.stringify({ ...envelope, sig }));
+            await jobService.updateJobStatus(fastify, job.id, 'dispatched');
+          }
+        } catch (pushErr) {
+          fastify.log.warn({ err: pushErr }, 'Proactive push failed for agent update');
+        }
+
+        results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'queued', job_id: job.id });
+
+        await createAuditLog(fastify, {
+          user_id: request.currentUser.id, org_id: request.currentUser.org_id,
+          action: 'agent.update', entity_type: 'agent', entity_id: agent.id,
+          details: { version, force }, ip_address: request.ip,
+        });
+      } catch (err: any) {
+        results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'error', error: err.message });
+      }
+    }
+
+    return { version, total: agents.length, results };
   });
 }

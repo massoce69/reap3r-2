@@ -655,6 +655,9 @@ async fn handle_job(
             "list_monitors" => {
                 list_monitors().await
             }
+            "update_agent" => {
+                execute_self_update(payload).await
+            }
             _ => Err(format!("Unsupported job type: {}", job_type)),
         }
     };
@@ -1613,6 +1616,217 @@ async fn list_monitors() -> Result<serde_json::Value, String> {
         "stderr": "",
         "monitors": monitors_arr,
     }))
+}
+
+// ── Self-Update: download new binary, verify SHA256, replace, restart service ──
+
+async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let download_url = payload["download_url"].as_str()
+        .ok_or_else(|| "Missing download_url".to_string())?;
+    let expected_sha256 = payload["sha256"].as_str()
+        .ok_or_else(|| "Missing sha256".to_string())?;
+    let version = payload["version"].as_str().unwrap_or("unknown");
+
+    finfo!("Self-update requested: version={} url={}", version, download_url);
+
+    // 1. Determine current binary path
+    let current_exe = std::env::current_exe()
+        .map_err(|e| format!("Cannot determine current exe path: {}", e))?;
+    let current_dir = current_exe.parent()
+        .ok_or_else(|| "Cannot determine exe directory".to_string())?;
+
+    let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
+    let new_binary_path = current_dir.join(format!("reap3r-agent-new{}", ext));
+    let backup_path = current_dir.join(format!("reap3r-agent-old{}", ext));
+
+    // 2. Download the new binary
+    finfo!("Downloading new agent binary from {}", download_url);
+    let client = reqwest::Client::builder()
+        .danger_accept_invalid_certs(true) // Allow self-signed certs
+        .timeout(Duration::from_secs(120))
+        .build()
+        .map_err(|e| format!("HTTP client error: {}", e))?;
+
+    let response = client.get(download_url)
+        .send()
+        .await
+        .map_err(|e| format!("Download failed: {}", e))?;
+
+    if !response.status().is_success() {
+        return Err(format!("Download HTTP error: {}", response.status()));
+    }
+
+    let bytes = response.bytes()
+        .await
+        .map_err(|e| format!("Failed to read download body: {}", e))?;
+
+    finfo!("Downloaded {} bytes", bytes.len());
+
+    // 3. Verify SHA256
+    use sha2::{Sha256, Digest};
+    let mut hasher = Sha256::new();
+    hasher.update(&bytes);
+    let actual_sha256 = format!("{:x}", hasher.finalize());
+
+    if actual_sha256 != expected_sha256 {
+        return Err(format!(
+            "SHA256 mismatch: expected={} actual={}",
+            expected_sha256, actual_sha256
+        ));
+    }
+    finfo!("SHA256 verified OK");
+
+    // 4. Write new binary to temp file
+    std::fs::write(&new_binary_path, &bytes)
+        .map_err(|e| format!("Write new binary: {}", e))?;
+
+    // On Linux, make executable
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(&new_binary_path, std::fs::Permissions::from_mode(0o755));
+    }
+
+    // 5. Swap binaries: current → backup, new → current
+    // On Windows, we can't replace a running exe directly, so we use a
+    // PowerShell script that waits for the process to exit, then replaces
+    #[cfg(target_os = "windows")]
+    {
+        // Remove old backup if exists
+        let _ = std::fs::remove_file(&backup_path);
+
+        // Write an updater script that will:
+        // 1. Stop the service
+        // 2. Wait for process to exit
+        // 3. Move current → backup
+        // 4. Move new → current
+        // 5. Start the service
+        let updater_script = format!(
+            r#"
+Start-Sleep -Seconds 2
+$svcName = '{service}'
+$currentExe = '{current}'
+$newExe = '{new_bin}'
+$backupExe = '{backup}'
+$logFile = '{log}'
+
+function Log ($msg) {{ "[$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'))] $msg" | Out-File $logFile -Append }}
+
+Log "Starting agent update to version {version}"
+
+# Stop the service
+try {{
+    Stop-Service -Name $svcName -Force -ErrorAction Stop
+    Log "Service stopped"
+}} catch {{
+    Log "WARNING: Stop-Service failed: $_"
+}}
+
+# Wait for process to exit
+$maxWait = 30
+$waited = 0
+while ($waited -lt $maxWait) {{
+    $proc = Get-Process -Name "reap3r-agent" -ErrorAction SilentlyContinue
+    if (-not $proc) {{ break }}
+    Start-Sleep -Seconds 1
+    $waited++
+}}
+
+if ($waited -ge $maxWait) {{
+    Log "Force killing process"
+    Stop-Process -Name "reap3r-agent" -Force -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 2
+}}
+
+# Swap binaries
+try {{
+    if (Test-Path $backupExe) {{ Remove-Item $backupExe -Force }}
+    Move-Item $currentExe $backupExe -Force
+    Log "Moved current to backup"
+    Move-Item $newExe $currentExe -Force
+    Log "Moved new to current"
+}} catch {{
+    Log "ERROR swapping binaries: $_"
+    # Try to restore from backup
+    if ((Test-Path $backupExe) -and -not (Test-Path $currentExe)) {{
+        Move-Item $backupExe $currentExe -Force
+        Log "Restored from backup"
+    }}
+    Start-Service -Name $svcName -ErrorAction SilentlyContinue
+    exit 1
+}}
+
+# Start the service
+try {{
+    Start-Service -Name $svcName -ErrorAction Stop
+    Log "Service started with new version"
+}} catch {{
+    Log "ERROR starting service: $_"
+    # Rollback
+    if (Test-Path $backupExe) {{
+        Remove-Item $currentExe -Force -ErrorAction SilentlyContinue
+        Move-Item $backupExe $currentExe -Force
+        Start-Service -Name $svcName -ErrorAction SilentlyContinue
+        Log "Rolled back to previous version"
+    }}
+}}
+
+Log "Update complete"
+"#,
+            service = SERVICE_NAME,
+            current = current_exe.display(),
+            new_bin = new_binary_path.display(),
+            backup = backup_path.display(),
+            log = config_dir().join("update.log").display(),
+            version = version,
+        );
+
+        let updater_path = config_dir().join("update_agent.ps1");
+        std::fs::write(&updater_path, &updater_script)
+            .map_err(|e| format!("Write updater script: {}", e))?;
+
+        finfo!("Launching updater script: {}", updater_path.display());
+
+        // Launch the updater script detached (it will stop us, swap, restart)
+        let _ = std::process::Command::new("powershell.exe")
+            .args([
+                "-WindowStyle", "Hidden",
+                "-ExecutionPolicy", "Bypass",
+                "-NoProfile",
+                "-File", &updater_path.display().to_string(),
+            ])
+            .spawn()
+            .map_err(|e| format!("Launch updater: {}", e))?;
+
+        Ok(serde_json::json!({
+            "exit_code": 0,
+            "stdout": format!("Agent update initiated: v{} -> v{}. Service will restart shortly.", env!("CARGO_PKG_VERSION"), version),
+            "stderr": ""
+        }))
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        // Linux/macOS: replace binary directly, then restart service via systemd
+        let _ = std::fs::remove_file(&backup_path);
+        std::fs::rename(&current_exe, &backup_path)
+            .map_err(|e| format!("Backup current binary: {}", e))?;
+        std::fs::rename(&new_binary_path, &current_exe)
+            .map_err(|e| format!("Move new binary: {}", e))?;
+
+        finfo!("Binary replaced, restarting via systemd...");
+
+        // Restart the service (this will kill us, so fire and forget)
+        let _ = std::process::Command::new("systemctl")
+            .args(["restart", "reap3r-agent"])
+            .spawn();
+
+        Ok(serde_json::json!({
+            "exit_code": 0,
+            "stdout": format!("Agent update initiated: v{} -> v{}. Service will restart shortly.", env!("CARGO_PKG_VERSION"), version),
+            "stderr": ""
+        }))
+    }
 }
 
 async fn start_remote_desktop(
