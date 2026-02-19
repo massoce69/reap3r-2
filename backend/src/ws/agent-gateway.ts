@@ -273,7 +273,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
               ws.send(JSON.stringify(nowEnvelopeBase(
                 '00000000-0000-0000-0000-000000000000',
                 MessageType.EnrollResponse,
-                { success: false, error: 'Invalid enroll payload', hmac_key: config.hmac.secret, server_url: config.apiBaseUrl, heartbeat_interval_sec: 10 },
+                { success: false, error: 'Invalid enroll payload' },
               )));
               ws.close();
               return;
@@ -286,7 +286,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
               ws.send(JSON.stringify(nowEnvelopeBase(
                 '00000000-0000-0000-0000-000000000000',
                 MessageType.EnrollResponse,
-                { success: false, error: 'Invalid enrollment token', hmac_key: config.hmac.secret, server_url: config.apiBaseUrl, heartbeat_interval_sec: 10 },
+                { success: false, error: 'Invalid enrollment token' },
               )));
               ws.close();
               return;
@@ -332,6 +332,11 @@ export function setupAgentGateway(fastify: FastifyInstance) {
             agentId = aid;
             agentSockets.set(aid, ws);
             await agentService.updateCapabilities(fastify, aid, msg.payload as any);
+            // Update agent_version from capabilities modules_version
+            const modVer = (msg.payload as any)?.modules_version?.core;
+            if (modVer && typeof modVer === 'string') {
+              await agentService.heartbeat(fastify, aid, { agent_version: modVer });
+            }
             break;
           }
 
@@ -436,10 +441,11 @@ export function setupAgentGateway(fastify: FastifyInstance) {
                    os = COALESCE($3, os),
                    arch = COALESCE($4, arch),
                    inventory = $5,
+                   agent_version = COALESCE($6, agent_version),
                    last_seen_at = now(),
                    status = 'online'
                WHERE id = $1`,
-              [aid, p.hostname, p.os, p.arch, JSON.stringify(p)],
+              [aid, p.hostname, p.os, p.arch, JSON.stringify(p), (p as any).agent_version ?? null],
             );
 
             // Snapshot (immutable)

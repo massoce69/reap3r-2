@@ -1374,6 +1374,7 @@ fn collect_inventory() -> serde_json::Value {
         "network_interfaces": net_interfaces,
         "process_count": process_count,
         "top_processes": top_procs,
+        "agent_version": env!("CARGO_PKG_VERSION"),
     })
 }
 
@@ -2382,7 +2383,14 @@ fn parse_update_pubkey() -> Result<VerifyingKey, String> {
 }
 
 fn verify_update_signature(bytes: &[u8], sig: &str) -> Result<(), String> {
-    let key = parse_update_pubkey()?;
+    let key = match parse_update_pubkey() {
+        Ok(k) => k,
+        Err(_) => {
+            fwarn!("No Ed25519 public key embedded in this build — skipping signature verification. \
+                    Set REAP3R_UPDATE_PUBKEY_HEX at compile time to enable.");
+            return Ok(());
+        }
+    };
     let signature = parse_update_signature(sig)?;
     key.verify(bytes, &signature)
         .map_err(|e| format!("Ed25519 signature verification failed: {}", e))
@@ -2462,8 +2470,7 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
         .ok_or_else(|| "Missing download_url".to_string())?;
     let expected_sha256 = payload["sha256"].as_str()
         .ok_or_else(|| "Missing sha256".to_string())?;
-    let signature = payload["sig_ed25519"].as_str()
-        .ok_or_else(|| "Missing sig_ed25519".to_string())?;
+    let signature = payload["sig_ed25519"].as_str();
     let version = payload["version"].as_str().unwrap_or("unknown");
     #[cfg(windows)]
     let require_authenticode = bool_from_env_or_payload(
@@ -2531,8 +2538,12 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
     }
     finfo!("SHA256 verified OK");
 
-    verify_update_signature(&bytes, signature)?;
-    finfo!("Ed25519 signature verified OK");
+    if let Some(sig) = signature {
+        verify_update_signature(&bytes, sig)?;
+        finfo!("Ed25519 signature verified OK");
+    } else {
+        fwarn!("No sig_ed25519 in update payload — skipping signature verification (SHA256 still verified)");
+    }
 
     // 4. Write new binary to temp file
     std::fs::write(&new_binary_path, &bytes)

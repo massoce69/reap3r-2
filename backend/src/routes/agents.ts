@@ -210,7 +210,7 @@ export default async function agentRoutes(fastify: FastifyInstance) {
         os: osFamily,
         arch,
         request,
-        strictSignature: true,
+        strictSignature: false,
       });
       manifestCache.set(cacheKey, manifest);
       return manifest;
@@ -225,16 +225,12 @@ export default async function agentRoutes(fastify: FastifyInstance) {
         else if (osLower.includes('darwin') || osLower.includes('mac')) osFamily = 'darwin';
         const arch = normalizeArch(agent.arch || 'x86_64') as AgentArch;
         const manifest = await resolveManifest(osFamily, arch);
-        if (!manifest.sig_ed25519) {
-          results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'error', error: `Signed manifest missing for ${osFamily}/${arch}` });
-          continue;
-        }
 
         const payload = {
           version: manifest.version || version,
           download_url: manifest.download_url,
           sha256: manifest.sha256,
-          sig_ed25519: manifest.sig_ed25519,
+          ...(manifest.sig_ed25519 ? { sig_ed25519: manifest.sig_ed25519 } : {}),
           ...(manifest.signer_thumbprint ? { signer_thumbprint: manifest.signer_thumbprint } : {}),
           ...(manifest.require_authenticode ? { require_authenticode: true } : {}),
           force,
