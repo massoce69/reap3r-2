@@ -35,6 +35,8 @@ jobs:
       UPDATE_DOWNLOAD_BASE_URL: ${{ vars.UPDATE_DOWNLOAD_BASE_URL || 'https://updates.example.invalid' }}
       REAP3R_UPDATE_PRIVKEY_HEX: ${{ secrets.REAP3R_UPDATE_PRIVKEY_HEX }}
       REAP3R_UPDATE_PUBKEY_HEX: ${{ secrets.REAP3R_UPDATE_PUBKEY_HEX }}
+      WIN_CODE_SIGN_PFX_BASE64: ${{ secrets.WIN_CODE_SIGN_PFX_BASE64 }}
+      WIN_CODE_SIGN_PFX_PASSWORD: ${{ secrets.WIN_CODE_SIGN_PFX_PASSWORD }}
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -84,22 +86,53 @@ jobs:
           cargo build --release --target i686-pc-windows-msvc
           Pop-Location
 
+      - name: Optional Authenticode signing
+        shell: pwsh
+        run: |
+          if (-not $env:WIN_CODE_SIGN_PFX_BASE64 -or -not $env:WIN_CODE_SIGN_PFX_PASSWORD) {
+            Write-Host "No code-signing certificate provided; skipping Authenticode signing."
+            exit 0
+          }
+          $pfxPath = Join-Path $env:RUNNER_TEMP "reap3r-code-sign.pfx"
+          [System.IO.File]::WriteAllBytes($pfxPath, [System.Convert]::FromBase64String($env:WIN_CODE_SIGN_PFX_BASE64))
+
+          ./tools/sign_windows_binary.ps1 `
+            -FilePath "agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe" `
+            -PfxPath $pfxPath `
+            -PfxPassword $env:WIN_CODE_SIGN_PFX_PASSWORD
+          ./tools/sign_windows_binary.ps1 `
+            -FilePath "agent/target/i686-pc-windows-msvc/release/reap3r-agent.exe" `
+            -PfxPath $pfxPath `
+            -PfxPassword $env:WIN_CODE_SIGN_PFX_PASSWORD
+
+          $thumb = (Get-AuthenticodeSignature "agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe").SignerCertificate.Thumbprint
+          if ($thumb) {
+            "REAP3R_SIGNER_THUMBPRINT=$thumb" >> $env:GITHUB_ENV
+            "REAP3R_REQUIRE_AUTHENTICODE=true" >> $env:GITHUB_ENV
+          }
+
       - name: Sign update manifests
         shell: pwsh
         run: |
           $version = (Select-String -Path "agent/Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"').Matches[0].Groups[1].Value
+          $extra = @()
+          if ($env:REAP3R_SIGNER_THUMBPRINT) {
+            $extra += @("--signer-thumbprint", "$env:REAP3R_SIGNER_THUMBPRINT", "--require-authenticode")
+          }
           python tools/sign_update.py `
             --binary "agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe" `
             --version $version `
             --os windows `
             --arch x86_64 `
-            --download-url "$env:UPDATE_DOWNLOAD_BASE_URL/api/agent-binary/download?os=windows&arch=x86_64"
+            --download-url "$env:UPDATE_DOWNLOAD_BASE_URL/api/agent-binary/download?os=windows&arch=x86_64" `
+            @extra
           python tools/sign_update.py `
             --binary "agent/target/i686-pc-windows-msvc/release/reap3r-agent.exe" `
             --version $version `
             --os windows `
             --arch x86 `
-            --download-url "$env:UPDATE_DOWNLOAD_BASE_URL/api/agent-binary/download?os=windows&arch=x86"
+            --download-url "$env:UPDATE_DOWNLOAD_BASE_URL/api/agent-binary/download?os=windows&arch=x86" `
+            @extra
 
       - name: Build enterprise bundle
         shell: pwsh

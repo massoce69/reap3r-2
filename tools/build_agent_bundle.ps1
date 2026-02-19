@@ -57,12 +57,14 @@ Copy-Item $installScriptSrc (Join-Path $bundleDir "install.ps1") -Force
 $uninstallScriptPath = Join-Path $bundleDir "uninstall.ps1"
 @'
 param(
-    [string]$ServiceName = "ReaP3rAgent",
+    [string]$ServiceName = "Reap3rAgent",
     [string]$InstallDir = "C:\Program Files\Reap3r Agent"
 )
 $ErrorActionPreference = "SilentlyContinue"
 Stop-Service -Name $ServiceName -Force
 sc.exe delete $ServiceName | Out-Null
+sc.exe delete "MASSVISION-Reap3r-Agent" | Out-Null
+sc.exe delete "ReaP3rAgent" | Out-Null
 Remove-Item "$InstallDir\reap3r-agent.exe" -Force
 Write-Host "Reap3r Agent uninstalled."
 '@ | Set-Content -Path $uninstallScriptPath -Encoding UTF8
@@ -70,7 +72,7 @@ Write-Host "Reap3r Agent uninstalled."
 $configPath = Join-Path $bundleDir "config.json"
 $config = @{
     version = $Version
-    service_name = "ReaP3rAgent"
+    service_name = "Reap3rAgent"
     install_dir = "C:\Program Files\Reap3r Agent"
     data_dir = "C:\ProgramData\Reap3r"
     default_server = "wss://your-server.example.com/ws/agent"

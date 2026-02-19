@@ -511,7 +511,11 @@
 - Signed agent update manifests:
   - `tools/gen_update_keys.py` generates Ed25519 keypairs (`REAP3R_UPDATE_PRIVKEY_HEX`, `REAP3R_UPDATE_PUBKEY_HEX`).
   - `tools/sign_update.py` signs agent binaries and writes `<binary>.manifest.json` with `sig_ed25519`.
-  - Backend manifest resolution supports sidecar signed manifests and can enforce signature via `AGENT_UPDATE_REQUIRE_SIGNATURE=true`.
+  - Backend manifest resolution supports sidecar signed manifests, or runtime signing via `REAP3R_UPDATE_PRIVKEY_HEX`, and can enforce signature via `AGENT_UPDATE_REQUIRE_SIGNATURE=true`.
+  - Optional Authenticode policy can be enforced for Windows updates via `AGENT_UPDATE_REQUIRE_AUTHENTICODE=true` and `AGENT_UPDATE_SIGNER_THUMBPRINT`.
+- Windows trust / AV false positive mitigation:
+  - `tools/sign_windows_binary.ps1` Authenticode-signs the Windows agent binaries.
+  - CI can sign binaries when `WIN_CODE_SIGN_PFX_BASE64` and `WIN_CODE_SIGN_PFX_PASSWORD` secrets are present.
 - Enterprise bundle packaging:
   - `tools/build_agent_bundle.ps1` creates `dist/Reap3rAgentBundle/` with `agent-x64.exe`, `agent-x86.exe`, `installer.exe`, `install.ps1`, `uninstall.ps1`, `config.json`, `logs/`.
 - CI pipeline:

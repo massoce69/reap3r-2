@@ -739,7 +739,14 @@ async fn run_diagnostics(args: &Args) {
     #[cfg(windows)]
     {
         println!("[ Windows Service ]");
-        match std::process::Command::new("sc.exe").args(["query", SERVICE_NAME]).output() {
+        let installed_service = detect_installed_service_name();
+        if let Some(ref svc) = installed_service {
+            println!("  Name      : {}", svc);
+        } else {
+            println!("  Name      : (not installed)");
+        }
+        let query_name = installed_service.as_deref().unwrap_or(SERVICE_NAME);
+        match std::process::Command::new("sc.exe").args(["query", query_name]).output() {
             Ok(o) => {
                 let out = String::from_utf8_lossy(&o.stdout);
                 if out.contains("RUNNING") {
@@ -755,7 +762,7 @@ async fn run_diagnostics(args: &Args) {
             Err(_) => println!("  Status    : Cannot query (sc.exe not available)"),
         }
         // Check recovery settings
-        match std::process::Command::new("sc.exe").args(["qfailure", SERVICE_NAME]).output() {
+        match std::process::Command::new("sc.exe").args(["qfailure", query_name]).output() {
             Ok(o) if o.status.success() => {
                 let out = String::from_utf8_lossy(&o.stdout);
                 if out.contains("RESTART") {
@@ -2381,6 +2388,75 @@ fn verify_update_signature(bytes: &[u8], sig: &str) -> Result<(), String> {
         .map_err(|e| format!("Ed25519 signature verification failed: {}", e))
 }
 
+#[cfg(windows)]
+fn bool_from_env_or_payload(payload: &serde_json::Value, payload_key: &str, env_key: &str, default: bool) -> bool {
+    if let Some(v) = payload[payload_key].as_bool() {
+        return v;
+    }
+    match std::env::var(env_key) {
+        Ok(v) => {
+            let raw = v.trim().to_ascii_lowercase();
+            matches!(raw.as_str(), "1" | "true" | "yes" | "on")
+        }
+        Err(_) => default,
+    }
+}
+
+#[cfg(windows)]
+fn payload_or_env_string(payload: &serde_json::Value, payload_key: &str, env_key: &str) -> Option<String> {
+    if let Some(v) = payload[payload_key].as_str() {
+        let s = v.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    match std::env::var(env_key) {
+        Ok(v) => {
+            let s = v.trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        }
+        Err(_) => None,
+    }
+}
+
+#[cfg(windows)]
+fn verify_windows_authenticode(file_path: &Path, expected_thumbprint: Option<&str>) -> Result<(), String> {
+    let escaped_path = file_path.display().to_string().replace('\'', "''");
+    let expected = expected_thumbprint.unwrap_or("").to_ascii_uppercase();
+    let script = format!(
+        "$ErrorActionPreference='Stop'; \
+         $sig=Get-AuthenticodeSignature -FilePath '{path}'; \
+         if ($sig.Status -ne 'Valid') {{ Write-Output ('ERR:STATUS:' + $sig.Status); exit 10 }}; \
+         if (-not $sig.SignerCertificate) {{ Write-Output 'ERR:NOCERT'; exit 11 }}; \
+         $thumb=$sig.SignerCertificate.Thumbprint.ToUpperInvariant(); \
+         if ('{expected}' -ne '' -and $thumb -ne '{expected}') {{ Write-Output ('ERR:THUMB:' + $thumb); exit 12 }}; \
+         Write-Output ('OK:' + $thumb);",
+        path = escaped_path,
+        expected = expected.replace('\'', "''"),
+    );
+
+    let output = std::process::Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", &script])
+        .output()
+        .map_err(|e| format!("Authenticode verification failed to execute: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    if !output.status.success() {
+        return Err(format!(
+            "Authenticode verification failed: {} {}",
+            stdout,
+            stderr
+        ));
+    }
+    if let Some(tp) = stdout.strip_prefix("OK:") {
+        finfo!("Authenticode signature verified. Signer thumbprint={}", tp.trim());
+        Ok(())
+    } else {
+        Err(format!("Unexpected Authenticode verification output: {}", stdout))
+    }
+}
+
 async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     let download_url = payload["download_url"].as_str()
         .ok_or_else(|| "Missing download_url".to_string())?;
@@ -2389,6 +2465,19 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
     let signature = payload["sig_ed25519"].as_str()
         .ok_or_else(|| "Missing sig_ed25519".to_string())?;
     let version = payload["version"].as_str().unwrap_or("unknown");
+    #[cfg(windows)]
+    let require_authenticode = bool_from_env_or_payload(
+        payload,
+        "require_authenticode",
+        "REAP3R_UPDATE_REQUIRE_AUTHENTICODE",
+        false,
+    );
+    #[cfg(windows)]
+    let signer_thumbprint = payload_or_env_string(
+        payload,
+        "signer_thumbprint",
+        "REAP3R_UPDATE_SIGNER_THUMBPRINT",
+    ).map(|s| s.to_ascii_uppercase());
 
     finfo!("Self-update requested: version={} url={}", version, download_url);
     if !download_url.starts_with("https://") {
@@ -2449,6 +2538,13 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
     std::fs::write(&new_binary_path, &bytes)
         .map_err(|e| format!("Write new binary: {}", e))?;
 
+    #[cfg(windows)]
+    {
+        if require_authenticode || signer_thumbprint.is_some() {
+            verify_windows_authenticode(&new_binary_path, signer_thumbprint.as_deref())?;
+        }
+    }
+
     // On Linux, make executable
     #[cfg(unix)]
     {
@@ -2461,6 +2557,7 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
     // PowerShell script that waits for the process to exit, then replaces
     #[cfg(target_os = "windows")]
     {
+        let service_name = detect_installed_service_name().unwrap_or_else(|| SERVICE_NAME.to_string());
         // Remove old backup if exists
         let _ = std::fs::remove_file(&backup_path);
 
@@ -2542,7 +2639,7 @@ try {{
 
 Log "Update complete"
 "#,
-            service = SERVICE_NAME,
+            service = service_name,
             current = current_exe.display(),
             new_bin = new_binary_path.display(),
             backup = backup_path.display(),
@@ -2846,7 +2943,39 @@ async fn execute_system_command(action: &str, delay_secs: u64) -> Result<serde_j
 // Placed here so finfo!/fwarn!/ferror! macros and all agent functions are in scope.
 
 #[cfg(windows)]
-const SERVICE_NAME: &str = "MASSVISION-Reap3r-Agent";
+const SERVICE_NAME: &str = "Reap3rAgent";
+#[cfg(windows)]
+const LEGACY_SERVICE_NAMES: [&str; 2] = ["MASSVISION-Reap3r-Agent", "ReaP3rAgent"];
+
+#[cfg(windows)]
+fn service_name_candidates() -> Vec<&'static str> {
+    let mut names = vec![SERVICE_NAME];
+    for n in LEGACY_SERVICE_NAMES {
+        if !names.contains(&n) {
+            names.push(n);
+        }
+    }
+    names
+}
+
+#[cfg(windows)]
+fn service_exists(name: &str) -> bool {
+    std::process::Command::new("sc.exe")
+        .args(["query", name])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(windows)]
+fn detect_installed_service_name() -> Option<String> {
+    for name in service_name_candidates() {
+        if service_exists(name) {
+            return Some(name.to_string());
+        }
+    }
+    None
+}
 
 #[cfg(windows)]
 define_windows_service!(ffi_service_main, windows_service_main);
@@ -2933,6 +3062,7 @@ fn install_windows_service() {
     let exe = std::env::current_exe().expect("Cannot determine executable path");
     let exe_path = exe.display().to_string();
     let service_bin_path = format!("\"{}\" --run", exe_path);
+    let service_name = detect_installed_service_name().unwrap_or_else(|| SERVICE_NAME.to_string());
     println!("═══════════════════════════════════════════════════════════");
     println!("  MASSVISION Reap3r Agent — Service Installer");
     println!("  Version: {}", env!("CARGO_PKG_VERSION"));
@@ -2995,6 +3125,9 @@ fn install_windows_service() {
         println!("[*] Enrollment token: {}...", &token[..token.len().min(8)]);
     }
     println!();
+    if service_name != SERVICE_NAME {
+        println!("[WARN] Legacy service detected: {} (keeping existing name for compatibility)", service_name);
+    }
 
     // ── 1. Register Windows Event Log source ──
     println!("[*] Registering Event Log source...");
@@ -3006,10 +3139,10 @@ fn install_windows_service() {
         });
 
     // ── 2. Create the Windows service via sc.exe ──
-    println!("[*] Creating service: {}", SERVICE_NAME);
+    println!("[*] Creating service: {}", service_name);
     let output = std::process::Command::new("sc.exe")
         .args([
-            "create", SERVICE_NAME,
+            "create", &service_name,
             "binPath=", &service_bin_path,
             "start=", "auto",
             "DisplayName=", "MASSVISION Reap3r Agent",
@@ -3027,7 +3160,7 @@ fn install_windows_service() {
                     println!("[OK] Service already exists — updating...");
                     // Update the binPath
                     let _ = std::process::Command::new("sc.exe")
-                        .args(["config", SERVICE_NAME, "binPath=", &service_bin_path])
+                        .args(["config", &service_name, "binPath=", &service_bin_path])
                         .output();
                 } else {
                     eprintln!("[ERROR] sc create failed: {} {}", stdout.trim(), stderr.trim());
@@ -3044,34 +3177,34 @@ fn install_windows_service() {
         env!("CARGO_PKG_VERSION")
     );
     let _ = std::process::Command::new("sc.exe")
-        .args(["description", SERVICE_NAME, &desc])
+        .args(["description", &service_name, &desc])
         .output();
 
     // ── 4. Configure automatic recovery (restart on failure) ──
     // Reset failure count after 24h, actions: restart after 5s, 10s, 30s
     println!("[*] Configuring automatic recovery...");
     let _ = std::process::Command::new("sc.exe")
-        .args(["failure", SERVICE_NAME,
+        .args(["failure", &service_name,
             "reset=", "0",
             "actions=", "restart/5000/restart/5000/restart/5000"])
         .output();
 
     // Also set failure on non-crash exit (delayed auto-restart covers agent bugs)
     let _ = std::process::Command::new("sc.exe")
-        .args(["failureflag", SERVICE_NAME, "1"])
+        .args(["failureflag", &service_name, "1"])
         .output();
     println!("[OK] Recovery policy: restart after 5s / 10s / 30s");
 
     // ── 5. Set service to run as LocalSystem (default) with delayed auto-start ──
     let _ = std::process::Command::new("sc.exe")
-        .args(["config", SERVICE_NAME, "start=", "delayed-auto"])
+        .args(["config", &service_name, "start=", "delayed-auto"])
         .output();
     println!("[OK] Start type: delayed-auto (starts after core services)");
 
     // ── 6. Start the service ──
     println!("[*] Starting service...");
     let start = std::process::Command::new("sc.exe")
-        .args(["start", SERVICE_NAME])
+        .args(["start", &service_name])
         .output();
     match start {
         Ok(o) if o.status.success() => println!("[OK] Service started!"),
@@ -3090,8 +3223,8 @@ fn install_windows_service() {
     println!();
     println!("═══════════════════════════════════════════════════════════");
     println!("  Installation complete!");
-    println!("  Service   : {}", SERVICE_NAME);
-    println!("  Status    : sc query {}", SERVICE_NAME);
+    println!("  Service   : {}", service_name);
+    println!("  Status    : sc query {}", service_name);
     println!("  Logs      : {}\\logs\\agent.log", config_dir().display());
     println!("  Event Log : Event Viewer → Application → Reap3r Agent");
     println!("  Diagnose  : reap3r-agent.exe --diagnose");
@@ -3101,24 +3234,34 @@ fn install_windows_service() {
 
 #[cfg(windows)]
 fn uninstall_windows_service() {
-    println!("Uninstalling Windows Service: {}", SERVICE_NAME);
-    // Stop first
-    let _ = std::process::Command::new("sc.exe")
-        .args(["stop", SERVICE_NAME])
-        .output();
-    std::thread::sleep(Duration::from_secs(2));
-    // Delete service
-    let output = std::process::Command::new("sc.exe")
-        .args(["delete", SERVICE_NAME])
-        .output();
-    match output {
-        Ok(o) if o.status.success() => println!("[OK] Service removed"),
-        Ok(o) => {
-            let msg = String::from_utf8_lossy(&o.stdout);
-            let err = String::from_utf8_lossy(&o.stderr);
-            eprintln!("[ERROR] sc delete: {} {}", msg.trim(), err.trim());
+    let mut removed_any = false;
+    for svc in service_name_candidates() {
+        if !service_exists(svc) {
+            continue;
         }
-        Err(e) => eprintln!("[ERROR] Failed to run sc.exe: {}", e),
+        println!("Uninstalling Windows Service: {}", svc);
+        let _ = std::process::Command::new("sc.exe")
+            .args(["stop", svc])
+            .output();
+        std::thread::sleep(Duration::from_secs(2));
+        let output = std::process::Command::new("sc.exe")
+            .args(["delete", svc])
+            .output();
+        match output {
+            Ok(o) if o.status.success() => {
+                removed_any = true;
+                println!("[OK] Service removed: {}", svc);
+            }
+            Ok(o) => {
+                let msg = String::from_utf8_lossy(&o.stdout);
+                let err = String::from_utf8_lossy(&o.stderr);
+                eprintln!("[ERROR] sc delete {}: {} {}", svc, msg.trim(), err.trim());
+            }
+            Err(e) => eprintln!("[ERROR] Failed to run sc.exe for {}: {}", svc, e),
+        }
+    }
+    if !removed_any {
+        println!("[OK] No installed Reap3r service found");
     }
     // Remove Event Log source
     let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
@@ -3194,12 +3337,22 @@ async fn main() {
         // Always attempt service dispatcher — if launched by SCM it will block,
         // otherwise it returns an error and we fall through to CLI mode.
         flog("INFO", "Trying Windows service dispatcher...");
-        match service_dispatcher::start(SERVICE_NAME, ffi_service_main) {
-            Ok(()) => return,  // SCM took over, we're done
-            Err(_) => {
-                flog("INFO", "Not running as service — entering CLI mode");
+        let mut dispatcher_started = false;
+        for svc in service_name_candidates() {
+            match service_dispatcher::start(svc, ffi_service_main) {
+                Ok(()) => {
+                    dispatcher_started = true;
+                    break;
+                }
+                Err(e) => {
+                    flog("WARN", &format!("Service dispatcher '{}' not active: {}", svc, e));
+                }
             }
         }
+        if dispatcher_started {
+            return;
+        }
+        flog("INFO", "Not running as service — entering CLI mode");
     }
 
     // ── 0. Install rustls CryptoProvider (ring) ───────────

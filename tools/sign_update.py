@@ -50,6 +50,12 @@ def main() -> int:
     parser.add_argument("--arch", default="x86_64", help="Target arch label (default: x86_64).")
     parser.add_argument("--private-key-hex", default="", help="Ed25519 private key hex (32 bytes).")
     parser.add_argument("--private-key-file", default="", help="Path to file containing private key hex.")
+    parser.add_argument("--signer-thumbprint", default="", help="Optional Windows Authenticode signer thumbprint.")
+    parser.add_argument(
+        "--require-authenticode",
+        action="store_true",
+        help="Mark manifest to require Authenticode verification on agent side.",
+    )
     parser.add_argument(
         "--out",
         default="",
@@ -82,6 +88,10 @@ def main() -> int:
         "sig_ed25519": signature_b64,
         "signed_at": datetime.now(timezone.utc).isoformat(),
     }
+    if args.signer_thumbprint:
+        manifest["signer_thumbprint"] = args.signer_thumbprint.strip().upper()
+    if args.require_authenticode:
+        manifest["require_authenticode"] = True
 
     out_path = Path(args.out).resolve() if args.out else Path(str(binary_path) + ".manifest.json")
     out_path.parent.mkdir(parents=True, exist_ok=True)

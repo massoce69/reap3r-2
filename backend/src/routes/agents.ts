@@ -235,6 +235,8 @@ export default async function agentRoutes(fastify: FastifyInstance) {
           download_url: manifest.download_url,
           sha256: manifest.sha256,
           sig_ed25519: manifest.sig_ed25519,
+          ...(manifest.signer_thumbprint ? { signer_thumbprint: manifest.signer_thumbprint } : {}),
+          ...(manifest.require_authenticode ? { require_authenticode: true } : {}),
           force,
         };
 

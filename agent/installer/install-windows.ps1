@@ -31,7 +31,8 @@ param(
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
-$ServiceName   = "ReaP3rAgent"
+$ServiceName   = "Reap3rAgent"
+$LegacyServiceNames = @("MASSVISION-Reap3r-Agent", "ReaP3rAgent")
 $DisplayName   = "Reap3r Agent (MASSVISION)"
 $Description   = "MASSVISION Reap3r remote-management agent"
 $InstallDir    = "C:\Program Files\Reap3r Agent"
@@ -56,8 +57,10 @@ function Write-Fail([string]$msg) {
 # ─── UNINSTALL ────────────────────────────────────────────────────────────────
 if ($Uninstall) {
     Write-Step "Uninstalling Reap3r Agent..."
-    try { Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue } catch {}
-    try { sc.exe delete $ServiceName | Out-Null } catch {}
+    foreach ($svcName in (@($ServiceName) + $LegacyServiceNames | Select-Object -Unique)) {
+        try { Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue } catch {}
+        try { sc.exe delete $svcName | Out-Null } catch {}
+    }
 
     if (Test-Path $ExeDest)  { Remove-Item $ExeDest -Force }
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
@@ -128,16 +131,20 @@ if ($ExeSource -match '^https?://') {
 
 # ─── STOP EXISTING SERVICE ───────────────────────────────────────────────────
 Write-Step "Stopping existing service (if any)..."
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-if ($svc) {
+$removedAny = $false
+foreach ($svcName in (@($ServiceName) + $LegacyServiceNames | Select-Object -Unique)) {
+    $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+    if (-not $svc) { continue }
     if ($svc.Status -ne 'Stopped') {
-        Stop-Service -Name $ServiceName -Force
+        Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
         Start-Sleep -Seconds 2
     }
-    sc.exe delete $ServiceName | Out-Null
+    sc.exe delete $svcName | Out-Null
     Start-Sleep -Seconds 1
-    Write-OK "Old service removed"
-} else {
+    Write-OK "Old service removed: $svcName"
+    $removedAny = $true
+}
+if (-not $removedAny) {
     Write-OK "No existing service"
 }
 

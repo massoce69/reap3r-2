@@ -1,9 +1,10 @@
-[package]
+﻿[package]
 name = "reap3r-agent"
 version = "1.2.0"
 edition = "2021"
-description = "MASSVISION Reap3r Agent — Remote management agent (Windows 7 → Server 2025)"
+description = "MASSVISION Reap3r Agent - Remote management agent (Windows 7 to Server 2025)"
 license = "Proprietary"
+build = "build.rs"
 
 [[bin]]
 name = "reap3r-agent"
@@ -11,9 +12,8 @@ path = "src/main.rs"
 
 [dependencies]
 tokio = { version = "1", features = ["full"] }
-# ── TLS: use rustls (pure-Rust) instead of native-tls ──
-# This eliminates the dependency on Windows SChannel / OpenSSL,
-# ensuring TLS 1.2+ works even on Windows 7 SP1 without KB updates.
+# TLS: use rustls (pure-Rust) instead of native-tls.
+# This removes dependency on Windows SChannel/OpenSSL.
 tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
 rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
 webpki-roots = "0.26"
@@ -41,9 +41,12 @@ ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] 
 windows-service = "0.7"
 winreg = "0.52"
 
+[build-dependencies]
+winres = "0.1"
+
 [profile.release]
-opt-level = "z"
+opt-level = 2
 lto = true
-strip = true
-# Panic=abort for smaller binary + deterministic behavior on panics
+strip = false
+# Keep panic=abort for deterministic runtime behavior.
 panic = "abort"

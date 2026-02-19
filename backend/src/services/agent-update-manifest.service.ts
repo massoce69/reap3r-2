@@ -12,7 +12,9 @@ export type AgentUpdateManifest = {
   size: number;
   sig_ed25519?: string;
   signed_at?: string;
-  manifest_source: 'signed' | 'generated';
+  signer_thumbprint?: string;
+  require_authenticode?: boolean;
+  manifest_source: 'signed' | 'generated' | 'generated_signed';
 };
 
 type ManifestInput = {
@@ -21,6 +23,8 @@ type ManifestInput = {
   download_url?: string;
   sig_ed25519?: string;
   signed_at?: string;
+  signer_thumbprint?: string;
+  require_authenticode?: boolean;
 };
 
 function firstHeader(v: unknown): string | undefined {
@@ -94,6 +98,25 @@ export async function sha256File(filePath: string): Promise<{ sha256: string; si
   return { sha256: hash.digest('hex'), size: stat.size };
 }
 
+function boolEnv(v: string | undefined, fallback = false): boolean {
+  const raw = String(v ?? '').trim().toLowerCase();
+  if (!raw) return fallback;
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
+function ed25519Pkcs8FromRaw32(raw: Buffer): Buffer {
+  // PKCS#8 (RFC 8410) wrapper for Ed25519 private key.
+  const prefix = Buffer.from('302e020100300506032b657004220420', 'hex');
+  return Buffer.concat([prefix, raw]);
+}
+
+function signEd25519Base64(bytes: Buffer, privateKeyHex: string): string {
+  const raw = Buffer.from(privateKeyHex.trim(), 'hex');
+  if (raw.length !== 32) throw new Error('REAP3R_UPDATE_PRIVKEY_HEX must be 32-byte hex');
+  const key = crypto.createPrivateKey({ key: ed25519Pkcs8FromRaw32(raw), format: 'der', type: 'pkcs8' });
+  return crypto.sign(null, bytes, key).toString('base64');
+}
+
 function resolveSignedManifestPath(os: AgentOs, arch: AgentArch, binaryPath: string): string {
   const key = `AGENT_SIGNED_MANIFEST_PATH_${os.toUpperCase()}_${arch.toUpperCase()}`;
   const fromEnv = process.env[key];
@@ -126,7 +149,10 @@ export async function loadAgentUpdateManifest(params: {
   }
 
   const strictSignature = params.strictSignature ?? (String(process.env.AGENT_UPDATE_REQUIRE_SIGNATURE || '').toLowerCase() === 'true');
+  const requireAuthenticode = boolEnv(process.env.AGENT_UPDATE_REQUIRE_AUTHENTICODE, false);
+  const signerThumbprint = String(process.env.AGENT_UPDATE_SIGNER_THUMBPRINT || '').trim().toUpperCase() || undefined;
   const { sha256, size } = await sha256File(resolved.filePath);
+  const fileBytes = await fs.promises.readFile(resolved.filePath);
   const base = params.request ? publicBaseUrl(params.request) : (process.env.API_BASE_URL || 'http://localhost:4000');
   const fallbackDownloadUrl = `${base}/api/agent-binary/download?os=${encodeURIComponent(params.os)}&arch=${encodeURIComponent(params.arch)}`;
   const version = process.env.AGENT_VERSION || '1.0.0';
@@ -148,7 +174,28 @@ export async function loadAgentUpdateManifest(params: {
       download_url: typeof parsed.download_url === 'string' && parsed.download_url.trim() ? parsed.download_url : fallbackDownloadUrl,
       sig_ed25519: parsed.sig_ed25519,
       signed_at: typeof parsed.signed_at === 'string' ? parsed.signed_at : undefined,
+      signer_thumbprint: typeof parsed.signer_thumbprint === 'string'
+        ? parsed.signer_thumbprint.trim().toUpperCase()
+        : signerThumbprint,
+      require_authenticode: typeof parsed.require_authenticode === 'boolean'
+        ? parsed.require_authenticode
+        : requireAuthenticode,
       manifest_source: 'signed',
+    };
+  }
+
+  const privateKeyHex = String(process.env.REAP3R_UPDATE_PRIVKEY_HEX || '').trim();
+  if (privateKeyHex) {
+    return {
+      version,
+      sha256,
+      size,
+      download_url: fallbackDownloadUrl,
+      sig_ed25519: signEd25519Base64(fileBytes, privateKeyHex),
+      signed_at: new Date().toISOString(),
+      signer_thumbprint: signerThumbprint,
+      require_authenticode: requireAuthenticode,
+      manifest_source: 'generated_signed',
     };
   }
 
@@ -161,6 +208,8 @@ export async function loadAgentUpdateManifest(params: {
     sha256,
     size,
     download_url: fallbackDownloadUrl,
+    signer_thumbprint: signerThumbprint,
+    require_authenticode: requireAuthenticode,
     manifest_source: 'generated',
   };
 }

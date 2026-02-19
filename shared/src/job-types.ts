@@ -112,6 +112,8 @@ export const UpdateAgentPayload = z.object({
   download_url: z.string().url(),
   sha256: z.string().length(64),
   sig_ed25519: z.string().min(64),
+  signer_thumbprint: z.string().min(40).max(64).optional(),
+  require_authenticode: z.boolean().optional(),
   force: z.boolean().default(false),
 });
 
