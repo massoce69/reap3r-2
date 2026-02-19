@@ -1,139 +1,180 @@
-; ─────────────────────────────────────────────────────────────────────────────
-; MASSVISION Reap3r Agent — Inno Setup Installer Script
-; Build: "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" reap3r-agent.iss
-; ─────────────────────────────────────────────────────────────────────────────
+; ════════════════════════════════════════════════════════════════════════════════
+; MASSVISION Reap3r Agent — Inno Setup Installer (Universal)
+;
+; Compatible: Windows 7 SP1 → Windows Server 2025 (x86 + x64)
+; Build:      "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" reap3r-agent.iss
+;
+; Silent install (GPO/Intune/Zabbix/SCCM):
+;   reap3r-agent-setup.exe /VERYSILENT /SERVER=wss://your-server/ws/agent /TOKEN=abc123
+;
+; Unattended uninstall:
+;   "C:\Program Files\MASSVISION\Reap3r Agent\unins000.exe" /VERYSILENT
+; ════════════════════════════════════════════════════════════════════════════════
 
-#define AppName      "Reap3r Agent"
-#define AppVersion   "1.0.0"
+#define AppName      "MASSVISION Reap3r Agent"
+#define AppVersion   "1.2.0"
 #define AppPublisher "MASSVISION"
 #define AppURL       "https://massvision.io"
 #define ExeName      "reap3r-agent.exe"
-#define ServiceName  "Reap3rAgent"
-#define ServiceDisp  "Reap3r Agent (MASSVISION)"
+#define ServiceName  "MASSVISION-Reap3r-Agent"
+#define ServiceDisp  "MASSVISION Reap3r Agent"
 
 [Setup]
 AppId={{B2F1D3E4-7A5C-4F8B-9D2E-1A3C5B7D9F0E}}
 AppName={#AppName}
 AppVersion={#AppVersion}
+AppPublisher={#AppPublisher}
 AppPublisherURL={#AppURL}
 AppSupportURL={#AppURL}
 AppUpdatesURL={#AppURL}
-DefaultDirName={autopf}\Reap3r Agent
+DefaultDirName={autopf}\MASSVISION\Reap3r Agent
 DefaultGroupName={#AppName}
 AllowNoIcons=yes
 OutputDir=..\dist
-OutputBaseFilename=Reap3rAgentSetup-{#AppVersion}
-SetupIconFile=..\assets\icon.ico
-; If no icon file, comment above and uncomment:
-; SetupIconFile=
+OutputBaseFilename=reap3r-agent-setup-{#AppVersion}
 Compression=lzma2/ultra64
 SolidCompression=yes
 PrivilegesRequired=admin
-WindowVisible=yes
 WizardStyle=modern
 UninstallDisplayIcon={app}\{#ExeName}
 CloseApplications=yes
+; Minimum: Windows 7 SP1 (NT 6.1 SP1)
+MinVersion=6.1sp1
+; Auto-detect 64-bit and install in Program Files (not x86)
+ArchitecturesInstallIn64BitMode=x64compatible
+; Disable the "ready to install" page for faster installs
+DisableReadyPage=yes
+; Version info for the setup executable itself
+VersionInfoVersion={#AppVersion}
+VersionInfoCompany={#AppPublisher}
+VersionInfoDescription=MASSVISION Reap3r Agent Installer
+VersionInfoProductName={#AppName}
 
-; Custom wizard pages for server + token input
+[Languages]
+Name: "english"; MessagesFile: "compiler:Default.isl"
+Name: "french"; MessagesFile: "compiler:Languages\French.isl"
+
+[Files]
+; Architecture-aware: install the correct binary automatically
+Source: "..\dist\reap3r-agent-x64.exe"; DestDir: "{app}"; DestName: "{#ExeName}"; Check: Is64BitInstallMode; Flags: ignoreversion
+Source: "..\dist\reap3r-agent-x86.exe"; DestDir: "{app}"; DestName: "{#ExeName}"; Check: not Is64BitInstallMode; Flags: ignoreversion
+
+[Dirs]
+Name: "{commonappdata}\Reap3r"; Permissions: admins-full system-full
+Name: "{commonappdata}\Reap3r\logs"; Permissions: admins-full system-full
+
+[Icons]
+Name: "{group}\{#AppName} — Diagnostics"; Filename: "{app}\{#ExeName}"; Parameters: "--diagnose"; WorkingDir: "{app}"
+Name: "{group}\{#AppName} — View Logs"; Filename: "notepad.exe"; Parameters: "{commonappdata}\Reap3r\logs\agent.log"
+Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
+
+[Run]
+; Pre-install: stop & remove any existing service (upgrade scenario)
+Filename: "{sys}\sc.exe"; Parameters: "stop {#ServiceName}"; Flags: runhidden waituntilterminated; StatusMsg: "Stopping existing service..."; Check: ServiceExists
+Filename: "{sys}\sc.exe"; Parameters: "delete {#ServiceName}"; Flags: runhidden waituntilterminated; StatusMsg: "Removing old service..."; Check: ServiceExists
+
+; Install service using the agent's built-in --install (handles bootstrap, recovery, event log)
+Filename: "{app}\{#ExeName}"; Parameters: "--install {code:GetInstallArgs}"; Flags: runhidden waituntilterminated; StatusMsg: "Installing Windows Service..."
+
+; Post-install: run diagnostics (interactive only)
+Filename: "{app}\{#ExeName}"; Parameters: "--diagnose"; Description: "Run agent diagnostics"; Flags: postinstall skipifsilent nowait
+
+[UninstallRun]
+; Uninstall: stop service, remove service, clean event log
+Filename: "{app}\{#ExeName}"; Parameters: "--uninstall"; Flags: runhidden waituntilterminated; RunOnceId: "UninstallService"
+
 [Code]
 var
   ServerPage: TInputQueryWizardPage;
-  TokenPage:  TInputQueryWizardPage;
+  TokenPage: TInputQueryWizardPage;
+
+// Parse /PARAM=value from command line (for silent installs via GPO etc.)
+function GetCmdLineParam(const ParamName: string): string;
+var
+  I: Integer;
+  S, Prefix: string;
+begin
+  Result := '';
+  Prefix := '/' + UpperCase(ParamName) + '=';
+  for I := 1 to ParamCount do
+  begin
+    S := ParamStr(I);
+    if Pos(Prefix, UpperCase(S)) = 1 then
+    begin
+      Result := Copy(S, Length(Prefix) + 1, MaxInt);
+      Exit;
+    end;
+  end;
+end;
+
+function ServiceExists: Boolean;
+var
+  Res: Integer;
+begin
+  // Check if service is registered
+  Exec(ExpandConstant('{sys}\sc.exe'), ExpandConstant('query {#ServiceName}'), '', SW_HIDE, ewWaitUntilTerminated, Res);
+  Result := (Res = 0);
+end;
 
 procedure InitializeWizard;
 begin
-  ServerPage := CreateInputQueryPage(wpWelcome,
+  // Server URL page
+  ServerPage := CreateInputQueryPage(wpSelectDir,
     'Server Connection',
-    'Enter your Reap3r backend WebSocket URL.',
-    '');
-  ServerPage.Add('Server URL (e.g. wss://reap3r.example.com/ws/agent):', False);
-  ServerPage.Values[0] := ExpandConstant('{param:SERVER|wss://YOUR_SERVER/ws/agent}');
+    'Enter your MASSVISION backend WebSocket URL.',
+    'The agent needs to know the server address to connect.' + #13#10 +
+    'Example: wss://reap3r.yourcompany.com/ws/agent');
+  ServerPage.Add('Server URL:', False);
+  ServerPage.Values[0] := GetCmdLineParam('SERVER');
+  if ServerPage.Values[0] = '' then
+    ServerPage.Values[0] := 'wss://';
 
+  // Enrollment token page
   TokenPage := CreateInputQueryPage(ServerPage.ID,
     'Enrollment Token',
-    'Enter the one-time enrollment token provided by your administrator.',
-    '');
+    'Enter the enrollment token for this agent.',
+    'This token is used for the initial enrollment with the management server.' + #13#10 +
+    'Your administrator can generate tokens from the admin panel.');
   TokenPage.Add('Enrollment Token:', False);
-  TokenPage.Values[0] := ExpandConstant('{param:TOKEN|}');
+  TokenPage.Values[0] := GetCmdLineParam('TOKEN');
 end;
 
 function NextButtonClick(CurPageID: Integer): Boolean;
 begin
   Result := True;
-  if CurPageID = ServerPage.ID then begin
-    if ServerPage.Values[0] = '' then begin
-      MsgBox('Please enter a valid server URL.', mbError, MB_OK);
+  if CurPageID = ServerPage.ID then
+  begin
+    if (ServerPage.Values[0] = '') or (ServerPage.Values[0] = 'wss://') then
+    begin
+      MsgBox('Please enter a valid server WebSocket URL.' + #13#10 +
+             'Example: wss://reap3r.yourcompany.com/ws/agent', mbError, MB_OK);
       Result := False;
-    end else if (Pos('ws://', ServerPage.Values[0]) = 0) and
-                (Pos('wss://', ServerPage.Values[0]) = 0) then begin
+    end
+    else if (Pos('ws://', ServerPage.Values[0]) <> 1) and
+            (Pos('wss://', ServerPage.Values[0]) <> 1) then
+    begin
       MsgBox('Server URL must start with ws:// or wss://', mbError, MB_OK);
       Result := False;
     end;
   end;
-  if CurPageID = TokenPage.ID then begin
-    if TokenPage.Values[0] = '' then begin
-      MsgBox('Please enter an enrollment token.', mbError, MB_OK);
-      Result := False;
-    end;
-  end;
 end;
 
-[Languages]
-Name: "english"; MessagesFile: "compiler:Default.isl"
-
-[Tasks]
-Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
-
-[Files]
-; Main binary (built with: cargo build --release --target x86_64-pc-windows-msvc)
-Source: "..\target\x86_64-pc-windows-msvc\release\{#ExeName}"; DestDir: "{app}"; Flags: ignoreversion
-
-[Icons]
-Name: "{group}\{#AppName} — Diagnose"; Filename: "{app}\{#ExeName}"; Parameters: "--diagnose"; WorkingDir: "{app}"
-Name: "{group}\{#AppName} — Open Log"; Filename: "{win}\explorer.exe"; Parameters: "{commonappdata}\Reap3r\logs"
-Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
-Name: "{commondesktop}\{#AppName}"; Filename: "{app}\{#ExeName}"; Parameters: "--diagnose"; Tasks: desktopicon
-
-[Dirs]
-Name: "{commonappdata}\Reap3r"
-Name: "{commonappdata}\Reap3r\logs"
-
-[Run]
-; Stop existing service before install
-Filename: "{sys}\sc.exe"; Parameters: "stop {#ServiceName}"; Flags: runhidden waituntilterminated; StatusMsg: "Stopping existing service..."
-Filename: "{sys}\sc.exe"; Parameters: "delete {#ServiceName}"; Flags: runhidden waituntilterminated; StatusMsg: "Removing old service..."
-
-; Install new service
-Filename: "{sys}\sc.exe"; \
-  Parameters: "create {#ServiceName} binPath= ""{app}\{#ExeName} --server ""{code:GetServer}"" --token ""{code:GetToken}"""" start= auto DisplayName= ""{#ServiceDisp}"""; \
-  Flags: runhidden waituntilterminated; \
-  StatusMsg: "Installing Windows service..."
-
-; Set service description
-Filename: "{sys}\sc.exe"; Parameters: "description {#ServiceName} ""MASSVISION Reap3r remote-management agent"""; Flags: runhidden waituntilterminated
-
-; Configure recovery: restart on failure (3 restarts in 86400s window)
-Filename: "{sys}\sc.exe"; \
-  Parameters: "failure {#ServiceName} reset= 86400 actions= restart/5000/restart/10000/restart/30000"; \
-  Flags: runhidden waituntilterminated
-
-; Start the service
-Filename: "{sys}\net.exe"; Parameters: "start {#ServiceName}"; Flags: runhidden waituntilterminated; StatusMsg: "Starting Reap3r Agent service..."
-
-; Launch diagnose in a visible window so user can see output
-Filename: "{app}\{#ExeName}"; Parameters: "--diagnose"; Description: "Run diagnostics after install"; Flags: postinstall skipifsilent
-
-[UninstallRun]
-Filename: "{sys}\net.exe"; Parameters: "stop {#ServiceName}"; Flags: runhidden waituntilterminated
-Filename: "{sys}\sc.exe"; Parameters: "delete {#ServiceName}"; Flags: runhidden waituntilterminated
-
-[Code]
-function GetServer(Param: String): String;
+function GetInstallArgs(Param: string): string;
+var
+  Server, Token: string;
 begin
-  Result := ServerPage.Values[0];
-end;
+  // Priority: command-line params (for silent) > wizard pages (for GUI)
+  Server := GetCmdLineParam('SERVER');
+  Token := GetCmdLineParam('TOKEN');
 
-function GetToken(Param: String): String;
-begin
-  Result := TokenPage.Values[0];
+  if Server = '' then
+    Server := ServerPage.Values[0];
+  if Token = '' then
+    Token := TokenPage.Values[0];
+
+  Result := '';
+  if (Server <> '') and (Server <> 'wss://') then
+    Result := Result + ' --server "' + Server + '"';
+  if Token <> '' then
+    Result := Result + ' --token "' + Token + '"';
 end;

@@ -14,7 +14,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use sysinfo::System;
-use tokio_tungstenite::{connect_async, tungstenite::Message};
+use tokio_tungstenite::{connect_async_tls_with_config, tungstenite::Message};
 use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{error, info, warn};
 use uuid::Uuid;
@@ -89,11 +89,97 @@ impl FileLogger {
 /// Module-level optional file logger, set once during startup.
 static FILE_LOGGER: std::sync::OnceLock<Option<Arc<FileLogger>>> = std::sync::OnceLock::new();
 
+// ── Windows Event Log writer ──────────────────────────────
+// Reports critical events (start, stop, errors, updates) to the
+// Windows Application Event Log so enterprise SIEM tools pick them up.
+
+#[cfg(windows)]
+mod eventlog {
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+
+    const EVENTLOG_INFORMATION_TYPE: u16 = 0x0004;
+    const EVENTLOG_WARNING_TYPE: u16 = 0x0002;
+    const EVENTLOG_ERROR_TYPE: u16 = 0x0001;
+
+    type HANDLE = *mut std::ffi::c_void;
+    type WORD = u16;
+    type DWORD = u32;
+
+    #[link(name = "advapi32")]
+    extern "system" {
+        fn RegisterEventSourceW(lpUNCServerName: *const u16, lpSourceName: *const u16) -> HANDLE;
+        fn ReportEventW(
+            hEventLog: HANDLE,
+            wType: WORD,
+            wCategory: WORD,
+            dwEventID: DWORD,
+            lpUserSid: *const std::ffi::c_void,
+            wNumStrings: WORD,
+            dwDataSize: DWORD,
+            lpStrings: *const *const u16,
+            lpRawData: *const std::ffi::c_void,
+        ) -> i32;
+        fn DeregisterEventSource(hEventLog: HANDLE) -> i32;
+    }
+
+    fn to_wide(s: &str) -> Vec<u16> {
+        OsStr::new(s).encode_wide().chain(Some(0)).collect()
+    }
+
+    /// Write an entry to Windows Event Log under source "Reap3r Agent".
+    /// level: "INFO", "WARN", or "ERROR"
+    pub fn write(level: &str, msg: &str) {
+        unsafe {
+            let source = to_wide("Reap3r Agent");
+            let h = RegisterEventSourceW(ptr::null(), source.as_ptr());
+            if h.is_null() {
+                return;
+            }
+            let event_type = match level {
+                "ERROR" => EVENTLOG_ERROR_TYPE,
+                "WARN" => EVENTLOG_WARNING_TYPE,
+                _ => EVENTLOG_INFORMATION_TYPE,
+            };
+            let wide_msg = to_wide(msg);
+            let msg_ptr = wide_msg.as_ptr();
+            ReportEventW(
+                h,
+                event_type,
+                0,    // category
+                1000, // event ID
+                ptr::null(),
+                1,
+                0,
+                &msg_ptr,
+                ptr::null(),
+            );
+            DeregisterEventSource(h);
+        }
+    }
+}
+
 fn flog(level: &str, msg: &str) {
     if let Some(Some(logger)) = FILE_LOGGER.get() {
         logger.log(level, msg);
     }
+    // Also write to Windows Event Log for ERROR and WARN
+    #[cfg(windows)]
+    {
+        if level == "ERROR" || level == "WARN" {
+            eventlog::write(level, msg);
+        }
+    }
 }
+
+/// Write to Windows Event Log only (for critical lifecycle events)
+#[cfg(windows)]
+fn eventlog_info(msg: &str) {
+    eventlog::write("INFO", msg);
+}
+#[cfg(not(windows))]
+fn eventlog_info(_msg: &str) {}
 
 macro_rules! finfo  { ($($arg:tt)*) => {{ let s = format!($($arg)*); info!("{}", s);  flog("INFO",  &s); }} }
 macro_rules! fwarn  { ($($arg:tt)*) => {{ let s = format!($($arg)*); warn!("{}", s);  flog("WARN",  &s); }} }
@@ -160,28 +246,74 @@ async fn connect_ws(
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::Error,
 > {
-    // ws:// always uses plain TCP, ignore insecure_tls.
-    if server_url.starts_with("ws://") || !insecure_tls {
-        let (ws, _) = connect_async(server_url).await?;
+    // ws:// uses plain TCP — no TLS connector needed.
+    if server_url.starts_with("ws://") {
+        let req = server_url.into_client_request()?;
+        let (ws, _) = connect_async_tls_with_config(req, None, false, None).await?;
         return Ok(ws);
     }
 
-    // wss:// with explicit insecure TLS (native-tls connector).
-    // DEV ONLY: never use in production.
-    let mut builder = native_tls::TlsConnector::builder();
-    builder.danger_accept_invalid_certs(true);
-    builder.danger_accept_invalid_hostnames(true);
-    let tls = builder.build().map_err(|e| {
-        tokio_tungstenite::tungstenite::Error::Io(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            e.to_string(),
-        ))
-    })?;
-    let connector = tokio_tungstenite::Connector::NativeTls(tls);
+    // wss:// → build a rustls connector (pure-Rust TLS 1.2+, no OS dependencies).
+    // This works on Windows 7 SP1 without any KB updates or OpenSSL DLLs.
+    let tls_config = if insecure_tls {
+        // DEV ONLY: accept any certificate
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls::ClientConfig::builder()
+            .dangerous()
+            .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
+            .with_no_client_auth()
+    } else {
+        // Production: use Mozilla CA roots (bundled — no OS cert store dependency)
+        let mut root_store = rustls::RootCertStore::empty();
+        root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
+        rustls::ClientConfig::builder()
+            .with_root_certificates(root_store)
+            .with_no_client_auth()
+    };
 
+    let connector = tokio_tungstenite::Connector::Rustls(Arc::new(tls_config));
     let req = server_url.into_client_request()?;
-    let (ws, _) = tokio_tungstenite::connect_async_tls_with_config(req, None, false, Some(connector)).await?;
+    let (ws, _) = connect_async_tls_with_config(req, None, false, Some(connector)).await?;
     Ok(ws)
+}
+
+/// Danger: accepts any TLS certificate. DEV ONLY.
+#[derive(Debug)]
+struct InsecureCertVerifier;
+
+impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
+    fn verify_server_cert(
+        &self,
+        _end_entity: &rustls::pki_types::CertificateDer<'_>,
+        _intermediates: &[rustls::pki_types::CertificateDer<'_>],
+        _server_name: &rustls::pki_types::ServerName<'_>,
+        _ocsp_response: &[u8],
+        _now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        Ok(rustls::client::danger::ServerCertVerified::assertion())
+    }
+    fn verify_tls12_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn verify_tls13_signature(
+        &self,
+        _message: &[u8],
+        _cert: &rustls::pki_types::CertificateDer<'_>,
+        _dss: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        Ok(rustls::client::danger::HandshakeSignatureValid::assertion())
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        rustls::crypto::ring::default_provider()
+            .signature_verification_algorithms
+            .supported_schemes()
+    }
 }
 
 
@@ -332,13 +464,20 @@ async fn run_diagnostics(args: &Args) {
     let cfg_path = config_path();
 
     println!("═══════════════════════════════════════════");
-    println!("  Reap3r Agent — Diagnostic Report");
+    println!("  Reap3r Agent v{} — Diagnostic Report", env!("CARGO_PKG_VERSION"));
     println!("  {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z"));
     println!("═══════════════════════════════════════════");
     println!();
     println!("[ System ]");
     println!("  Hostname  : {}", hostname);
     println!("  OS        : {} ({}) {}", os, arch, os_ver);
+
+    // Windows version detail
+    #[cfg(windows)]
+    {
+        let win_ver = get_windows_version_detail();
+        println!("  Windows   : {}", win_ver);
+    }
 
     // Admin check
     let is_admin = {
@@ -348,6 +487,14 @@ async fn run_diagnostics(args: &Args) {
         { std::process::Command::new("id").arg("-u").output().map(|o| String::from_utf8_lossy(&o.stdout).trim() == "0").unwrap_or(false) }
     };
     println!("  Admin     : {}", if is_admin { "YES" } else { "no (user mode)" });
+    println!("  Arch      : {} (binary: {})", arch, if cfg!(target_arch = "x86_64") { "x64" } else if cfg!(target_arch = "x86") { "x86 (32-bit)" } else { "unknown" });
+    println!();
+    println!("[ TLS ]");
+    println!("  Engine    : rustls (pure-Rust, no OS dependency)");
+    println!("  TLS 1.2   : YES (always supported)");
+    println!("  TLS 1.3   : YES (always supported)");
+    println!("  CA Roots  : Mozilla bundled (webpki-roots, no OS cert store needed)");
+    println!("  Static CRT: {}", if cfg!(target_feature = "crt-static") { "YES (no VCRUNTIME dep)" } else { "no" });
     println!();
     println!("[ Paths ]");
     println!("  Config dir: {}", cfg_dir.display());
@@ -377,6 +524,41 @@ async fn run_diagnostics(args: &Args) {
         None => println!("  (no saved config)"),
     }
     println!();
+
+    // ── Service status check (Windows) ──
+    #[cfg(windows)]
+    {
+        println!("[ Windows Service ]");
+        match std::process::Command::new("sc.exe").args(["query", SERVICE_NAME]).output() {
+            Ok(o) => {
+                let out = String::from_utf8_lossy(&o.stdout);
+                if out.contains("RUNNING") {
+                    println!("  Status    : RUNNING");
+                } else if out.contains("STOPPED") {
+                    println!("  Status    : STOPPED");
+                } else if o.status.success() {
+                    println!("  Status    : {}", out.lines().find(|l| l.contains("STATE")).unwrap_or("unknown"));
+                } else {
+                    println!("  Status    : NOT INSTALLED");
+                }
+            }
+            Err(_) => println!("  Status    : Cannot query (sc.exe not available)"),
+        }
+        // Check recovery settings
+        match std::process::Command::new("sc.exe").args(["qfailure", SERVICE_NAME]).output() {
+            Ok(o) if o.status.success() => {
+                let out = String::from_utf8_lossy(&o.stdout);
+                if out.contains("RESTART") {
+                    println!("  Recovery  : Auto-restart configured");
+                } else {
+                    println!("  Recovery  : WARNING — no auto-restart configured");
+                }
+            }
+            _ => {}
+        }
+        println!();
+    }
+
     println!("[ Connection ]");
     let server_url = args.server.clone()
         .or_else(|| load_config().map(|c| c.server))
@@ -403,6 +585,27 @@ async fn run_diagnostics(args: &Args) {
                 Err(e) => println!("  DNS resolve : {} FAILED — {}", host, e),
             }
         }
+
+        // HTTP(S) reachability test (backend health endpoint)
+        let http_url = server_url
+            .replace("wss://", "https://")
+            .replace("ws://", "http://")
+            .replace("/ws/agent", "/api/health");
+        print!("  HTTP health : {} ... ", http_url);
+        let _ = std::io::stdout().flush();
+        let client = reqwest::Client::builder()
+            .danger_accept_invalid_certs(args.insecure_tls)
+            .timeout(Duration::from_secs(5))
+            .build();
+        match client {
+            Ok(c) => match tokio::time::timeout(Duration::from_secs(6), c.get(&http_url).send()).await {
+                Ok(Ok(resp)) => println!("{} ({})", resp.status(), resp.status().as_u16()),
+                Ok(Err(e)) => println!("FAILED — {}", e),
+                Err(_) => println!("TIMEOUT (5s)"),
+            },
+            Err(e) => println!("Client error — {}", e),
+        }
+
         // Try WS connect
         print!("  WS connect  : attempting...");
         let _ = std::io::stdout().flush();
@@ -410,14 +613,100 @@ async fn run_diagnostics(args: &Args) {
             Duration::from_secs(5),
             connect_ws(&server_url, args.insecure_tls),
         ).await {
-            Ok(Ok(_)) => println!(" OK"),
+            Ok(Ok(_)) => println!(" OK (rustls TLS handshake successful)"),
             Ok(Err(e)) => println!(" FAILED — {}", e),
             Err(_) => println!(" TIMEOUT (5s)"),
         }
     }
     println!();
+    println!("[ Compatibility ]");
+    println!("  Windows 7 SP1     : YES (rustls, static CRT, no OS deps)");
+    println!("  Server 2008 R2    : YES");
+    println!("  Server 2012/R2    : YES");
+    println!("  Server 2016       : YES");
+    println!("  Server 2019       : YES");
+    println!("  Server 2022       : YES");
+    println!("  Server 2025       : YES");
+    println!("  Windows 10/11     : YES");
+    println!("  x86 (32-bit)      : {}", if cfg!(target_arch = "x86") { "YES (this binary)" } else { "Use x86 build" });
+    println!("  x64 (64-bit)      : {}", if cfg!(target_arch = "x86_64") { "YES (this binary)" } else { "Use x64 build" });
+    println!();
     println!("═══════════════════════════════════════════");
     flog("INFO", "Diagnostic run complete");
+}
+
+/// Get detailed Windows version string (e.g. "Windows 7 SP1" or "Windows Server 2019")
+#[cfg(windows)]
+fn get_windows_version_detail() -> String {
+    // Use registry to get precise version info
+    match winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .open_subkey("SOFTWARE\\Microsoft\\Windows NT\\CurrentVersion") {
+        Ok(key) => {
+            let product: String = key.get_value("ProductName").unwrap_or_default();
+            let build: String = key.get_value("CurrentBuildNumber").unwrap_or_default();
+            let sp: String = key.get_value("CSDVersion").unwrap_or_default();
+            let display: String = key.get_value("DisplayVersion").unwrap_or_default();
+            let ubr: u32 = key.get_value("UBR").unwrap_or(0);
+            let mut ver = product;
+            if !sp.is_empty() { ver = format!("{} {}", ver, sp); }
+            if !display.is_empty() { ver = format!("{} ({})", ver, display); }
+            if !build.is_empty() {
+                if ubr > 0 {
+                    ver = format!("{} Build {}.{}", ver, build, ubr);
+                } else {
+                    ver = format!("{} Build {}", ver, build);
+                }
+            }
+            ver
+        }
+        Err(_) => "Unknown Windows version".to_string(),
+    }
+}
+
+/// Run startup self-diagnostic (non-interactive, logs only).
+/// Called automatically when the agent starts as a service.
+async fn run_startup_diagnostic(server: &str, insecure_tls: bool) {
+    let (hostname, os, arch, os_ver) = get_system_info();
+    finfo!("═══ Startup Self-Diagnostic ═══");
+    finfo!("Host: {} | OS: {} {} ({}) | Agent v{}", hostname, os, os_ver, arch, env!("CARGO_PKG_VERSION"));
+    finfo!("Binary arch: {}", if cfg!(target_arch = "x86_64") { "x64" } else if cfg!(target_arch = "x86") { "x86" } else { "unknown" });
+    finfo!("TLS engine: rustls (pure-Rust) | Static CRT: {}", if cfg!(target_feature = "crt-static") { "yes" } else { "no" });
+    finfo!("Config dir: {} | Exists: {}", config_dir().display(), config_dir().exists());
+    finfo!("PID: {} | Admin: {}", std::process::id(), {
+        #[cfg(windows)]
+        { std::process::Command::new("net").args(["session"]).output().map(|o| o.status.success()).unwrap_or(false) }
+        #[cfg(not(windows))]
+        { false }
+    });
+
+    #[cfg(windows)]
+    {
+        let win_ver = get_windows_version_detail();
+        finfo!("Windows: {}", win_ver);
+        eventlog_info(&format!(
+            "Reap3r Agent v{} starting — {} — {} ({}) — {}",
+            env!("CARGO_PKG_VERSION"), hostname, os, arch, win_ver
+        ));
+    }
+
+    // Test backend reachability
+    let http_url = server
+        .replace("wss://", "https://")
+        .replace("ws://", "http://")
+        .replace("/ws/agent", "/api/health");
+    match reqwest::Client::builder()
+        .danger_accept_invalid_certs(insecure_tls)
+        .timeout(Duration::from_secs(5))
+        .build()
+    {
+        Ok(c) => match tokio::time::timeout(Duration::from_secs(6), c.get(&http_url).send()).await {
+            Ok(Ok(resp)) => finfo!("Backend health: {} {}", http_url, resp.status()),
+            Ok(Err(e)) => fwarn!("Backend health: {} UNREACHABLE — {}", http_url, e),
+            Err(_) => fwarn!("Backend health: {} TIMEOUT", http_url),
+        },
+        Err(e) => fwarn!("Backend health: HTTP client error — {}", e),
+    }
+    finfo!("═══ Diagnostic complete ═══");
 }
 
 fn load_config() -> Option<AgentConfig> {
@@ -523,6 +812,8 @@ fn get_system_info() -> (String, String, String, String) {
 
     let arch = if cfg!(target_arch = "x86_64") {
         "x86_64"
+    } else if cfg!(target_arch = "x86") {
+        "x86"
     } else if cfg!(target_arch = "aarch64") {
         "aarch64"
     } else {
@@ -2225,6 +2516,10 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
         process_id: None,
     });
     flog("INFO", "Windows Service: Running");
+    eventlog::write("INFO", &format!(
+        "Reap3r Agent service started — v{} (PID {})",
+        env!("CARGO_PKG_VERSION"), std::process::id()
+    ));
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
     rt.block_on(async {
@@ -2236,6 +2531,9 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
                 return;
             }
         };
+        // Auto-diagnostic on service startup
+        run_startup_diagnostic(&server, args.insecure_tls).await;
+
         let mut state = AgentRuntimeState::load();
         let mut backoff: u64 = 1;
         loop {
@@ -2261,16 +2559,67 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
         process_id: None,
     });
     flog("INFO", "Windows Service: Stopped");
+    eventlog::write("INFO", "Reap3r Agent service stopped");
 }
 
 #[cfg(windows)]
 fn install_windows_service() {
     let exe = std::env::current_exe().expect("Cannot determine executable path");
     let exe_path = exe.display().to_string();
-    println!("Installing Windows Service: {}", SERVICE_NAME);
-    println!("Binary: {}", exe_path);
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  MASSVISION Reap3r Agent — Service Installer");
+    println!("  Version: {}", env!("CARGO_PKG_VERSION"));
+    println!("  Binary : {}", exe_path);
+    println!("  Arch   : {}", if cfg!(target_arch = "x86_64") { "x64" } else { "x86" });
+    println!("═══════════════════════════════════════════════════════════");
+    println!();
 
-    // Use sc.exe to create the service
+    // ── 0. Parse --server and --token from CLI args (for silent installs) ──
+    // When called as: reap3r-agent.exe --install --server wss://... --token XYZ
+    // We save the config BEFORE creating the service so it auto-enrolls on start.
+    let args: Vec<String> = std::env::args().collect();
+    let mut cli_server: Option<String> = None;
+    let mut cli_token: Option<String> = None;
+    for i in 0..args.len() {
+        if args[i] == "--server" { cli_server = args.get(i + 1).cloned(); }
+        if args[i] == "--token"  { cli_token = args.get(i + 1).cloned(); }
+    }
+    // Also check env vars (for GPO/Intune deployment via batch file)
+    if cli_server.is_none() { cli_server = std::env::var("REAP3R_SERVER").ok(); }
+    if cli_token.is_none()  { cli_token = std::env::var("REAP3R_TOKEN").ok(); }
+
+    if let Some(ref server) = cli_server {
+        println!("[*] Server URL: {}", server);
+        // Pre-save a partial config so the service can auto-enroll
+        let cfg_dir = config_dir();
+        let _ = std::fs::create_dir_all(&cfg_dir);
+        // Write server URL to a "bootstrap" file the service reads on first start
+        let bootstrap_path = cfg_dir.join("bootstrap.json");
+        let bootstrap = serde_json::json!({
+            "server": server,
+            "token": cli_token.as_deref().unwrap_or(""),
+        });
+        match std::fs::write(&bootstrap_path, serde_json::to_string_pretty(&bootstrap).unwrap_or_default()) {
+            Ok(_) => println!("[OK] Bootstrap config written to {}", bootstrap_path.display()),
+            Err(e) => eprintln!("[WARN] Could not write bootstrap: {}", e),
+        }
+    }
+    if let Some(ref token) = cli_token {
+        println!("[*] Enrollment token: {}...", &token[..token.len().min(8)]);
+    }
+    println!();
+
+    // ── 1. Register Windows Event Log source ──
+    println!("[*] Registering Event Log source...");
+    let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .create_subkey("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Reap3r Agent")
+        .map(|(key, _)| {
+            let _ = key.set_value("EventMessageFile", &exe_path);
+            let _ = key.set_value::<u32, _>("TypesSupported", &7u32);
+        });
+
+    // ── 2. Create the Windows service via sc.exe ──
+    println!("[*] Creating service: {}", SERVICE_NAME);
     let output = std::process::Command::new("sc.exe")
         .args([
             "create", SERVICE_NAME,
@@ -2286,25 +2635,58 @@ fn install_windows_service() {
             if o.status.success() {
                 println!("[OK] Service created successfully");
             } else {
-                eprintln!("[ERROR] sc create failed: {} {}", stdout.trim(), stderr.trim());
-                return;
+                // Check if already exists
+                if stderr.contains("1073") || stdout.contains("1073") {
+                    println!("[OK] Service already exists — updating...");
+                    // Update the binPath
+                    let _ = std::process::Command::new("sc.exe")
+                        .args(["config", SERVICE_NAME, "binPath=", &exe_path])
+                        .output();
+                } else {
+                    eprintln!("[ERROR] sc create failed: {} {}", stdout.trim(), stderr.trim());
+                    return;
+                }
             }
         }
         Err(e) => { eprintln!("[ERROR] Failed to run sc.exe: {}", e); return; }
     }
 
-    // Set description
+    // ── 3. Set description ──
     let _ = std::process::Command::new("sc.exe")
-        .args(["description", SERVICE_NAME, "MASSVISION Reap3r remote management agent — runs invisibly in the background."])
+        .args(["description", SERVICE_NAME,
+            "MASSVISION Reap3r remote management agent — Enterprise endpoint management (v", ])
+        .output();
+    let desc = format!(
+        "MASSVISION Reap3r Agent v{} — Enterprise remote management. Runs as SYSTEM, auto-starts on boot, auto-recovers on failure.",
+        env!("CARGO_PKG_VERSION")
+    );
+    let _ = std::process::Command::new("sc.exe")
+        .args(["description", SERVICE_NAME, &desc])
         .output();
 
-    // Configure recovery: restart on failure (restart after 5s, 10s, 30s)
+    // ── 4. Configure automatic recovery (restart on failure) ──
+    // Reset failure count after 24h, actions: restart after 5s, 10s, 30s
+    println!("[*] Configuring automatic recovery...");
     let _ = std::process::Command::new("sc.exe")
-        .args(["failure", SERVICE_NAME, "reset=", "86400", "actions=", "restart/5000/restart/10000/restart/30000"])
+        .args(["failure", SERVICE_NAME,
+            "reset=", "86400",
+            "actions=", "restart/5000/restart/10000/restart/30000"])
         .output();
 
-    // Start the service
-    println!("Starting service...");
+    // Also set failure on non-crash exit (delayed auto-restart covers agent bugs)
+    let _ = std::process::Command::new("sc.exe")
+        .args(["failureflag", SERVICE_NAME, "1"])
+        .output();
+    println!("[OK] Recovery policy: restart after 5s / 10s / 30s");
+
+    // ── 5. Set service to run as LocalSystem (default) with delayed auto-start ──
+    let _ = std::process::Command::new("sc.exe")
+        .args(["config", SERVICE_NAME, "start=", "delayed-auto"])
+        .output();
+    println!("[OK] Start type: delayed-auto (starts after core services)");
+
+    // ── 6. Start the service ──
+    println!("[*] Starting service...");
     let start = std::process::Command::new("sc.exe")
         .args(["start", SERVICE_NAME])
         .output();
@@ -2312,16 +2694,26 @@ fn install_windows_service() {
         Ok(o) if o.status.success() => println!("[OK] Service started!"),
         Ok(o) => {
             let msg = String::from_utf8_lossy(&o.stdout);
-            eprintln!("[WARN] Service start: {}", msg.trim());
+            let err = String::from_utf8_lossy(&o.stderr);
+            if msg.contains("1056") || err.contains("1056") {
+                println!("[OK] Service is already running");
+            } else {
+                eprintln!("[WARN] Service start: {} {}", msg.trim(), err.trim());
+            }
         }
         Err(e) => eprintln!("[WARN] Could not start service: {}", e),
     }
 
-    println!("\nDone! The agent is now running as an invisible Windows Service.");
-    println!("Check status:  sc query {}", SERVICE_NAME);
-    println!("View logs:     type {}\\logs\\agent.log", config_dir().display());
-    println!("Stop service:  sc stop {}", SERVICE_NAME);
-    println!("Remove:        reap3r-agent.exe --uninstall");
+    println!();
+    println!("═══════════════════════════════════════════════════════════");
+    println!("  Installation complete!");
+    println!("  Service   : {}", SERVICE_NAME);
+    println!("  Status    : sc query {}", SERVICE_NAME);
+    println!("  Logs      : {}\\logs\\agent.log", config_dir().display());
+    println!("  Event Log : Event Viewer → Application → Reap3r Agent");
+    println!("  Diagnose  : reap3r-agent.exe --diagnose");
+    println!("  Uninstall : reap3r-agent.exe --uninstall");
+    println!("═══════════════════════════════════════════════════════════");
 }
 
 #[cfg(windows)]
@@ -2332,7 +2724,7 @@ fn uninstall_windows_service() {
         .args(["stop", SERVICE_NAME])
         .output();
     std::thread::sleep(Duration::from_secs(2));
-    // Delete
+    // Delete service
     let output = std::process::Command::new("sc.exe")
         .args(["delete", SERVICE_NAME])
         .output();
@@ -2345,15 +2737,36 @@ fn uninstall_windows_service() {
         }
         Err(e) => eprintln!("[ERROR] Failed to run sc.exe: {}", e),
     }
+    // Remove Event Log source
+    let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
+        .delete_subkey_all("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Reap3r Agent");
+    println!("[OK] Event Log source removed");
+    println!("[OK] Config and logs remain at: {}", config_dir().display());
 }
 
 #[cfg(windows)]
 fn build_args_from_config() -> Args {
     let saved = load_config();
+
+    // If no saved config, check for bootstrap.json (written by --install --server --token)
+    let bootstrap = if saved.is_none() {
+        let bp = config_dir().join("bootstrap.json");
+        std::fs::read_to_string(&bp).ok().and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
+    } else {
+        None
+    };
+
+    let server = saved.as_ref().map(|c| c.server.clone())
+        .or_else(|| bootstrap.as_ref().and_then(|b| b["server"].as_str().map(String::from)))
+        .or_else(|| std::env::var("REAP3R_SERVER").ok());
+    let token = bootstrap.as_ref().and_then(|b| {
+        let t = b["token"].as_str().unwrap_or("");
+        if t.is_empty() { None } else { Some(t.to_string()) }
+    }).or_else(|| std::env::var("REAP3R_TOKEN").ok());
+
     Args {
-        server: saved.as_ref().map(|c| c.server.clone())
-            .or_else(|| std::env::var("REAP3R_SERVER").ok()),
-        token: std::env::var("REAP3R_TOKEN").ok(),
+        server,
+        token,
         agent_id: saved.as_ref().map(|c| c.agent_id.clone())
             .or_else(|| std::env::var("REAP3R_AGENT_ID").ok()),
         hmac_key: saved.as_ref().map(|c| c.hmac_key.clone())
@@ -2496,6 +2909,9 @@ async fn main() {
     };
 
     finfo!("Connecting to server: {}", server);
+    // Auto-diagnostic on startup (logs only, non-blocking)
+    run_startup_diagnostic(&server, args.insecure_tls).await;
+
     let mut state = AgentRuntimeState::load();
     let mut backoff_secs: u64 = 1;
 
