@@ -1142,25 +1142,66 @@ Remove-Item "$dir\rd_frame.dat" -ErrorAction SilentlyContinue
 Remove-Item $stop -ErrorAction SilentlyContinue
 "#;
 
-/// PowerShell one-liner to enumerate all displays and return JSON.
-/// Runs in user session so it can access the real monitor topology.
+/// PowerShell script to enumerate all displays and write JSON to __OUT_PATH__.
+/// Uses System.Windows.Forms.Screen (primary) with WMI fallback.
+/// Runs in user session via -File so it can access the real monitor topology.
 const RD_LIST_MONITORS_PS: &str = r#"
-Add-Type -AssemblyName System.Windows.Forms
-$monitors = @()
-$idx = 0
-foreach ($s in [System.Windows.Forms.Screen]::AllScreens) {
-    $monitors += [PSCustomObject]@{
-        index   = $idx
-        name    = $s.DeviceName
-        primary = $s.Primary
-        x       = $s.Bounds.X
-        y       = $s.Bounds.Y
-        width   = $s.Bounds.Width
-        height  = $s.Bounds.Height
+$outPath = '__OUT_PATH__'
+$errLog  = '__OUT_PATH__.log'
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    $screens = [System.Windows.Forms.Screen]::AllScreens
+    if ($screens -and $screens.Count -gt 0) {
+        $monitors = @()
+        $idx = 0
+        foreach ($s in $screens) {
+            $monitors += [PSCustomObject]@{
+                index   = $idx
+                name    = $s.DeviceName
+                primary = [bool]$s.Primary
+                x       = [int]$s.Bounds.X
+                y       = [int]$s.Bounds.Y
+                width   = [int]$s.Bounds.Width
+                height  = [int]$s.Bounds.Height
+            }
+            $idx++
+        }
+        $json = $monitors | ConvertTo-Json -Compress
+        if ($monitors.Count -eq 1) { $json = "[$json]" }
+        [IO.File]::WriteAllText($outPath, $json)
+        exit 0
     }
-    $idx++
+} catch {
+    $_ | Out-File $errLog -Append
 }
-$monitors | ConvertTo-Json -Compress
+# Fallback: WMI video controllers (no position info but at least detects count)
+try {
+    $vcs = Get-CimInstance Win32_VideoController -ErrorAction Stop |
+           Where-Object { $_.CurrentHorizontalResolution -gt 0 }
+    if ($vcs) {
+        $monitors = @(); $idx = 0
+        foreach ($v in @($vcs)) {
+            $monitors += [PSCustomObject]@{
+                index   = $idx
+                name    = $v.Name
+                primary = ($idx -eq 0)
+                x       = 0
+                y       = 0
+                width   = [int]$v.CurrentHorizontalResolution
+                height  = [int]$v.CurrentVerticalResolution
+            }
+            $idx++
+        }
+        $json = $monitors | ConvertTo-Json -Compress
+        if ($monitors.Count -eq 1) { $json = "[$json]" }
+        [IO.File]::WriteAllText($outPath, $json)
+        exit 0
+    }
+} catch {
+    $_ | Out-File $errLog -Append
+}
+# Last resort: single default monitor
+[IO.File]::WriteAllText($outPath, '[{"index":0,"name":"DISPLAY1","primary":true,"x":0,"y":0,"width":1920,"height":1080}]')
 "#;
 
 // ── Windows FFI for launching a process in the interactive user session ───
@@ -1346,40 +1387,42 @@ fn rd_signal_stop() {
 async fn list_monitors() -> Result<serde_json::Value, String> {
     finfo!("Enumerating monitors...");
 
-    // Write the monitor enumeration script to a temp file
+    // Prepare output path and write the script with embedded output path
+    let out_path = config_dir().join("rd_monitors.json");
     let script_path = config_dir().join("rd_list_monitors.ps1");
-    std::fs::write(&script_path, RD_LIST_MONITORS_PS)
+    let script_content = RD_LIST_MONITORS_PS
+        .replace("__OUT_PATH__", &out_path.display().to_string().replace('\\', "\\\\"));
+    std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Write list_monitors script: {}", e))?;
+    let _ = std::fs::remove_file(&out_path);
 
     // Try to run in user session first (needed when running as service in Session 0)
     let output = {
         #[cfg(windows)]
         {
-            // Write a wrapper that captures output to file since CreateProcessAsUserW
-            // doesn't give us stdout directly
-            let out_path = config_dir().join("rd_monitors.json");
-            let wrapper = format!(
-                "powershell.exe -NoProfile -ExecutionPolicy Bypass -Command \"& {{ {} }} | Out-File -FilePath '{}' -Encoding utf8 -NoNewline\"",
-                RD_LIST_MONITORS_PS.replace('"', "`\""),
-                out_path.display()
+            // Use -File like the RD capture does (much more reliable than inline -Command)
+            let cmd = format!(
+                "powershell.exe -WindowStyle Hidden -NoProfile -ExecutionPolicy Bypass -File \"{}\"",
+                script_path.display()
             );
-            let _ = std::fs::remove_file(&out_path);
-
-            match user_session::launch_in_user_session(&wrapper) {
+            match user_session::launch_in_user_session(&cmd) {
                 Ok(pid) => {
                     finfo!("list_monitors: launched in user session (PID {})", pid);
-                    // Wait for output file to appear (max 5s)
+                    // Wait for output file to appear (max 10s — Add-Type can be slow)
                     let mut attempts = 0;
                     loop {
                         tokio::time::sleep(Duration::from_millis(300)).await;
                         attempts += 1;
                         if out_path.exists() {
                             // Wait a bit more for write to complete
-                            tokio::time::sleep(Duration::from_millis(200)).await;
+                            tokio::time::sleep(Duration::from_millis(300)).await;
                             break;
                         }
-                        if attempts > 16 {
-                            return Err("Timeout waiting for monitor list output".into());
+                        if attempts > 33 {
+                            // Check if there's an error log
+                            let err_log = config_dir().join("rd_monitors.json.log");
+                            let err_msg = std::fs::read_to_string(&err_log).unwrap_or_default();
+                            return Err(format!("Timeout waiting for monitor list output. Errors: {}", err_msg));
                         }
                     }
                     std::fs::read_to_string(&out_path)
@@ -1387,13 +1430,19 @@ async fn list_monitors() -> Result<serde_json::Value, String> {
                 }
                 Err(e) => {
                     fwarn!("list_monitors: user session failed: {}, trying local", e);
-                    // Fallback: run locally
+                    // Fallback: run locally with -File too
                     let child = tokio::process::Command::new("powershell")
-                        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", RD_LIST_MONITORS_PS])
+                        .args(["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", &script_path.display().to_string()])
                         .output()
                         .await
                         .map_err(|e| format!("Run list_monitors locally: {}", e))?;
-                    String::from_utf8_lossy(&child.stdout).to_string()
+                    // The script writes to file, but if it also printed, grab stdout
+                    if out_path.exists() {
+                        std::fs::read_to_string(&out_path)
+                            .map_err(|e| format!("Read monitors output: {}", e))?
+                    } else {
+                        String::from_utf8_lossy(&child.stdout).to_string()
+                    }
                 }
             }
         }
