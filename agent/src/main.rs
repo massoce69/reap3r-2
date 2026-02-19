@@ -3108,11 +3108,11 @@ fn install_windows_service() {
             }
             Ok(status) => {
                 eprintln!("[ERROR] Enrollment command failed with exit code {:?}", status.code());
-                return;
+                std::process::exit(1);
             }
             Err(e) => {
                 eprintln!("[ERROR] Failed to run enrollment command: {}", e);
-                return;
+                std::process::exit(1);
             }
         }
     } else if let Some(ref server) = cli_server {
