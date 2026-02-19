@@ -3,20 +3,24 @@ import { useEffect, useState } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, Modal, TabBar } from '@/components/ui';
 import { api } from '@/lib/api';
+import { useToastHelpers } from '@/lib/toast';
+import { exportToCSV } from '@/lib/export';
 import {
   Users, ShieldCheck, Key, ClipboardList, UserX, UserCheck, Plus,
-  Settings, Shield, Clock, QrCode, Trash2
+  Settings, Shield, Clock, QrCode, Trash2, Search, FileDown, RefreshCw,
 } from 'lucide-react';
 
 type Tab = 'users' | 'teams' | 'policies' | 'logins';
 
 export default function AdminPage() {
+  const toast = useToastHelpers();
   const [tab, setTab] = useState<Tab>('users');
   const [users, setUsers] = useState<any[]>([]);
   const [teams, setTeams] = useState<any[]>([]);
   const [policies, setPolicies] = useState<any[]>([]);
   const [logins, setLogins] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
+  const [userSearch, setUserSearch] = useState('');
 
   // Create modals
   const [showCreateUser, setShowCreateUser] = useState(false);
@@ -50,18 +54,23 @@ export default function AdminPage() {
     else loadLogins();
   }, [tab]);
 
-  const toggleSuspend = async (u: any) => { await api.admin.users.suspend(u.id, !u.is_suspended); loadUsers(); };
+  const toggleSuspend = async (u: any) => {
+    try { await api.admin.users.suspend(u.id, !u.is_suspended); toast.success(u.is_suspended ? 'User activated' : 'User suspended'); loadUsers(); }
+    catch (err: any) { toast.error('Failed', err.message); }
+  };
 
   const createTeam = async () => {
     if (!teamName) return;
-    await api.admin.teams.create({ name: teamName, description: teamDesc });
-    setShowCreateTeam(false); setTeamName(''); setTeamDesc(''); loadTeams();
+    try { await api.admin.teams.create({ name: teamName, description: teamDesc }); toast.success('Team created');
+      setShowCreateTeam(false); setTeamName(''); setTeamDesc(''); loadTeams();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const createUser = async () => {
     if (!newUserEmail || !newUserPassword) return;
-    await api.admin.users.create({ email: newUserEmail, password: newUserPassword, role: newUserRole });
-    setShowCreateUser(false); setNewUserEmail(''); setNewUserPassword(''); setNewUserRole('user'); loadUsers();
+    try { await api.admin.users.create({ email: newUserEmail, password: newUserPassword, role: newUserRole }); toast.success('User created');
+      setShowCreateUser(false); setNewUserEmail(''); setNewUserPassword(''); setNewUserRole('user'); loadUsers();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const openSessions = async (user: any) => {
@@ -71,14 +80,16 @@ export default function AdminPage() {
   };
 
   const revokeSession = async (sessionId: string) => {
-    await api.admin.sessions.revoke(sessionId);
-    if (selectedUser) openSessions(selectedUser);
+    try { await api.admin.sessions.revoke(sessionId); toast.success('Session revoked');
+      if (selectedUser) openSessions(selectedUser);
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const revokeAllSessions = async () => {
     if (!selectedUser) return;
-    await api.admin.users.revokeAllSessions(selectedUser.id);
-    setSessions([]); setShowSessions(false);
+    try { await api.admin.users.revokeAllSessions(selectedUser.id); toast.success('All sessions revoked');
+      setSessions([]); setShowSessions(false);
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const openMFA = async (user: any) => {
@@ -92,9 +103,12 @@ export default function AdminPage() {
 
   const toggleMFA = async (enable: boolean) => {
     if (!selectedUser) return;
-    if (enable) await api.admin.users.enableMFA(selectedUser.id);
-    else await api.admin.users.disableMFA(selectedUser.id);
-    setShowMFA(false); loadUsers();
+    try {
+      if (enable) await api.admin.users.enableMFA(selectedUser.id);
+      else await api.admin.users.disableMFA(selectedUser.id);
+      toast.success(`MFA ${enable ? 'enabled' : 'disabled'}`);
+      setShowMFA(false); loadUsers();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const openRoleChange = async (user: any) => {
@@ -105,9 +119,30 @@ export default function AdminPage() {
 
   const changeRole = async () => {
     if (!selectedUser || !targetRole) return;
-    await api.admin.users.changeRole(selectedUser.id, targetRole);
-    setShowRoleChange(false); loadUsers();
+    try { await api.admin.users.changeRole(selectedUser.id, targetRole); toast.success('Role changed');
+      setShowRoleChange(false); loadUsers();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
+
+  const handleExportUsers = () => {
+    exportToCSV(filteredUsers, 'users', [
+      { key: 'email', label: 'Email' }, { key: 'role', label: 'Role' },
+      { key: 'mfa_enabled', label: 'MFA' }, { key: 'is_suspended', label: 'Suspended' },
+    ]);
+    toast.info('Exported', `${filteredUsers.length} users exported`);
+  };
+
+  const handleExportLogins = () => {
+    exportToCSV(logins, 'login-events', [
+      { key: 'email', label: 'Email' }, { key: 'ip_address', label: 'IP' },
+      { key: 'success', label: 'Success' }, { key: 'created_at', label: 'Date' },
+    ]);
+    toast.info('Exported', `${logins.length} login events exported`);
+  };
+
+  const filteredUsers = userSearch
+    ? users.filter(u => u.email?.toLowerCase().includes(userSearch.toLowerCase()) || u.role?.toLowerCase().includes(userSearch.toLowerCase()))
+    : users;
 
   const tabs: { key: Tab; label: string }[] = [
     { key: 'users', label: 'Users' },
@@ -119,25 +154,45 @@ export default function AdminPage() {
   return (
     <>
       <TopBar title="Administration" actions={
-        tab === 'users' ? (
-          <Button size="sm" onClick={() => setShowCreateUser(true)}><Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />Create User</Button>
-        ) : tab === 'teams' ? (
-          <Button size="sm" onClick={() => setShowCreateTeam(true)}><Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />Create Team</Button>
-        ) : undefined
+        <div className="flex items-center gap-2">
+          {tab === 'users' && (
+            <>
+              <Button size="sm" variant="secondary" onClick={handleExportUsers}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
+              <Button size="sm" onClick={() => setShowCreateUser(true)}><Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />Create User</Button>
+            </>
+          )}
+          {tab === 'teams' && (
+            <Button size="sm" onClick={() => setShowCreateTeam(true)}><Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />Create Team</Button>
+          )}
+          {tab === 'logins' && (
+            <Button size="sm" variant="secondary" onClick={handleExportLogins}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
+          )}
+          <button onClick={() => { if(tab==='users') loadUsers(); else if(tab==='teams') loadTeams(); else if(tab==='policies') loadPolicies(); else loadLogins(); }}
+            className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all"><RefreshCw style={{ width: '13px', height: '13px' }} /></button>
+        </div>
       } />
       <div className="p-6 space-y-4 animate-fade-in">
         <TabBar tabs={tabs} active={tab} onChange={(k) => setTab(k as Tab)} />
+
+        {tab === 'users' && (
+          <Card className="!py-3 !px-4 flex items-center gap-3">
+            <Search className="text-reap3r-muted shrink-0" style={{ width: '12px', height: '12px' }} />
+            <input placeholder="Search users by email or role..." value={userSearch} onChange={e => setUserSearch(e.target.value)}
+              className="flex-1 bg-transparent border-none text-xs text-white placeholder:text-reap3r-muted/40 focus:outline-none" />
+            <span className="text-[10px] text-reap3r-muted font-mono">{filteredUsers.length} users</span>
+          </Card>
+        )}
 
         {loading ? (
           <div className="space-y-3">
             {[...Array(4)].map((_, i) => <div key={i} className="bg-reap3r-card border border-reap3r-border rounded-xl h-16 animate-pulse" />)}
           </div>
         ) : tab === 'users' ? (
-          users.length === 0 ? (
+          filteredUsers.length === 0 ? (
             <EmptyState icon={<Users style={{ width: '28px', height: '28px' }} />} title="No users" description="Create a user to get started." />
           ) : (
             <div className="space-y-2">
-              {users.map(u => (
+              {filteredUsers.map(u => (
                 <Card key={u.id} className="flex items-center justify-between !py-3 group hover:border-reap3r-border-light transition-all">
                   <div className="flex items-center gap-3">
                     <div className="w-9 h-9 rounded-xl bg-white/6 border border-white/10 flex items-center justify-center text-[12px] font-bold text-white">

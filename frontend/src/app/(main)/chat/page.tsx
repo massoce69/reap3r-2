@@ -1,11 +1,13 @@
 'use client';
-import { useEffect, useState, useRef } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Button, EmptyState } from '@/components/ui';
 import { api } from '@/lib/api';
-import { MessageSquare, Plus, Send, Hash } from 'lucide-react';
+import { useToastHelpers } from '@/lib/toast';
+import { MessageSquare, Plus, Send, Hash, Trash2 } from 'lucide-react';
 
 export default function ChatPage() {
+  const toast = useToastHelpers();
   const [channels, setChannels] = useState<any[]>([]);
   const [activeChannel, setActiveChannel] = useState<string | null>(null);
   const [messages, setMessages] = useState<any[]>([]);
@@ -14,6 +16,7 @@ export default function ChatPage() {
   const [showCreateChannel, setShowCreateChannel] = useState(false);
   const [loading, setLoading] = useState(true);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadChannels = () => {
     api.chat.channels.list().then(r => {
@@ -23,29 +26,42 @@ export default function ChatPage() {
     }).catch(() => setLoading(false));
   };
 
-  const loadMessages = (channelId: string) => {
+  const loadMessages = useCallback((channelId: string) => {
     api.chat.channels.messages(channelId, { limit: '100' }).then(r => {
       setMessages(r.data.reverse());
       setTimeout(() => messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' }), 100);
     });
-  };
+  }, []);
 
   useEffect(() => { loadChannels(); }, []);
-  useEffect(() => { if (activeChannel) loadMessages(activeChannel); }, [activeChannel]);
+  useEffect(() => {
+    if (activeChannel) {
+      loadMessages(activeChannel);
+      // Auto-poll every 3 seconds for real-time chat
+      if (pollRef.current) clearInterval(pollRef.current);
+      pollRef.current = setInterval(() => loadMessages(activeChannel), 3000);
+    }
+    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  }, [activeChannel, loadMessages]);
 
   const sendMessage = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newMessage.trim() || !activeChannel) return;
-    await api.chat.channels.sendMessage(activeChannel, { body: newMessage.trim() });
-    setNewMessage('');
-    loadMessages(activeChannel);
+    try {
+      await api.chat.channels.sendMessage(activeChannel, { body: newMessage.trim() });
+      setNewMessage('');
+      loadMessages(activeChannel);
+    } catch (err: any) { toast.error('Send failed', err.message); }
   };
 
   const createChannel = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!newChannelName.trim()) return;
-    await api.chat.channels.create({ name: newChannelName.trim() });
-    setNewChannelName(''); setShowCreateChannel(false); loadChannels();
+    try {
+      await api.chat.channels.create({ name: newChannelName.trim() });
+      toast.success('Channel created');
+      setNewChannelName(''); setShowCreateChannel(false); loadChannels();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const activeChannelData = channels.find(c => c.id === activeChannel);

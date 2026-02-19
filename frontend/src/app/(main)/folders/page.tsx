@@ -1,41 +1,49 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, EmptyState, Modal } from '@/components/ui';
 import { api } from '@/lib/api';
-import { FolderOpen, Plus, Pencil, Trash2, Monitor } from 'lucide-react';
+import { useToastHelpers } from '@/lib/toast';
+import { exportToCSV } from '@/lib/export';
+import { FolderOpen, Plus, Pencil, Trash2, Monitor, Search, FileDown, RefreshCw } from 'lucide-react';
 
 export default function FoldersPage() {
+  const toast = useToastHelpers();
   const [folders, setFolders] = useState<any[]>([]);
   const [companies, setCompanies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ name: '', company_id: '', color: '#6b6b6b', description: '' });
   const [editId, setEditId] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
+  const [companyFilter, setCompanyFilter] = useState('');
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     Promise.all([api.folders.list(), api.companies.list()])
       .then(([f, c]) => { setFolders(f.data); setCompanies(c.data); })
       .catch(() => {})
       .finally(() => setLoading(false));
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const payload = { ...form, company_id: form.company_id || undefined };
-    if (editId) await api.folders.update(editId, payload);
-    else await api.folders.create(payload);
-    setShowModal(false); setEditId(null);
-    setForm({ name: '', company_id: '', color: '#6b6b6b', description: '' });
-    load();
+    try {
+      const payload = { ...form, company_id: form.company_id || undefined };
+      if (editId) { await api.folders.update(editId, payload); toast.success('Folder updated'); }
+      else { await api.folders.create(payload); toast.success('Folder created'); }
+      setShowModal(false); setEditId(null);
+      setForm({ name: '', company_id: '', color: '#6b6b6b', description: '' });
+      load();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this folder?')) return;
-    await api.folders.delete(id); load();
+    try { await api.folders.delete(id); toast.success('Folder deleted'); load(); }
+    catch (err: any) { toast.error('Delete failed', err.message); }
   };
 
   const startEdit = (f: any) => {
@@ -44,32 +52,62 @@ export default function FoldersPage() {
     setShowModal(true);
   };
 
+  const handleExport = () => {
+    exportToCSV(filtered, 'folders', [
+      { key: 'name', label: 'Name' }, { key: 'company_name', label: 'Company' },
+      { key: 'agent_count', label: 'Agents' }, { key: 'description', label: 'Description' },
+    ]);
+    toast.info('Exported', `${filtered.length} folders exported`);
+  };
+
+  const filtered = folders.filter(f => {
+    if (search && !f.name?.toLowerCase().includes(search.toLowerCase()) && !f.description?.toLowerCase().includes(search.toLowerCase())) return false;
+    if (companyFilter && f.company_id !== companyFilter) return false;
+    return true;
+  });
+
   return (
     <>
       <TopBar
         title="Folders"
         actions={
-          <Button size="sm" onClick={() => { setEditId(null); setForm({ name: '', company_id: '', color: '#6b6b6b', description: '' }); setShowModal(true); }}>
-            <Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />New Folder
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={handleExport}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
+            <Button size="sm" onClick={() => { setEditId(null); setForm({ name: '', company_id: '', color: '#6b6b6b', description: '' }); setShowModal(true); }}>
+              <Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />New Folder
+            </Button>
+            <button onClick={load} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all"><RefreshCw style={{ width: '13px', height: '13px' }} /></button>
+          </div>
         }
       />
-      <div className="p-6 animate-fade-in">
+      <div className="p-6 animate-fade-in space-y-4">
+        {/* Search & Filters */}
+        <Card className="!py-3 !px-4 flex items-center gap-3 flex-wrap">
+          <Search className="text-reap3r-muted shrink-0" style={{ width: '12px', height: '12px' }} />
+          <input placeholder="Search folders..." value={search} onChange={e => setSearch(e.target.value)}
+            className="flex-1 min-w-[120px] bg-transparent border-none text-xs text-white placeholder:text-reap3r-muted/40 focus:outline-none" />
+          <select value={companyFilter} onChange={e => setCompanyFilter(e.target.value)}
+            className="px-2.5 py-1.5 bg-reap3r-surface border border-reap3r-border rounded-lg text-xs text-white focus:outline-none focus:ring-1 focus:ring-white/20">
+            <option value="">All companies</option>
+            {companies.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+          <span className="text-[10px] text-reap3r-muted font-mono">{filtered.length} folders</span>
+        </Card>
         {loading ? (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {[...Array(3)].map((_, i) => (
               <div key={i} className="bg-reap3r-card border border-reap3r-border rounded-xl p-6 h-32 animate-pulse" />
             ))}
           </div>
-        ) : folders.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <EmptyState
             icon={<FolderOpen style={{ width: '28px', height: '28px' }} />}
-            title="No folders yet"
+            title="No folders found"
             description="Create folders to group agents by project, environment, or team."
           />
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {folders.map(f => (
+            {filtered.map(f => (
               <Card key={f.id} className="group hover:border-reap3r-border-light transition-all duration-200">
                 <div className="flex items-start justify-between mb-3">
                   <div className="flex items-center gap-3">

@@ -4,7 +4,9 @@ import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, Skeleton, EmptyState } from '@/components/ui';
 import { api } from '@/lib/api';
 import { formatDate } from '@/lib/utils';
-import { ScrollText, Filter, RefreshCw, ChevronDown, ChevronRight, User, Monitor, Shield } from 'lucide-react';
+import { useToastHelpers } from '@/lib/toast';
+import { exportToCSV } from '@/lib/export';
+import { ScrollText, Filter, RefreshCw, ChevronDown, ChevronRight, User, Monitor, Shield, FileDown, ChevronLeft } from 'lucide-react';
 
 const actionVariant = (a: string): 'default' | 'success' | 'danger' | 'accent' | 'warning' => {
   if (a.includes('delete') || a.includes('revoke') || a.includes('suspend')) return 'danger';
@@ -21,6 +23,7 @@ const actionIcon = (a: string) => {
 };
 
 export default function AuditPage() {
+  const toast = useToastHelpers();
   const [logs, setLogs] = useState<any[]>([]);
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -45,12 +48,26 @@ export default function AuditPage() {
     return true;
   });
 
+  const handleExport = () => {
+    exportToCSV(filtered, 'audit-log', [
+      { key: 'action', label: 'Action' }, { key: 'resource_type', label: 'Resource' },
+      { key: 'resource_id', label: 'Resource ID' }, { key: 'user_id', label: 'User ID' },
+      { key: 'ip_address', label: 'IP' }, { key: 'created_at', label: 'Date' },
+    ]);
+    toast.info('Exported', `${filtered.length} audit entries exported`);
+  };
+
+  const totalPages = Math.ceil(total / 50);
+
   return (
     <>
       <TopBar title="Audit Log" actions={
-        <button onClick={load} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all">
-          <RefreshCw style={{ width: '13px', height: '13px' }} />
-        </button>
+        <div className="flex items-center gap-2">
+          <Button size="sm" variant="secondary" onClick={handleExport}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
+          <button onClick={load} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all">
+            <RefreshCw style={{ width: '13px', height: '13px' }} />
+          </button>
+        </div>
       } />
       <div className="p-6 space-y-4 animate-fade-in">
         {/* Filters */}
@@ -153,10 +170,17 @@ export default function AuditPage() {
 
           {total > 50 && (
             <div className="flex items-center justify-between px-5 py-3 border-t border-reap3r-border/60">
-              <span className="text-[10px] text-reap3r-muted font-mono">{total} total · page {page}</span>
-              <div className="flex gap-1.5">
-                <Button variant="ghost" size="sm" disabled={page === 1} onClick={() => setPage(p => p - 1)}>← Prev</Button>
-                <Button variant="ghost" size="sm" disabled={filtered.length < 50} onClick={() => setPage(p => p + 1)}>Next →</Button>
+              <span className="text-[10px] text-reap3r-muted font-mono">{total} total · Page {page} of {totalPages}</span>
+              <div className="flex gap-1 items-center">
+                <Button variant="ghost" size="sm" disabled={page === 1} onClick={() => setPage(1)}>First</Button>
+                <Button variant="ghost" size="sm" disabled={page === 1} onClick={() => setPage(p => p - 1)}>
+                  <ChevronLeft style={{ width: '12px', height: '12px' }} />
+                </Button>
+                <span className="text-[11px] text-white font-mono px-2">{page}</span>
+                <Button variant="ghost" size="sm" disabled={page >= totalPages} onClick={() => setPage(p => p + 1)}>
+                  <ChevronRight style={{ width: '12px', height: '12px' }} />
+                </Button>
+                <Button variant="ghost" size="sm" disabled={page >= totalPages} onClick={() => setPage(totalPages)}>Last</Button>
               </div>
             </div>
           )}

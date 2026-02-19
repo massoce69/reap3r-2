@@ -4,8 +4,11 @@ import Link from 'next/link';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState } from '@/components/ui';
 import { api } from '@/lib/api';
+import { useToastHelpers } from '@/lib/toast';
+import { exportToCSV } from '@/lib/export';
+import { useRealtimeRefresh, WS_ALERT_EVENTS } from '@/hooks/useRealtimeData';
 import {
-  Bell, BellOff, Check, CheckCheck, Clock, AlertTriangle, X, Filter,
+  Bell, BellOff, Check, CheckCheck, Clock, AlertTriangle, X, Filter, FileDown, RefreshCw,
 } from 'lucide-react';
 
 const severityVariant = (s: string): 'default' | 'success' | 'warning' | 'danger' | 'accent' => {
@@ -28,6 +31,7 @@ type StatusFilter = '' | 'open' | 'acknowledged' | 'snoozed' | 'resolved';
 type SeverityFilter = '' | 'critical' | 'high' | 'medium' | 'low';
 
 export default function AlertingPage() {
+  const toast = useToastHelpers();
   const [events, setEvents] = useState<any[]>([]);
   const [stats, setStats] = useState<any>(null);
   const [loading, setLoading] = useState(true);
@@ -56,20 +60,39 @@ export default function AlertingPage() {
   }, []);
 
   useEffect(() => { loadEvents(); loadStats(); }, [loadEvents, loadStats]);
+  useRealtimeRefresh(WS_ALERT_EVENTS, () => { loadEvents(); loadStats(); }, 1500);
 
   const handleAck = async (id: string) => {
-    await api.alerts.events.ack(id, actionNote || undefined);
-    setActionNote(''); loadEvents(); loadStats();
+    try {
+      await api.alerts.events.ack(id, actionNote || undefined);
+      toast.success('Alert acknowledged');
+      setActionNote(''); loadEvents(); loadStats();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const handleResolve = async (id: string) => {
-    await api.alerts.events.resolve(id, actionNote || undefined);
-    setActionNote(''); loadEvents(); loadStats();
+    try {
+      await api.alerts.events.resolve(id, actionNote || undefined);
+      toast.success('Alert resolved');
+      setActionNote(''); loadEvents(); loadStats();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const handleSnooze = async (id: string) => {
-    await api.alerts.events.snooze(id, snoozeMin, actionNote || undefined);
-    setActionNote(''); loadEvents(); loadStats();
+    try {
+      await api.alerts.events.snooze(id, snoozeMin, actionNote || undefined);
+      toast.success(`Alert snoozed for ${snoozeMin} min`);
+      setActionNote(''); loadEvents(); loadStats();
+    } catch (err: any) { toast.error('Failed', err.message); }
+  };
+
+  const handleExport = () => {
+    exportToCSV(events, 'alerts', [
+      { key: 'title', label: 'Title' }, { key: 'severity', label: 'Severity' },
+      { key: 'status', label: 'Status' }, { key: 'rule_name', label: 'Rule' },
+      { key: 'entity_type', label: 'Entity' }, { key: 'created_at', label: 'Created' },
+    ]);
+    toast.info('Exported', `${events.length} alerts exported`);
   };
 
   const openDetail = async (eventId: string) => {
@@ -82,11 +105,19 @@ export default function AlertingPage() {
       <TopBar
         title="Alerting"
         actions={
-          <Link href="/alerting/rules">
-            <Button size="sm" variant="secondary">
-              <Filter style={{ width: '12px', height: '12px', marginRight: '4px' }} />Manage Rules
-            </Button>
-          </Link>
+          <div className="flex items-center gap-2">
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-reap3r-success/10 border border-reap3r-success/20 rounded-lg">
+              <div className="w-1.5 h-1.5 rounded-full bg-reap3r-success animate-pulse" />
+              <span className="text-[10px] font-semibold text-reap3r-success">LIVE</span>
+            </div>
+            <Button size="sm" variant="secondary" onClick={handleExport}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
+            <Link href="/alerting/rules">
+              <Button size="sm" variant="secondary">
+                <Filter style={{ width: '12px', height: '12px', marginRight: '4px' }} />Manage Rules
+              </Button>
+            </Link>
+            <button onClick={() => { loadEvents(); loadStats(); }} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all"><RefreshCw style={{ width: '13px', height: '13px' }} /></button>
+          </div>
         }
       />
 

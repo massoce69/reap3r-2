@@ -31,9 +31,10 @@ export default async function jobRoutes(fastify: FastifyInstance) {
       `SELECT status, count(*)::int FROM jobs WHERE org_id = $1 GROUP BY status`,
       [orgId],
     );
-    const stats: Record<string, number> = { pending: 0, queued: 0, dispatched: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
+    const stats: Record<string, number> = { total: 0, pending: 0, queued: 0, dispatched: 0, running: 0, completed: 0, failed: 0, cancelled: 0 };
     for (const r of res.rows) {
       stats[r.status] = r.count;
+      stats.total += r.count;
     }
     return stats;
   });

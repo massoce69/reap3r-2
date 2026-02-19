@@ -3,9 +3,12 @@ import { useEffect, useState } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, TabBar, Modal } from '@/components/ui';
 import { api } from '@/lib/api';
+import { useToastHelpers } from '@/lib/toast';
+import { exportToCSV } from '@/lib/export';
+import { useRealtimeRefresh, WS_EDR_EVENTS } from '@/hooks/useRealtimeData';
 import {
   ShieldAlert, AlertTriangle, Eye, Bug, Siren, Network,
-  Shield, XCircle, CheckCircle, Plus,
+  Shield, XCircle, CheckCircle, Plus, FileDown, RefreshCw, Search,
 } from 'lucide-react';
 
 type Tab = 'events' | 'detections' | 'incidents';
@@ -17,6 +20,7 @@ const severityVariant = (s: string): 'default' | 'success' | 'warning' | 'danger
 };
 
 export default function EdrPage() {
+  const toast = useToastHelpers();
   const [tab, setTab] = useState<Tab>('detections');
   const [events, setEvents] = useState<any[]>([]);
   const [detections, setDetections] = useState<any[]>([]);
@@ -33,6 +37,8 @@ export default function EdrPage() {
   const [incidentTitle, setIncidentTitle] = useState('');
   const [incidentSeverity, setIncidentSeverity] = useState('medium');
   const [incidentDetectionIds, setIncidentDetectionIds] = useState<string[]>([]);
+  const [severityFilter, setSeverityFilter] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
 
   const loadData = () => {
     setLoading(true);
@@ -48,6 +54,7 @@ export default function EdrPage() {
 
   useEffect(() => { setPage(1); }, [tab]);
   useEffect(() => { loadData(); }, [tab, page]);
+  useRealtimeRefresh(WS_EDR_EVENTS, loadData, 2000);
 
   const selectDetection = (detection: any) => {
     setSelectedDetection(detection);
@@ -59,22 +66,40 @@ export default function EdrPage() {
   };
 
   const updateDetectionStatus = async (id: string, status: string) => {
-    await api.edr.updateDetection(id, { status });
-    loadData();
-    if (selectedDetection?.id === id) setSelectedDetection(null);
+    try {
+      await api.edr.updateDetection(id, { status });
+      toast.success(`Detection ${status}`);
+      loadData();
+      if (selectedDetection?.id === id) setSelectedDetection(null);
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const createIncident = async () => {
     if (!incidentTitle) return;
-    await api.edr.createIncident({ title: incidentTitle, severity: incidentSeverity, status: 'open', detection_ids: incidentDetectionIds });
-    setShowCreateIncident(false); setIncidentTitle(''); setIncidentDetectionIds([]);
-    setTab('incidents');
+    try {
+      await api.edr.createIncident({ title: incidentTitle, severity: incidentSeverity, status: 'open', detection_ids: incidentDetectionIds });
+      toast.success('Incident created');
+      setShowCreateIncident(false); setIncidentTitle(''); setIncidentDetectionIds([]);
+      setTab('incidents');
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const executeResponse = async () => {
     if (!responseTarget) return;
-    await api.edr.respond({ action: responseAction, target: responseTarget });
-    setShowResponseModal(false); setResponseTarget('');
+    try {
+      await api.edr.respond({ action: responseAction, target: responseTarget });
+      toast.success('Response executed');
+      setShowResponseModal(false); setResponseTarget('');
+    } catch (err: any) { toast.error('Response failed', err.message); }
+  };
+
+  const handleExport = () => {
+    const data = tab === 'events' ? events : tab === 'detections' ? detections : incidents;
+    exportToCSV(data, `edr-${tab}`, tab === 'incidents'
+      ? [{ key: 'title', label: 'Title' }, { key: 'severity', label: 'Severity' }, { key: 'status', label: 'Status' }, { key: 'created_at', label: 'Created' }]
+      : [{ key: 'rule_name', label: 'Rule' }, { key: 'severity', label: 'Severity' }, { key: 'status', label: 'Status' }, { key: 'agent_hostname', label: 'Agent' }, { key: 'created_at', label: 'Created' }]
+    );
+    toast.info('Exported', `${data.length} ${tab} exported`);
   };
 
   const tabs = [
@@ -88,13 +113,19 @@ export default function EdrPage() {
       <TopBar
         title="EDR / SOC"
         actions={
-          <div className="flex gap-2">
+          <div className="flex gap-2 items-center">
+            <div className="flex items-center gap-1.5 px-2 py-1 bg-reap3r-success/10 border border-reap3r-success/20 rounded-lg">
+              <div className="w-1.5 h-1.5 rounded-full bg-reap3r-success animate-pulse" />
+              <span className="text-[10px] font-semibold text-reap3r-success">LIVE</span>
+            </div>
+            <Button size="sm" variant="secondary" onClick={handleExport}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
             <Button size="sm" variant="secondary" onClick={() => setShowResponseModal(true)}>
               <Shield style={{ width: '12px', height: '12px', marginRight: '4px' }} />Response
             </Button>
             <Button size="sm" onClick={() => setShowCreateIncident(true)}>
               <Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />Incident
             </Button>
+            <button onClick={loadData} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all"><RefreshCw style={{ width: '13px', height: '13px' }} /></button>
           </div>
         }
       />

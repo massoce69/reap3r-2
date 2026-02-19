@@ -193,6 +193,39 @@ export default async function agentRoutes(fastify: FastifyInstance) {
     const version = process.env.AGENT_VERSION || '1.0.0';
     const results: any[] = [];
 
+    // Pre-compute binary paths and SHA256 hashes per OS/arch combo (cache outside loop)
+    const binaryCache = new Map<string, { path: string; sha256: string }>();
+    function resolveBinary(osFamily: string, arch: string): { path: string; sha256: string } | null {
+      const cacheKey = `${osFamily}/${arch}`;
+      if (binaryCache.has(cacheKey)) return binaryCache.get(cacheKey)!;
+
+      const binaryKey = `AGENT_BINARY_PATH_${osFamily.toUpperCase()}_${arch.toUpperCase()}`;
+      let binaryPath = process.env[binaryKey];
+      if (!binaryPath) {
+        const ext = osFamily === 'windows' ? '.exe' : '';
+        if (osFamily === 'windows') {
+          const crossPath = path.resolve(process.cwd(), `../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent${ext}`);
+          if (fs.existsSync(crossPath)) {
+            binaryPath = crossPath;
+          } else {
+            binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
+          }
+        } else {
+          binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
+        }
+      }
+
+      if (!fs.existsSync(binaryPath)) return null;
+
+      const hash = crypto.createHash('sha256');
+      const fileBytes = fs.readFileSync(binaryPath);
+      hash.update(fileBytes);
+      const sha256 = hash.digest('hex');
+      const entry = { path: binaryPath, sha256 };
+      binaryCache.set(cacheKey, entry);
+      return entry;
+    }
+
     for (const agent of agents) {
       try {
         // Determine binary OS family
@@ -202,34 +235,13 @@ export default async function agentRoutes(fastify: FastifyInstance) {
         else if (osLower.includes('darwin') || osLower.includes('mac')) osFamily = 'darwin';
         const arch = agent.arch || 'x86_64';
 
-        // Resolve binary and compute sha256
-        // Reuse the same logic: look for the binary on disk
-        const binaryKey = `AGENT_BINARY_PATH_${osFamily.toUpperCase()}_${arch.toUpperCase()}`;
-        let binaryPath = process.env[binaryKey];
-        if (!binaryPath) {
-          const ext = osFamily === 'windows' ? '.exe' : '';
-          if (osFamily === 'windows') {
-            const crossPath = path.resolve(process.cwd(), `../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent${ext}`);
-            if (fs.existsSync(crossPath)) {
-              binaryPath = crossPath;
-            } else {
-              binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
-            }
-          } else {
-            binaryPath = path.resolve(process.cwd(), `../agent/target/release/reap3r-agent${ext}`);
-          }
-        }
-
-        if (!fs.existsSync(binaryPath)) {
+        const binary = resolveBinary(osFamily, arch);
+        if (!binary) {
           results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'error', error: `Binary not found for ${osFamily}/${arch}` });
           continue;
         }
 
-        // Compute SHA256
-        const hash = crypto.createHash('sha256');
-        const fileBytes = await fs.promises.readFile(binaryPath);
-        hash.update(fileBytes);
-        const sha256 = hash.digest('hex');
+        const { sha256 } = binary;
 
         // Build download URL using the request's base URL
         const proto = (request.headers['x-forwarded-proto'] || request.protocol || 'https').toString().split(',')[0].trim();

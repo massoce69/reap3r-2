@@ -1,34 +1,41 @@
 'use client';
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useCallback } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, Modal } from '@/components/ui';
 import { api } from '@/lib/api';
-import { Building2, Plus, Pencil, Trash2, Monitor, Wifi } from 'lucide-react';
+import { useToastHelpers } from '@/lib/toast';
+import { exportToCSV } from '@/lib/export';
+import { Building2, Plus, Pencil, Trash2, Monitor, Wifi, Search, FileDown, RefreshCw } from 'lucide-react';
 
 export default function CompaniesPage() {
+  const toast = useToastHelpers();
   const [companies, setCompanies] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
   const [showModal, setShowModal] = useState(false);
   const [form, setForm] = useState({ name: '', notes: '' });
   const [editId, setEditId] = useState<string | null>(null);
+  const [search, setSearch] = useState('');
 
-  const load = () => {
+  const load = useCallback(() => {
     setLoading(true);
     api.companies.list().then(r => { setCompanies(r.data); }).catch(() => {}).finally(() => setLoading(false));
-  };
+  }, []);
 
-  useEffect(() => { load(); }, []);
+  useEffect(() => { load(); }, [load]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (editId) await api.companies.update(editId, form);
-    else await api.companies.create(form);
-    setShowModal(false); setEditId(null); setForm({ name: '', notes: '' }); load();
+    try {
+      if (editId) { await api.companies.update(editId, form); toast.success('Company updated'); }
+      else { await api.companies.create(form); toast.success('Company created'); }
+      setShowModal(false); setEditId(null); setForm({ name: '', notes: '' }); load();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this company and all associated data?')) return;
-    await api.companies.delete(id); load();
+    try { await api.companies.delete(id); toast.success('Company deleted'); load(); }
+    catch (err: any) { toast.error('Delete failed', err.message); }
   };
 
   const startEdit = (c: any) => {
@@ -39,21 +46,46 @@ export default function CompaniesPage() {
     setEditId(null); setForm({ name: '', notes: '' }); setShowModal(true);
   };
 
+  const handleExport = () => {
+    exportToCSV(filtered, 'companies', [
+      { key: 'name', label: 'Name' }, { key: 'notes', label: 'Notes' },
+      { key: 'agent_count', label: 'Agents' }, { key: 'online_count', label: 'Online' },
+    ]);
+    toast.info('Exported', `${filtered.length} companies exported`);
+  };
+
+  const filtered = search
+    ? companies.filter(c => c.name?.toLowerCase().includes(search.toLowerCase()) || c.notes?.toLowerCase().includes(search.toLowerCase()))
+    : companies;
+
   return (
     <>
       <TopBar
         title="Companies"
-        actions={<Button size="sm" onClick={openCreate}><Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />New Company</Button>}
+        actions={
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={handleExport}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
+            <Button size="sm" onClick={openCreate}><Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />New Company</Button>
+            <button onClick={load} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all"><RefreshCw style={{ width: '13px', height: '13px' }} /></button>
+          </div>
+        }
       />
 
-      <div className="p-6 animate-fade-in">
+      <div className="p-6 animate-fade-in space-y-4">
+        {/* Search */}
+        <Card className="!py-3 !px-4 flex items-center gap-3">
+          <Search className="text-reap3r-muted shrink-0" style={{ width: '12px', height: '12px' }} />
+          <input placeholder="Search companies..." value={search} onChange={e => setSearch(e.target.value)}
+            className="flex-1 bg-transparent border-none text-xs text-white placeholder:text-reap3r-muted/40 focus:outline-none" />
+          <span className="text-[10px] text-reap3r-muted font-mono">{filtered.length} companies</span>
+        </Card>
         {loading ? (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
             {[...Array(3)].map((_, i) => (
               <div key={i} className="bg-reap3r-card border border-reap3r-border rounded-xl p-6 h-32 animate-pulse" />
             ))}
           </div>
-        ) : companies.length === 0 ? (
+        ) : filtered.length === 0 ? (
           <EmptyState
             icon={<Building2 style={{ width: '28px', height: '28px' }} />}
             title="No companies yet"
@@ -61,7 +93,7 @@ export default function CompaniesPage() {
           />
         ) : (
           <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-3">
-            {companies.map(c => (
+            {filtered.map(c => (
               <Card key={c.id} className="group hover:border-reap3r-border-light transition-all duration-200">
                 <div className="flex items-start justify-between mb-4">
                   <div className="flex items-center gap-3">

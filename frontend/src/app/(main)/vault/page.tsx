@@ -3,14 +3,18 @@ import { useEffect, useState } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, Modal } from '@/components/ui';
 import { api } from '@/lib/api';
+import { useToastHelpers } from '@/lib/toast';
+import { exportToCSV } from '@/lib/export';
 import {
   Lock, Plus, Eye, EyeOff, Trash2, Copy, Clock, History,
   RotateCw, X, Share2, ChevronRight, Users as UsersIcon,
+  Search, FileDown, RefreshCw,
 } from 'lucide-react';
 
 const SECRET_TYPES = ['password', 'api_key', 'token', 'ssh_key', 'certificate', 'note', 'other'] as const;
 
 export default function VaultPage() {
+  const toast = useToastHelpers();
   const [secrets, setSecrets] = useState<any[]>([]);
   const [expiring, setExpiring] = useState<any[]>([]);
   const [loading, setLoading] = useState(true);
@@ -25,6 +29,7 @@ export default function VaultPage() {
   const [sharePrincipalType, setSharePrincipalType] = useState('user');
   const [sharePrincipalId, setSharePrincipalId] = useState('');
   const [shareRights, setShareRights] = useState<string[]>(['read']);
+  const [search, setSearch] = useState('');
 
   const load = () => {
     setLoading(true);
@@ -36,14 +41,17 @@ export default function VaultPage() {
 
   const handleCreate = async (e: React.FormEvent) => {
     e.preventDefault();
-    const tags = form.tags ? form.tags.split(',').map(t => t.trim()) : [];
-    await api.vault.create({
-      name: form.name, type: form.type, value: form.value,
-      tags, notes: form.notes || null, expires_at: form.expires_at || null, metadata: {},
-    });
-    setShowCreate(false);
-    setForm({ name: '', type: 'password', value: '', tags: '', notes: '', expires_at: '' });
-    load();
+    try {
+      const tags = form.tags ? form.tags.split(',').map(t => t.trim()) : [];
+      await api.vault.create({
+        name: form.name, type: form.type, value: form.value,
+        tags, notes: form.notes || null, expires_at: form.expires_at || null, metadata: {},
+      });
+      toast.success('Secret created');
+      setShowCreate(false);
+      setForm({ name: '', type: 'password', value: '', tags: '', notes: '', expires_at: '' });
+      load();
+    } catch (err: any) { toast.error('Failed', err.message); }
   };
 
   const selectSecret = async (secret: any) => {
@@ -60,41 +68,63 @@ export default function VaultPage() {
 
   const handleDelete = async () => {
     if (!selected || !confirm('Delete this secret permanently?')) return;
-    await api.vault.delete(selected.id);
-    setSelected(null); load();
+    try { await api.vault.delete(selected.id); toast.success('Secret deleted'); setSelected(null); load(); }
+    catch (err: any) { toast.error('Delete failed', err.message); }
   };
 
   const handleRotate = async () => {
     if (!selected) return;
-    await api.vault.rotate(selected.id);
-    load();
+    try { await api.vault.rotate(selected.id); toast.success('Secret rotated'); load(); }
+    catch (err: any) { toast.error('Rotate failed', err.message); }
   };
 
   const handleShare = async () => {
     if (!selected || !sharePrincipalId) return;
-    await api.vault.share(selected.id, { principal_type: sharePrincipalType, principal_id: sharePrincipalId, rights: shareRights });
-    setShowShareModal(false); setSharePrincipalId('');
-    api.vault.permissions(selected.id).then(r => setPermissions(r.data)).catch(() => {});
+    try {
+      await api.vault.share(selected.id, { principal_type: sharePrincipalType, principal_id: sharePrincipalId, rights: shareRights });
+      toast.success('Secret shared');
+      setShowShareModal(false); setSharePrincipalId('');
+      api.vault.permissions(selected.id).then(r => setPermissions(r.data)).catch(() => {});
+    } catch (err: any) { toast.error('Share failed', err.message); }
   };
 
   const handleRevokePermission = async (permId: string) => {
     if (!selected) return;
-    await api.vault.revokePermission(selected.id, permId);
-    api.vault.permissions(selected.id).then(r => setPermissions(r.data)).catch(() => {});
+    try {
+      await api.vault.revokePermission(selected.id, permId);
+      toast.success('Permission revoked');
+      api.vault.permissions(selected.id).then(r => setPermissions(r.data)).catch(() => {});
+    } catch (err: any) { toast.error('Revoke failed', err.message); }
   };
 
-  const copyToClipboard = (val: string) => navigator.clipboard.writeText(val);
-  const displayList = view === 'expiring' ? expiring : secrets;
+  const copyToClipboard = (val: string) => { navigator.clipboard.writeText(val); toast.info('Copied to clipboard'); };
+
+  const handleExport = () => {
+    exportToCSV(displayList, 'vault-secrets', [
+      { key: 'name', label: 'Name' }, { key: 'type', label: 'Type' },
+      { key: 'created_at', label: 'Created' }, { key: 'expires_at', label: 'Expires' },
+    ]);
+    toast.info('Exported', `${displayList.length} secrets exported`);
+  };
+
+  const baseList = view === 'expiring' ? expiring : secrets;
+  const displayList = search
+    ? baseList.filter(s => s.name?.toLowerCase().includes(search.toLowerCase()) || s.type?.toLowerCase().includes(search.toLowerCase()))
+    : baseList;
 
   return (
     <>
       <TopBar
         title="Vault"
         actions={
-          <Button size="sm" onClick={() => setShowCreate(!showCreate)}>
-            <Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />
-            Add Secret
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button size="sm" variant="secondary" onClick={handleExport}><FileDown style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export</Button>
+            <Button size="sm" onClick={() => setShowCreate(!showCreate)}>
+              <Plus style={{ width: '12px', height: '12px', marginRight: '4px' }} />
+              Add Secret
+            </Button>
+            <button onClick={load} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all"><RefreshCw style={{ width: '13px', height: '13px' }} /></button>
+          </div>
         }
       />
 
@@ -120,6 +150,11 @@ export default function VaultPage() {
               <span className="font-mono text-[10px]">{count}</span>
             </button>
           ))}
+          <div className="mt-3 relative">
+            <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 text-reap3r-muted" style={{ width: '11px', height: '11px' }} />
+            <input placeholder="Search..." value={search} onChange={e => setSearch(e.target.value)}
+              className="w-full pl-7 pr-2 py-1.5 bg-reap3r-card border border-reap3r-border rounded-lg text-xs text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20" />
+          </div>
         </div>
 
         {/* Main */}
