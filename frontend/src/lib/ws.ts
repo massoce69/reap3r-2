@@ -122,6 +122,13 @@ class RealtimeClient {
     };
   }
 
+  /** Send a JSON message to the UI WebSocket server. */
+  send(type: string, payload: unknown) {
+    if (this.ws?.readyState === WebSocket.OPEN) {
+      this.ws.send(JSON.stringify({ type, payload }));
+    }
+  }
+
   get connected() {
     return this.ws?.readyState === WebSocket.OPEN;
   }

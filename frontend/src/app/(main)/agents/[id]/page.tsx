@@ -73,6 +73,8 @@ export default function AgentDetailPage() {
   const [rdMonitors, setRdMonitors] = useState<Array<{ index: number; name: string; primary: boolean; x: number; y: number; width: number; height: number }>>([]);
   const [rdSelectedMonitor, setRdSelectedMonitor] = useState<number>(-1); // -1 = all screens
   const [rdMonitorsLoading, setRdMonitorsLoading] = useState(false);
+  const [rdInteractive, setRdInteractive] = useState(false); // interactive control mode
+  const rdImgRef = useRef<HTMLImageElement>(null);
 
   // File explorer state
   const [fePath, setFePath] = useState(agent?.os === 'windows' ? 'C:\\' : '/');
@@ -466,6 +468,139 @@ export default function AgentDetailPage() {
         api.agents.inventory(id).then(setInventory).catch(() => {});
       }, 5000);
     } catch {}
+  };
+
+  // ── Remote Desktop: Input event handling ──
+  // DOM KeyboardEvent.code → Windows Virtual Key Code mapping
+  const keyToVk: Record<string, number> = {
+    Backspace: 0x08, Tab: 0x09, Enter: 0x0D, ShiftLeft: 0x10, ShiftRight: 0x10,
+    ControlLeft: 0x11, ControlRight: 0x11, AltLeft: 0x12, AltRight: 0x12,
+    Pause: 0x13, CapsLock: 0x14, Escape: 0x1B, Space: 0x20, PageUp: 0x21, PageDown: 0x22,
+    End: 0x23, Home: 0x24, ArrowLeft: 0x25, ArrowUp: 0x26, ArrowRight: 0x27, ArrowDown: 0x28,
+    PrintScreen: 0x2C, Insert: 0x2D, Delete: 0x2E,
+    Digit0: 0x30, Digit1: 0x31, Digit2: 0x32, Digit3: 0x33, Digit4: 0x34,
+    Digit5: 0x35, Digit6: 0x36, Digit7: 0x37, Digit8: 0x38, Digit9: 0x39,
+    KeyA: 0x41, KeyB: 0x42, KeyC: 0x43, KeyD: 0x44, KeyE: 0x45, KeyF: 0x46,
+    KeyG: 0x47, KeyH: 0x48, KeyI: 0x49, KeyJ: 0x4A, KeyK: 0x4B, KeyL: 0x4C,
+    KeyM: 0x4D, KeyN: 0x4E, KeyO: 0x4F, KeyP: 0x50, KeyQ: 0x51, KeyR: 0x52,
+    KeyS: 0x53, KeyT: 0x54, KeyU: 0x55, KeyV: 0x56, KeyW: 0x57, KeyX: 0x58,
+    KeyY: 0x59, KeyZ: 0x5A,
+    MetaLeft: 0x5B, MetaRight: 0x5C, ContextMenu: 0x5D,
+    Numpad0: 0x60, Numpad1: 0x61, Numpad2: 0x62, Numpad3: 0x63, Numpad4: 0x64,
+    Numpad5: 0x65, Numpad6: 0x66, Numpad7: 0x67, Numpad8: 0x68, Numpad9: 0x69,
+    NumpadMultiply: 0x6A, NumpadAdd: 0x6B, NumpadSubtract: 0x6D,
+    NumpadDecimal: 0x6E, NumpadDivide: 0x6F,
+    F1: 0x70, F2: 0x71, F3: 0x72, F4: 0x73, F5: 0x74, F6: 0x75,
+    F7: 0x76, F8: 0x77, F9: 0x78, F10: 0x79, F11: 0x7A, F12: 0x7B,
+    NumLock: 0x90, ScrollLock: 0x91,
+    Semicolon: 0xBA, Equal: 0xBB, Comma: 0xBC, Minus: 0xBD,
+    Period: 0xBE, Slash: 0xBF, Backquote: 0xC0,
+    BracketLeft: 0xDB, Backslash: 0xDC, BracketRight: 0xDD, Quote: 0xDE,
+  };
+
+  /** Compute normalized (0–1) coordinates from mouse event on the RD image. */
+  const getNormalizedCoords = (e: React.MouseEvent<HTMLImageElement>) => {
+    const img = rdImgRef.current;
+    if (!img) return { x: 0, y: 0 };
+    const rect = img.getBoundingClientRect();
+    // The image is object-contain, so the displayed area may not fill the rect.
+    // We need to calculate the actual displayed image area.
+    const imgNatW = img.naturalWidth;
+    const imgNatH = img.naturalHeight;
+    if (!imgNatW || !imgNatH) return { x: 0, y: 0 };
+
+    const containerAspect = rect.width / rect.height;
+    const imgAspect = imgNatW / imgNatH;
+
+    let displayW: number, displayH: number, offsetX: number, offsetY: number;
+    if (imgAspect > containerAspect) {
+      // Width-constrained
+      displayW = rect.width;
+      displayH = rect.width / imgAspect;
+      offsetX = 0;
+      offsetY = (rect.height - displayH) / 2;
+    } else {
+      // Height-constrained
+      displayH = rect.height;
+      displayW = rect.height * imgAspect;
+      offsetX = (rect.width - displayW) / 2;
+      offsetY = 0;
+    }
+
+    const x = Math.max(0, Math.min(1, (e.clientX - rect.left - offsetX) / displayW));
+    const y = Math.max(0, Math.min(1, (e.clientY - rect.top - offsetY) / displayH));
+    return { x, y };
+  };
+
+  /** Send an RD input event via WebSocket. */
+  const sendRdInput = (input_type: string, extra: Record<string, unknown> = {}) => {
+    if (!agent || !rdStreaming || !rdInteractive) return;
+    realtime.send('rd:input', {
+      agent_id: agent.id,
+      input_type,
+      monitor: rdSelectedMonitor,
+      ...extra,
+    });
+  };
+
+  // Throttle mouse move events (send at most every 30ms)
+  const lastMouseMoveRef = useRef(0);
+  const rdMouseMove = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!rdInteractive || !rdStreaming) return;
+    const now = Date.now();
+    if (now - lastMouseMoveRef.current < 30) return;
+    lastMouseMoveRef.current = now;
+    const { x, y } = getNormalizedCoords(e);
+    sendRdInput('mouse_move', { x, y });
+  };
+
+  const rdMouseDown = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!rdInteractive || !rdStreaming) return;
+    e.preventDefault();
+    const { x, y } = getNormalizedCoords(e);
+    const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+    sendRdInput('mouse_down', { x, y, button });
+  };
+
+  const rdMouseUp = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (!rdInteractive || !rdStreaming) return;
+    e.preventDefault();
+    const { x, y } = getNormalizedCoords(e);
+    const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+    sendRdInput('mouse_up', { x, y, button });
+  };
+
+  const rdWheel = (e: React.WheelEvent<HTMLImageElement>) => {
+    if (!rdInteractive || !rdStreaming) return;
+    e.preventDefault();
+    const delta = e.deltaY > 0 ? -1 : 1; // scroll up = positive delta, scroll down = negative
+    sendRdInput('mouse_wheel', { x: 0, y: 0, delta });
+  };
+
+  const rdContextMenu = (e: React.MouseEvent<HTMLImageElement>) => {
+    if (rdInteractive && rdStreaming) {
+      e.preventDefault(); // prevent browser context menu when in control mode
+    }
+  };
+
+  const rdKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!rdInteractive || !rdStreaming) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const vk = keyToVk[e.code];
+    if (vk !== undefined) {
+      sendRdInput('key_down', { key: e.code, vk });
+    }
+  };
+
+  const rdKeyUp = (e: React.KeyboardEvent<HTMLDivElement>) => {
+    if (!rdInteractive || !rdStreaming) return;
+    e.preventDefault();
+    e.stopPropagation();
+    const vk = keyToVk[e.code];
+    if (vk !== undefined) {
+      sendRdInput('key_up', { key: e.code, vk });
+    }
   };
 
   const deleteAgent = async () => {
@@ -1047,9 +1182,24 @@ export default function AgentDetailPage() {
                     </Button>
                   </>
                 ) : (
-                  <Button size="sm" variant="danger" onClick={stopRdStream}>
-                    <Square className="w-4 h-4" /> Stop
-                  </Button>
+                  <>
+                    <Button size="sm" variant="danger" onClick={stopRdStream}>
+                      <Square className="w-4 h-4" /> Stop
+                    </Button>
+                    {/* Interactive control toggle */}
+                    <button
+                      onClick={() => setRdInteractive(p => !p)}
+                      className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-all ${
+                        rdInteractive
+                          ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
+                          : 'bg-reap3r-surface text-reap3r-muted border border-reap3r-border hover:text-reap3r-text'
+                      }`}
+                      title={rdInteractive ? 'Click to disable remote input (view-only)' : 'Click to enable mouse & keyboard control'}
+                    >
+                      <MousePointer className="w-3 h-3" />
+                      {rdInteractive ? 'Control ON' : 'View Only'}
+                    </button>
+                  </>
                 )}
                 {/* Fullscreen toggle */}
                 <button onClick={() => setRdFullscreen(p => !p)}
@@ -1073,9 +1223,15 @@ export default function AgentDetailPage() {
             )}
 
             {/* Video/Screenshot Display */}
-            <div className={`bg-[#0d1117] border border-reap3r-border rounded-lg overflow-hidden flex items-center justify-center ${
-              rdFullscreen ? 'flex-1 mx-4 mb-4 mt-2' : 'min-h-[400px]'
-            }`}>
+            {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
+            <div
+              className={`bg-[#0d1117] border border-reap3r-border rounded-lg overflow-hidden flex items-center justify-center outline-none ${
+                rdFullscreen ? 'flex-1 mx-4 mb-4 mt-2' : 'min-h-[400px]'
+              } ${rdInteractive && rdStreaming ? 'cursor-none ring-2 ring-blue-500/30' : ''}`}
+              tabIndex={rdInteractive && rdStreaming ? 0 : -1}
+              onKeyDown={rdKeyDown}
+              onKeyUp={rdKeyUp}
+            >
               {!rdFrame && !rdLoading && !rdStreaming && (
                 <div className="text-center py-16">
                   <ScreenShare className="w-12 h-12 mx-auto text-gray-600 mb-3" />
@@ -1102,10 +1258,16 @@ export default function AgentDetailPage() {
               )}
               {rdFrame && (
                 <img
+                  ref={rdImgRef}
                   src={rdFrame}
                   alt="Remote Desktop"
-                  className="max-w-full max-h-full object-contain"
+                  className={`max-w-full max-h-full object-contain ${rdInteractive && rdStreaming ? 'cursor-none' : ''}`}
                   draggable={false}
+                  onMouseMove={rdMouseMove}
+                  onMouseDown={rdMouseDown}
+                  onMouseUp={rdMouseUp}
+                  onWheel={rdWheel}
+                  onContextMenu={rdContextMenu}
                 />
               )}
             </div>
@@ -1122,6 +1284,11 @@ export default function AgentDetailPage() {
               {rdStreaming && (
                 <span className="flex items-center gap-1 text-green-400">
                   <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse" /> Streaming &middot; {rdFrameCount} frames received
+                </span>
+              )}
+              {rdInteractive && rdStreaming && (
+                <span className="flex items-center gap-1 text-blue-400">
+                  <MousePointer className="w-3 h-3" /> Interactive Control Active
                 </span>
               )}
               <span className="ml-auto">Agent: {agent.os === 'windows' ? 'Windows' : agent.os}</span>

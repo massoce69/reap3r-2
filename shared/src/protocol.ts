@@ -28,6 +28,7 @@ export const MessageType = {
   JobAck: 'job_ack',
   JobResult: 'job_result',
   StreamOutput: 'stream_output',
+  RdInput: 'rd_input',
 } as const;
 export type MessageTypeValue = (typeof MessageType)[keyof typeof MessageType];
 
@@ -47,6 +48,7 @@ export const MessageEnvelopeSchema = z.object({
     MessageType.JobAck,
     MessageType.JobResult,
     MessageType.StreamOutput,
+    MessageType.RdInput,
   ]),
 
   // Always milliseconds since epoch.
@@ -207,6 +209,25 @@ export const StreamOutputPayload = z.object({
   sequence: z.number().int(),
 });
 export type StreamOutput = z.infer<typeof StreamOutputPayload>;
+
+// RD Input — low-latency remote desktop input events (mouse/keyboard)
+export const RdInputPayload = z.object({
+  agent_id: z.string().uuid(),
+  input_type: z.enum(['mouse_move', 'mouse_down', 'mouse_up', 'mouse_wheel', 'key_down', 'key_up']),
+  // Normalized coordinates 0.0–1.0 (relative to captured screen area)
+  x: z.number().min(0).max(1).optional(),
+  y: z.number().min(0).max(1).optional(),
+  // Mouse button: 'left', 'right', 'middle'
+  button: z.enum(['left', 'right', 'middle']).optional(),
+  // Wheel delta (positive=up, negative=down)
+  delta: z.number().optional(),
+  // Key code (DOM KeyboardEvent.code) and virtual key code
+  key: z.string().optional(),
+  vk: z.number().int().optional(),
+  // Monitor index being viewed (-1 = all)
+  monitor: z.number().int().min(-1).max(15).default(-1),
+});
+export type RdInput = z.infer<typeof RdInputPayload>;
 
 // ------------------------------------------------------------
 // Canonical JSON encoding for signature (TS side)

@@ -1274,6 +1274,111 @@ try {
 [IO.File]::WriteAllText($outPath, '[{"index":0,"name":"DISPLAY1","primary":true,"x":0,"y":0,"width":1920,"height":1080}]')
 "#;
 
+/// PowerShell script that runs persistently in the user session to simulate mouse/keyboard input.
+/// Polls `rd_input.dat` for JSON commands and executes them via Win32 user32.dll calls.
+/// Placeholders __DIR__ and __MONITOR__ replaced at runtime.
+const RD_INPUT_LOOP_PS: &str = r#"
+$dir = '__DIR__'
+$stop = "$dir\rd_stop.flag"
+$inputFile = "$dir\rd_input.dat"
+$monIdx = [int]__MONITOR__
+$scale = [double]__SCALE__
+$errLog = "$dir\rd_input_error.log"
+"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Input handler started in session $([System.Diagnostics.Process]::GetCurrentProcess().SessionId)" | Out-File $errLog
+try {
+    Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    Add-Type @"
+using System;
+using System.Runtime.InteropServices;
+public static class RdInput {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, IntPtr dwExtraInfo);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, IntPtr dwExtraInfo);
+    public const uint MOUSEEVENTF_MOVE       = 0x0001;
+    public const uint MOUSEEVENTF_LEFTDOWN   = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP     = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN  = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP    = 0x0010;
+    public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
+    public const uint MOUSEEVENTF_MIDDLEUP   = 0x0040;
+    public const uint MOUSEEVENTF_WHEEL      = 0x0800;
+    public const uint KEYEVENTF_KEYDOWN      = 0x0000;
+    public const uint KEYEVENTF_KEYUP        = 0x0002;
+}
+"@ -ErrorAction Stop
+} catch {
+    "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] FATAL: $_" | Out-File $errLog -Append
+    exit 1
+}
+function Get-ScreenBounds {
+    if ($monIdx -ge 0) {
+        $screens = [System.Windows.Forms.Screen]::AllScreens
+        if ($monIdx -lt $screens.Length) { return $screens[$monIdx].Bounds }
+        return [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+    }
+    $minX=[int]::MaxValue; $minY=[int]::MaxValue; $maxX=[int]::MinValue; $maxY=[int]::MinValue
+    foreach ($scr in [System.Windows.Forms.Screen]::AllScreens) {
+        $b=$scr.Bounds
+        if($b.X -lt $minX){$minX=$b.X}; if($b.Y -lt $minY){$minY=$b.Y}
+        if(($b.X+$b.Width) -gt $maxX){$maxX=$b.X+$b.Width}
+        if(($b.Y+$b.Height) -gt $maxY){$maxY=$b.Y+$b.Height}
+    }
+    return New-Object System.Drawing.Rectangle($minX,$minY,($maxX-$minX),($maxY-$minY))
+}
+$bounds = Get-ScreenBounds
+"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Screen bounds: $($bounds.X),$($bounds.Y) ${($bounds.Width)}x$($bounds.Height)" | Out-File $errLog -Append
+while (-not (Test-Path $stop)) {
+    if (Test-Path $inputFile) {
+        try {
+            $raw = [System.IO.File]::ReadAllText($inputFile)
+            [System.IO.File]::Delete($inputFile)
+            foreach ($line in $raw -split "`n") {
+                $line = $line.Trim()
+                if (-not $line) { continue }
+                try {
+                    $evt = ConvertFrom-Json $line
+                    # Convert normalized 0-1 coords to absolute screen coords
+                    $absX = [int]($bounds.X + $evt.x * $bounds.Width)
+                    $absY = [int]($bounds.Y + $evt.y * $bounds.Height)
+                    switch ($evt.type) {
+                        'mouse_move' {
+                            [RdInput]::SetCursorPos($absX, $absY)
+                        }
+                        'mouse_down' {
+                            [RdInput]::SetCursorPos($absX, $absY)
+                            switch ($evt.button) {
+                                'right'  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_RIGHTDOWN,  0, 0, 0, [IntPtr]::Zero) }
+                                'middle' { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, [IntPtr]::Zero) }
+                                default  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_LEFTDOWN,   0, 0, 0, [IntPtr]::Zero) }
+                            }
+                        }
+                        'mouse_up' {
+                            [RdInput]::SetCursorPos($absX, $absY)
+                            switch ($evt.button) {
+                                'right'  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_RIGHTUP,  0, 0, 0, [IntPtr]::Zero) }
+                                'middle' { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_MIDDLEUP, 0, 0, 0, [IntPtr]::Zero) }
+                                default  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_LEFTUP,   0, 0, 0, [IntPtr]::Zero) }
+                            }
+                        }
+                        'mouse_wheel' {
+                            [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_WHEEL, 0, 0, [int]($evt.delta * 120), [IntPtr]::Zero)
+                        }
+                        'key_down' {
+                            [RdInput]::keybd_event([byte]$evt.vk, 0, [RdInput]::KEYEVENTF_KEYDOWN, [IntPtr]::Zero)
+                        }
+                        'key_up' {
+                            [RdInput]::keybd_event([byte]$evt.vk, 0, [RdInput]::KEYEVENTF_KEYUP, [IntPtr]::Zero)
+                        }
+                    }
+                } catch { }
+            }
+        } catch { }
+    }
+    Start-Sleep -Milliseconds 25
+}
+"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Input handler stopped" | Out-File $errLog -Append
+"#;
+
 // ── Windows FFI for launching a process in the interactive user session ───
 
 #[cfg(windows)]
@@ -1514,12 +1619,19 @@ fn rd_frame_data_path() -> PathBuf {
 fn rd_script_path() -> PathBuf {
     config_dir().join("rd_capture.ps1")
 }
+fn rd_input_script_path() -> PathBuf {
+    config_dir().join("rd_input.ps1")
+}
+fn rd_input_data_path() -> PathBuf {
+    config_dir().join("rd_input.dat")
+}
 
 /// Write the stop flag so the capture process exits.
 fn rd_signal_stop() {
     let _ = std::fs::write(rd_stop_flag_path(), "stop");
-    // Also clean up frame data
+    // Also clean up frame data and input data
     let _ = std::fs::remove_file(rd_frame_data_path());
+    let _ = std::fs::remove_file(rd_input_data_path());
 }
 
 /// Enumerate monitors by running a small PowerShell script in the user session.
@@ -1530,7 +1642,7 @@ async fn list_monitors() -> Result<serde_json::Value, String> {
     let out_path = config_dir().join("rd_monitors.json");
     let script_path = config_dir().join("rd_list_monitors.ps1");
     let script_content = RD_LIST_MONITORS_PS
-        .replace("__OUT_PATH__", &out_path.display().to_string().replace('\\', "\\\\"));
+        .replace("__OUT_PATH__", &out_path.display().to_string());
     std::fs::write(&script_path, &script_content)
         .map_err(|e| format!("Write list_monitors script: {}", e))?;
     let _ = std::fs::remove_file(&out_path);
@@ -1860,7 +1972,8 @@ async fn start_remote_desktop(
     let session_id = job_id.clone();
 
     // Write capture script to disk
-    let dir_str = config_dir().display().to_string().replace('\\', "\\\\");
+    // PS single-quoted strings treat \ as literal — no escaping needed
+    let dir_str = config_dir().display().to_string();
     let script_content = RD_CAPTURE_LOOP_PS
         .replace("__DIR__", &dir_str)
         .replace("__SCALE__", &format!("{:.2}", scale))
@@ -1911,6 +2024,38 @@ async fn start_remote_desktop(
 
     // Give the capture process time to start and produce the first frame
     tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // ── Launch input handler (for interactive control) ──
+    // Always launch it so control mode can be toggled from the UI.
+    let _ = std::fs::remove_file(rd_input_data_path());
+    let input_script_content = RD_INPUT_LOOP_PS
+        .replace("__DIR__", &dir_str)
+        .replace("__MONITOR__", &format!("{}", monitor))
+        .replace("__SCALE__", &format!("{:.2}", scale));
+    let input_script_path = rd_input_script_path();
+    if let Err(e) = std::fs::write(&input_script_path, &input_script_content) {
+        fwarn!("RD: Failed to write input script: {}", e);
+    } else {
+        #[cfg(windows)]
+        {
+            let input_cmd = format!(
+                "powershell.exe -WindowStyle Hidden -ExecutionPolicy Bypass -NoProfile -File \"{}\"",
+                input_script_path.display()
+            );
+            match user_session::launch_in_user_session(&input_cmd) {
+                Ok(pid) => finfo!("RD: Input handler launched in user session (PID {})", pid),
+                Err(e) => {
+                    fwarn!("RD: Cannot launch input handler in user session: {}. Falling back to local.", e);
+                    match tokio::process::Command::new("powershell")
+                        .args(["-WindowStyle", "Hidden", "-ExecutionPolicy", "Bypass", "-NoProfile", "-File", &input_script_path.display().to_string()])
+                        .spawn() {
+                        Ok(_) => finfo!("RD: Input handler launched locally"),
+                        Err(e2) => fwarn!("RD: Failed to launch input handler: {}", e2),
+                    }
+                }
+            }
+        }
+    }
 
     // Spawn background frame-reader loop
     let frame_path = rd_frame_data_path();
@@ -2638,6 +2783,39 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                             tx_jobs.send(result_msg).await.ok();
                             state.remember_job(job_id);
                             finfo!("Job completed: id={} type={}", job_id, job_type);
+                        }
+                        // ── RD Input: low-latency mouse/keyboard relay (no job system) ──
+                        else if msg_type == "rd_input" {
+                            if !verify_sig(&data, &key_loop) {
+                                continue; // silently drop invalid input messages
+                            }
+                            if RD_ACTIVE.load(Ordering::SeqCst) {
+                                let payload = &data["payload"];
+                                let input_type = payload["input_type"].as_str().unwrap_or("");
+                                let x = payload["x"].as_f64().unwrap_or(0.0);
+                                let y = payload["y"].as_f64().unwrap_or(0.0);
+                                let button = payload["button"].as_str().unwrap_or("left");
+                                let delta = payload["delta"].as_f64().unwrap_or(0.0);
+                                let vk = payload["vk"].as_u64().unwrap_or(0);
+
+                                // Write input command to file for the input handler PS script
+                                let cmd = serde_json::json!({
+                                    "type": input_type,
+                                    "x": x,
+                                    "y": y,
+                                    "button": button,
+                                    "delta": delta,
+                                    "vk": vk,
+                                });
+                                let input_path = rd_input_data_path();
+                                // Append to file (multiple events per poll cycle)
+                                let line = format!("{}\n", cmd.to_string());
+                                let _ = std::fs::OpenOptions::new()
+                                    .create(true)
+                                    .append(true)
+                                    .open(&input_path)
+                                    .and_then(|mut f| std::io::Write::write_all(&mut f, line.as_bytes()));
+                            }
                         }
                     }
                     Message::Ping(p) => {

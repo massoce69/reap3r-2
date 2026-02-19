@@ -27,6 +27,7 @@ import {
   JobAckPayload,
   JobResultPayload,
   StreamOutputPayload,
+  RdInputPayload,
 } from '@massvision/shared';
 
 import * as agentService from '../services/agent.service.js';
@@ -499,6 +500,35 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     }
     uiSockets.add(ws);
     fastify.log.info({ uiClients: uiSockets.size }, 'UI WS client connected');
+
+    // Handle UI → Agent messages (rd:input relay)
+    ws.on('message', (raw: RawData) => {
+      try {
+        const msg = JSON.parse(raw.toString());
+        if (msg.type === 'rd:input') {
+          const p = msg.payload;
+          if (!p?.agent_id) return;
+          const agentWs = agentSockets.get(String(p.agent_id));
+          if (!agentWs || agentWs.readyState !== WS.OPEN) return;
+
+          // Relay as rd_input message to agent (signed)
+          const env = nowEnvelopeBase(String(p.agent_id), MessageType.RdInput, {
+            input_type: p.input_type,
+            x: p.x,
+            y: p.y,
+            button: p.button,
+            delta: p.delta,
+            key: p.key,
+            vk: p.vk,
+            monitor: p.monitor ?? -1,
+          });
+          sendSigned(agentWs, config.hmac.secret, env);
+        }
+      } catch {
+        // Ignore malformed UI messages
+      }
+    });
+
     ws.on('close', () => {
       uiSockets.delete(ws);
       fastify.log.info({ uiClients: uiSockets.size }, 'UI WS client disconnected');
