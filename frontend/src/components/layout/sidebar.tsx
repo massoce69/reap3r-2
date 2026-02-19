@@ -45,26 +45,24 @@ export function Sidebar() {
     <aside className="w-56 h-screen bg-reap3r-surface flex flex-col fixed left-0 top-0 z-40 border-r border-reap3r-border">
 
       {/* ── Logo ── */}
-      <div className="relative px-4 pt-5 pb-4 overflow-hidden shrink-0">
-        {/* Gradient wash behind logo */}
-        <div className="absolute inset-0 bg-gradient-to-br from-reap3r-accent/[0.06] via-transparent to-transparent pointer-events-none" />
-        {/* Corner accent lines */}
-        <div className="absolute top-0 right-0 w-12 h-12 border-t border-r border-reap3r-accent/10 rounded-bl-xl pointer-events-none" />
+      <div className="relative px-4 pt-5 pb-4 shrink-0 overflow-hidden">
+        <div className="absolute inset-0 bg-gradient-to-b from-white/[0.03] to-transparent pointer-events-none" />
 
         <div className="relative flex items-center gap-3">
           <div className="relative shrink-0">
-            <div className="w-9 h-9 rounded-xl bg-reap3r-accent/10 border border-reap3r-accent/20 flex items-center justify-center animate-glow">
-              <Shield className="w-4.5 h-4.5 text-reap3r-accent" style={{ width: '18px', height: '18px' }} />
+            <div className="w-9 h-9 rounded-xl bg-white/6 border border-white/10 flex items-center justify-center animate-glow">
+              <Shield style={{ width: '17px', height: '17px', color: '#ffffff' }} />
             </div>
-            {/* Online indicator */}
-            <div className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-reap3r-success rounded-full"
-                 style={{ boxShadow: '0 0 6px rgba(0,229,160,0.8)' }} />
+            <div
+              className="absolute -top-0.5 -right-0.5 w-2 h-2 bg-reap3r-success rounded-full"
+              style={{ boxShadow: '0 0 6px rgba(34,197,94,0.8)' }}
+            />
           </div>
           <div>
-            <h1 className="text-[11px] font-bold text-reap3r-text tracking-[0.22em] uppercase leading-none">
+            <h1 className="text-[11px] font-bold text-white tracking-[0.24em] uppercase leading-none">
               MASSVISION
             </h1>
-            <p className="text-[9px] text-reap3r-accent font-mono tracking-[0.4em] uppercase mt-1 leading-none">
+            <p className="text-[9px] text-reap3r-light font-mono tracking-[0.4em] uppercase mt-1 leading-none">
               REAP3R
             </p>
           </div>
@@ -72,7 +70,7 @@ export function Sidebar() {
       </div>
 
       {/* Divider */}
-      <div className="mx-4 h-px bg-gradient-to-r from-transparent via-reap3r-border to-transparent shrink-0" />
+      <div className="mx-4 h-px bg-reap3r-border shrink-0" />
 
       {/* ── Navigation ── */}
       <nav className="flex-1 px-2 py-3 space-y-0.5 overflow-y-auto overflow-x-hidden min-h-0">
@@ -85,30 +83,25 @@ export function Sidebar() {
               className={cn(
                 'group relative flex items-center gap-2.5 px-3 py-[7px] rounded-lg transition-all duration-150 overflow-hidden',
                 active
-                  ? 'bg-reap3r-accent/[0.08] border border-reap3r-accent/[0.15] text-reap3r-accent'
+                  ? 'bg-white/6 border border-white/10 text-white'
                   : 'border border-transparent text-reap3r-muted hover:text-reap3r-light hover:bg-reap3r-hover'
               )}
             >
               {/* Left accent bar for active */}
               {active && (
                 <span
-                  className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-4 bg-reap3r-accent rounded-r-full"
-                  style={{ boxShadow: '0 0 8px rgba(0,212,255,0.9)' }}
+                  className="absolute left-0 top-1/2 -translate-y-1/2 w-[2px] h-4 bg-white rounded-r-full opacity-80"
                 />
-              )}
-              {/* Subtle shine on active */}
-              {active && (
-                <div className="absolute inset-0 bg-gradient-to-r from-reap3r-accent/[0.04] to-transparent pointer-events-none" />
               )}
 
               <Icon
                 className={cn(
                   'shrink-0 transition-colors',
-                  active ? 'text-reap3r-accent' : 'text-reap3r-muted group-hover:text-reap3r-light'
+                  active ? 'text-white' : 'text-reap3r-muted group-hover:text-reap3r-light'
                 )}
                 style={{ width: '13px', height: '13px' }}
               />
-              <span className="text-[11px] font-medium tracking-[0.06em] uppercase leading-none">
+              <span className="text-[11px] font-medium tracking-[0.05em] uppercase leading-none">
                 {label}
               </span>
             </Link>
@@ -117,19 +110,19 @@ export function Sidebar() {
       </nav>
 
       {/* Divider */}
-      <div className="mx-4 h-px bg-gradient-to-r from-transparent via-reap3r-border to-transparent shrink-0" />
+      <div className="mx-4 h-px bg-reap3r-border shrink-0" />
 
       {/* ── User ── */}
       <div className="px-2 py-3 shrink-0">
-        <div className="flex items-center gap-2.5 px-2.5 py-2.5 rounded-xl bg-reap3r-hover/60 border border-reap3r-border">
+        <div className="flex items-center gap-2.5 px-2.5 py-2.5 rounded-xl bg-reap3r-hover border border-reap3r-border">
           <div
-            className="w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold text-reap3r-text shrink-0 border border-reap3r-accent/15"
-            style={{ background: 'linear-gradient(135deg, rgba(0,212,255,0.2), rgba(124,58,237,0.2))' }}
+            className="w-7 h-7 rounded-lg flex items-center justify-center text-[11px] font-bold text-white shrink-0 border border-white/10"
+            style={{ background: 'linear-gradient(135deg, rgba(255,255,255,0.12), rgba(255,255,255,0.04))' }}
           >
             {user?.name?.charAt(0)?.toUpperCase() ?? '?'}
           </div>
           <div className="flex-1 min-w-0">
-            <p className="text-[11px] font-semibold text-reap3r-text truncate leading-none mb-1">
+            <p className="text-[11px] font-semibold text-white truncate leading-none mb-1">
               {user?.name ?? 'User'}
             </p>
             <p className="text-[9px] text-reap3r-muted truncate font-mono uppercase tracking-widest leading-none">
@@ -151,11 +144,10 @@ export function Sidebar() {
 
 export function TopBar({ title, actions }: { title: string; actions?: React.ReactNode }) {
   return (
-    <header className="h-12 bg-reap3r-surface/80 backdrop-blur-md border-b border-reap3r-border flex items-center justify-between px-6 sticky top-0 z-30">
+    <header className="h-12 bg-reap3r-surface/90 backdrop-blur-md border-b border-reap3r-border flex items-center justify-between px-6 sticky top-0 z-30">
       <div className="flex items-center gap-3">
-        <div className="w-[3px] h-4 bg-reap3r-accent rounded-full opacity-80"
-             style={{ boxShadow: '0 0 8px rgba(0,212,255,0.7)' }} />
-        <h2 className="text-[11px] font-bold text-reap3r-text tracking-[0.2em] uppercase">
+        <div className="w-[2px] h-4 bg-white rounded-full opacity-40" />
+        <h2 className="text-[11px] font-bold text-white tracking-[0.2em] uppercase">
           {title}
         </h2>
       </div>

@@ -1,22 +1,33 @@
 'use client';
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { TopBar } from '@/components/layout/sidebar';
-import { Card, Button, Badge, EmptyState } from '@/components/ui';
+import { Card, Button, Badge, EmptyState, Modal } from '@/components/ui';
 import { api } from '@/lib/api';
 import {
-  Plus, X, Save, Trash2, Settings2, Zap, Bell, ArrowLeft,
-  Server, AlertTriangle, ShieldAlert, Activity, Cpu,
+  Plus, X, Trash2, Settings2, Zap, Bell, ArrowLeft,
+  Server, AlertTriangle, ShieldAlert, Cpu, Check, Send,
+  Mail, MessageSquare, Webhook,
 } from 'lucide-react';
 
 const ruleTypeInfo: Record<string, { label: string; icon: any; description: string }> = {
-  agent_offline: { label: 'Agent Offline', icon: Server, description: 'Triggers when an agent has not sent a heartbeat for X minutes.' },
-  job_failed: { label: 'Job Failures', icon: AlertTriangle, description: 'Triggers when jobs fail N times within a time window.' },
-  edr_critical: { label: 'EDR Critical', icon: ShieldAlert, description: 'Triggers immediately on critical EDR detections.' },
-  tamper_detected: { label: 'Tamper Detected', icon: Zap, description: 'Triggers when agent tampering or unauthorized removal is detected.' },
-  metric_threshold: { label: 'Metric Threshold', icon: Cpu, description: 'Triggers when metrics exceed configured thresholds.' },
+  agent_offline:    { label: 'Agent Offline',    icon: Server,      description: 'Triggers when an agent has not sent a heartbeat for X minutes.' },
+  job_failed:       { label: 'Job Failures',      icon: AlertTriangle, description: 'Triggers when jobs fail N times within a time window.' },
+  edr_critical:     { label: 'EDR Critical',      icon: ShieldAlert, description: 'Triggers immediately on critical EDR detections.' },
+  tamper_detected:  { label: 'Tamper Detected',   icon: Zap,         description: 'Triggers when agent tampering or unauthorized removal is detected.' },
+  metric_threshold: { label: 'Metric Threshold',  icon: Cpu,         description: 'Triggers when metrics exceed configured thresholds.' },
 };
 
 const channelOptions = ['email', 'teams', 'pagerduty', 'opsgenie', 'webhook'];
+
+const severityVariant = (s: string): 'default' | 'success' | 'warning' | 'danger' | 'accent' => {
+  if (s === 'critical' || s === 'high') return 'danger';
+  if (s === 'medium') return 'warning';
+  return 'default';
+};
+
+const inputCls = 'w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20';
+const selectCls = 'w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-white focus:outline-none focus:ring-1 focus:ring-white/20';
 
 export default function RulesPage() {
   const [rules, setRules] = useState<any[]>([]);
@@ -48,7 +59,7 @@ export default function RulesPage() {
   const loadRules = () => {
     setLoading(true);
     api.alerts.rules.list()
-      .then(r => { setRules(r.data); })
+      .then(r => setRules(r.data))
       .catch(() => {})
       .finally(() => setLoading(false));
   };
@@ -70,18 +81,12 @@ export default function RulesPage() {
     setEditingRule(null);
   };
 
-  const openCreate = () => { resetForm(); setShowForm(true); };
-
   const openEdit = (rule: any) => {
     setEditingRule(rule);
-    setName(rule.name);
-    setDescription(rule.description ?? '');
-    setRuleType(rule.rule_type);
-    setScopeType(rule.scope_type);
-    setScopeValue(rule.scope_value ?? '');
-    setSeverity(rule.severity);
-    setCooldown(rule.cooldown_sec);
-    setIsEnabled(rule.is_enabled);
+    setName(rule.name); setDescription(rule.description ?? '');
+    setRuleType(rule.rule_type); setScopeType(rule.scope_type);
+    setScopeValue(rule.scope_value ?? ''); setSeverity(rule.severity);
+    setCooldown(rule.cooldown_sec); setIsEnabled(rule.is_enabled);
     setParams(rule.params ?? {});
     setEscalations(rule.escalations?.length ? rule.escalations.map((e: any) => ({
       step: e.step, delay_sec: e.delay_sec, target_type: e.target_type,
@@ -98,37 +103,26 @@ export default function RulesPage() {
       params, severity, cooldown_sec: cooldown, is_enabled: isEnabled,
       escalations: escalations.map((e, i) => ({ ...e, step: i + 1 })),
     };
-    if (editingRule) {
-      await api.alerts.rules.update(editingRule.id, payload);
-    } else {
-      await api.alerts.rules.create(payload);
-    }
-    setShowForm(false);
-    resetForm();
-    loadRules();
+    if (editingRule) await api.alerts.rules.update(editingRule.id, payload);
+    else await api.alerts.rules.create(payload);
+    setShowForm(false); resetForm(); loadRules();
   };
 
   const handleDelete = async (id: string) => {
     if (!confirm('Delete this rule?')) return;
-    await api.alerts.rules.delete(id);
-    loadRules();
+    await api.alerts.rules.delete(id); loadRules();
   };
 
   const handleToggle = async (rule: any) => {
-    await api.alerts.rules.update(rule.id, { is_enabled: !rule.is_enabled });
-    loadRules();
+    await api.alerts.rules.update(rule.id, { is_enabled: !rule.is_enabled }); loadRules();
   };
 
-  const addEscalation = () => {
-    setEscalations([...escalations, {
-      step: escalations.length + 1, delay_sec: 300,
-      target_type: 'role', target_role: 'org_admin', channels: ['email'],
-    }]);
-  };
+  const addEscalation = () => setEscalations([...escalations, {
+    step: escalations.length + 1, delay_sec: 300,
+    target_type: 'role', target_role: 'org_admin', channels: ['email'],
+  }]);
 
-  const removeEscalation = (idx: number) => {
-    setEscalations(escalations.filter((_, i) => i !== idx));
-  };
+  const removeEscalation = (idx: number) => setEscalations(escalations.filter((_, i) => i !== idx));
 
   const updateEscalation = (idx: number, field: string, value: any) => {
     const updated = [...escalations];
@@ -136,88 +130,70 @@ export default function RulesPage() {
     setEscalations(updated);
   };
 
-  const updateParam = (key: string, value: any) => {
-    setParams({ ...params, [key]: value });
-  };
+  const updateParam = (key: string, value: any) => setParams({ ...params, [key]: value });
 
   const saveIntegration = async () => {
     try {
       const config = JSON.parse(integConfig);
       await api.alerts.integrations.create({ type: integType, name: integName, config });
-      setIntegName(''); setIntegConfig('{}');
-      loadIntegrations();
+      setIntegName(''); setIntegConfig('{}'); loadIntegrations();
     } catch { alert('Invalid JSON config'); }
   };
 
   const deleteIntegration = async (id: string) => {
-    await api.alerts.integrations.delete(id);
-    loadIntegrations();
+    await api.alerts.integrations.delete(id); loadIntegrations();
   };
 
   const testChannel = async (channel: string) => {
     const result = await api.alerts.test(channel);
-    alert(result.ok ? `Test ${channel} sent successfully!` : `Test failed: ${result.error}`);
+    alert(result.ok ? `Test ${channel} sent!` : `Failed: ${result.error}`);
   };
 
-  // Render parameter fields based on rule type
   const renderParamFields = () => {
     switch (ruleType) {
       case 'agent_offline':
         return (
-          <div>
-            <label className="text-xs text-reap3r-muted">Threshold (minutes)</label>
+          <div className="space-y-1.5">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Threshold (minutes)</label>
             <input type="number" value={params.threshold_minutes ?? 10} min={1} max={1440}
-              onChange={e => updateParam('threshold_minutes', Number(e.target.value))}
-              className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
+              onChange={e => updateParam('threshold_minutes', Number(e.target.value))} className={inputCls} />
           </div>
         );
       case 'job_failed':
         return (
           <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-reap3r-muted">Failure Count Threshold</label>
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Failure Count</label>
               <input type="number" value={params.failure_count ?? 3} min={1}
-                onChange={e => updateParam('failure_count', Number(e.target.value))}
-                className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
+                onChange={e => updateParam('failure_count', Number(e.target.value))} className={inputCls} />
             </div>
-            <div>
-              <label className="text-xs text-reap3r-muted">Window (minutes)</label>
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Window (min)</label>
               <input type="number" value={params.window_minutes ?? 30} min={1}
-                onChange={e => updateParam('window_minutes', Number(e.target.value))}
-                className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
-            </div>
-            <div className="col-span-2">
-              <label className="text-xs text-reap3r-muted">Job Type (optional)</label>
-              <input type="text" value={params.job_type ?? ''} placeholder="e.g. run_script"
-                onChange={e => updateParam('job_type', e.target.value || undefined)}
-                className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
+                onChange={e => updateParam('window_minutes', Number(e.target.value))} className={inputCls} />
             </div>
           </div>
         );
       case 'metric_threshold':
         return (
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="text-xs text-reap3r-muted">Metric</label>
-              <select value={params.metric ?? 'cpu_percent'}
-                onChange={e => updateParam('metric', e.target.value)}
-                className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1">
+          <div className="grid grid-cols-3 gap-3">
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Metric</label>
+              <select value={params.metric ?? 'cpu_percent'} onChange={e => updateParam('metric', e.target.value)} className={selectCls}>
                 <option value="cpu_percent">CPU %</option>
                 <option value="mem_percent">Memory %</option>
                 <option value="disk_percent">Disk %</option>
               </select>
             </div>
-            <div>
-              <label className="text-xs text-reap3r-muted">Threshold (%)</label>
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Threshold (%)</label>
               <input type="number" value={params.threshold ?? 95} min={1} max={100}
-                onChange={e => updateParam('threshold', Number(e.target.value))}
-                className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
+                onChange={e => updateParam('threshold', Number(e.target.value))} className={inputCls} />
             </div>
-            <div>
-              <label className="text-xs text-reap3r-muted">Duration (minutes)</label>
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Duration (min)</label>
               <input type="number" value={params.duration_minutes ?? 10} min={1}
-                onChange={e => updateParam('duration_minutes', Number(e.target.value))}
-                className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
+                onChange={e => updateParam('duration_minutes', Number(e.target.value))} className={inputCls} />
             </div>
           </div>
         );
@@ -226,253 +202,46 @@ export default function RulesPage() {
     }
   };
 
+  const typeIcons: Record<string, any> = {
+    teams: <MessageSquare style={{ width: '13px', height: '13px', color: '#a78bfa' }} />,
+    email: <Mail style={{ width: '13px', height: '13px', color: '#60a5fa' }} />,
+    webhook: <Webhook style={{ width: '13px', height: '13px', color: '#34d399' }} />,
+    pagerduty: <Bell style={{ width: '13px', height: '13px', color: '#fbbf24' }} />,
+    opsgenie: <Bell style={{ width: '13px', height: '13px', color: '#fb923c' }} />,
+  };
+
   return (
     <>
       <TopBar
-        title="Alert Rules & Integrations"
+        title="Alert Rules"
         actions={
           <div className="flex gap-2">
-            <Button size="sm" variant="secondary" onClick={() => window.location.href = '/alerting'}>
-              <ArrowLeft className="w-3 h-3 mr-1" /> Back to Alerts
+            <Link href="/alerting">
+              <Button size="sm" variant="secondary">
+                <ArrowLeft style={{ width: '11px', height: '11px', marginRight: '4px' }} />Alerts
+              </Button>
+            </Link>
+            <Button size="sm" variant="secondary" onClick={() => setShowIntegrations(true)}>
+              <Settings2 style={{ width: '11px', height: '11px', marginRight: '4px' }} />Integrations
             </Button>
-            <Button size="sm" variant="secondary" onClick={() => setShowIntegrations(!showIntegrations)}>
-              <Settings2 className="w-3 h-3 mr-1" /> Integrations
-            </Button>
-            <Button size="sm" onClick={openCreate}>
-              <Plus className="w-3 h-3 mr-1" /> New Rule
+            <Button size="sm" onClick={() => { resetForm(); setShowForm(true); }}>
+              <Plus style={{ width: '11px', height: '11px', marginRight: '4px' }} />New Rule
             </Button>
           </div>
         }
       />
 
-      <div className="p-6 space-y-6">
-        {/* Integrations Panel */}
-        {showIntegrations && (
-          <Card>
-            <h3 className="text-sm font-semibold text-reap3r-text mb-4 flex items-center gap-2">
-              <Settings2 className="w-4 h-4 text-reap3r-accent" /> Notification Integrations
-            </h3>
-
-            {/* Existing integrations */}
-            {integrations.length > 0 && (
-              <div className="space-y-2 mb-4">
-                {integrations.map(integ => (
-                  <div key={integ.id} className="flex items-center justify-between bg-reap3r-bg p-3 rounded-lg border border-reap3r-border">
-                    <div>
-                      <span className="text-sm font-medium text-reap3r-text">{integ.name}</span>
-                      <span className="ml-2 inline-block"><Badge>{integ.type}</Badge></span>
-                      {!integ.is_enabled && <span className="ml-1 inline-block"><Badge variant="danger">Disabled</Badge></span>}
-                    </div>
-                    <div className="flex gap-1">
-                      <Button size="sm" variant="secondary" onClick={() => testChannel(integ.type)}>Test</Button>
-                      <Button size="sm" variant="danger" onClick={() => deleteIntegration(integ.id)}>
-                        <Trash2 className="w-3 h-3" />
-                      </Button>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-
-            {/* Add integration form */}
-            <div className="grid grid-cols-3 gap-3">
-              <select value={integType} onChange={e => setIntegType(e.target.value)}
-                className="bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text">
-                {channelOptions.map(c => <option key={c} value={c}>{c}</option>)}
-              </select>
-              <input value={integName} onChange={e => setIntegName(e.target.value)}
-                placeholder="Integration name"
-                className="bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text" />
-              <Button size="sm" onClick={saveIntegration} disabled={!integName}>
-                <Plus className="w-3 h-3 mr-1" /> Add
-              </Button>
-            </div>
-            <textarea value={integConfig} onChange={e => setIntegConfig(e.target.value)} rows={3}
-              placeholder='{"webhook_url":"https://..."}' 
-              className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-xs text-reap3r-text font-mono mt-2 resize-none" />
-            <p className="text-xs text-reap3r-muted mt-1">
-              Teams: {`{"webhook_url":"..."}`} · PagerDuty: {`{"routing_key":"..."}`} · Opsgenie: {`{"api_key":"..."}`} · Email: {`{"host":"smtp.example.com","from":"alerts@..."}`}
-            </p>
-          </Card>
-        )}
-
-        {/* Rule creation/edit form */}
-        {showForm && (
-          <Card>
-            <div className="flex items-center justify-between mb-4">
-              <h3 className="text-sm font-semibold text-reap3r-text">
-                {editingRule ? 'Edit Rule' : 'Create Alert Rule'}
-              </h3>
-              <button onClick={() => { setShowForm(false); resetForm(); }} className="text-reap3r-muted hover:text-reap3r-text">
-                <X className="w-4 h-4" />
-              </button>
-            </div>
-
-            <div className="space-y-4">
-              {/* Rule type picker */}
-              <div>
-                <label className="text-xs text-reap3r-muted mb-2 block">Rule Type</label>
-                <div className="grid grid-cols-2 md:grid-cols-5 gap-2">
-                  {Object.entries(ruleTypeInfo).map(([key, info]) => (
-                    <button key={key} onClick={() => {
-                      setRuleType(key);
-                      if (key === 'agent_offline') setParams({ threshold_minutes: 10 });
-                      else if (key === 'job_failed') setParams({ failure_count: 3, window_minutes: 30 });
-                      else setParams({});
-                    }}
-                      className={`flex flex-col items-center gap-1 p-3 rounded-lg border text-xs transition-colors ${ruleType === key ? 'border-reap3r-accent bg-reap3r-accent/10 text-reap3r-accent' : 'border-reap3r-border text-reap3r-muted hover:text-reap3r-text'}`}>
-                      <info.icon className="w-5 h-5" />
-                      {info.label}
-                    </button>
-                  ))}
-                </div>
-                <p className="text-xs text-reap3r-muted mt-1">{ruleTypeInfo[ruleType]?.description}</p>
-              </div>
-
-              {/* Name & Description */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs text-reap3r-muted">Name</label>
-                  <input value={name} onChange={e => setName(e.target.value)} placeholder="Rule name"
-                    className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
-                </div>
-                <div>
-                  <label className="text-xs text-reap3r-muted">Severity</label>
-                  <select value={severity} onChange={e => setSeverity(e.target.value)}
-                    className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1">
-                    {['info', 'low', 'medium', 'high', 'critical'].map(s => <option key={s} value={s}>{s}</option>)}
-                  </select>
-                </div>
-              </div>
-              <div>
-                <label className="text-xs text-reap3r-muted">Description</label>
-                <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2}
-                  className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1 resize-none" />
-              </div>
-
-              {/* Scope */}
-              <div className="grid grid-cols-2 gap-3">
-                <div>
-                  <label className="text-xs text-reap3r-muted">Scope</label>
-                  <select value={scopeType} onChange={e => setScopeType(e.target.value)}
-                    className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1">
-                    <option value="all">All agents</option>
-                    <option value="company">By Company</option>
-                    <option value="folder">By Folder</option>
-                    <option value="tag">By Tag</option>
-                  </select>
-                </div>
-                {scopeType !== 'all' && (
-                  <div>
-                    <label className="text-xs text-reap3r-muted">{scopeType === 'tag' ? 'Tag' : `${scopeType} ID`}</label>
-                    <input value={scopeValue} onChange={e => setScopeValue(e.target.value)}
-                      placeholder={scopeType === 'tag' ? 'production' : 'UUID'}
-                      className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
-                  </div>
-                )}
-              </div>
-
-              {/* Rule-specific params */}
-              {renderParamFields()}
-
-              {/* Cooldown */}
-              <div>
-                <label className="text-xs text-reap3r-muted">Cooldown / Dedup (seconds)</label>
-                <input type="number" value={cooldown} min={0} max={86400}
-                  onChange={e => setCooldown(Number(e.target.value))}
-                  className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text mt-1" />
-              </div>
-
-              {/* Escalation chain */}
-              <div>
-                <div className="flex items-center justify-between mb-2">
-                  <label className="text-xs text-reap3r-muted">Escalation Chain</label>
-                  <Button size="sm" variant="secondary" onClick={addEscalation}>
-                    <Plus className="w-3 h-3 mr-1" /> Add Step
-                  </Button>
-                </div>
-                <div className="space-y-3">
-                  {escalations.map((esc, idx) => (
-                    <div key={idx} className="flex items-start gap-2 bg-reap3r-bg p-3 rounded-lg border border-reap3r-border">
-                      <span className="text-xs text-reap3r-accent font-bold mt-2">N{idx + 1}</span>
-                      <div className="flex-1 grid grid-cols-4 gap-2 text-xs">
-                        <div>
-                          <label className="text-reap3r-muted">Delay (sec)</label>
-                          <input type="number" value={esc.delay_sec} min={0}
-                            onChange={e => updateEscalation(idx, 'delay_sec', Number(e.target.value))}
-                            className="w-full bg-reap3r-surface border border-reap3r-border rounded px-2 py-1.5 text-reap3r-text mt-0.5" />
-                        </div>
-                        <div>
-                          <label className="text-reap3r-muted">Target</label>
-                          <select value={esc.target_type}
-                            onChange={e => updateEscalation(idx, 'target_type', e.target.value)}
-                            className="w-full bg-reap3r-surface border border-reap3r-border rounded px-2 py-1.5 text-reap3r-text mt-0.5">
-                            <option value="role">Role</option>
-                            <option value="team">Team</option>
-                            <option value="user">User</option>
-                          </select>
-                        </div>
-                        <div>
-                          <label className="text-reap3r-muted">{esc.target_type === 'role' ? 'Role' : 'ID'}</label>
-                          <input value={esc.target_type === 'role' ? (esc.target_role ?? '') : (esc.target_id ?? '')}
-                            onChange={e => updateEscalation(idx, esc.target_type === 'role' ? 'target_role' : 'target_id', e.target.value)}
-                            placeholder={esc.target_type === 'role' ? 'org_admin' : 'UUID'}
-                            className="w-full bg-reap3r-surface border border-reap3r-border rounded px-2 py-1.5 text-reap3r-text mt-0.5" />
-                        </div>
-                        <div>
-                          <label className="text-reap3r-muted">Channels</label>
-                          <div className="flex flex-wrap gap-1 mt-0.5">
-                            {channelOptions.map(ch => (
-                              <button key={ch}
-                                onClick={() => {
-                                  const channels = esc.channels.includes(ch)
-                                    ? esc.channels.filter((c: string) => c !== ch)
-                                    : [...esc.channels, ch];
-                                  updateEscalation(idx, 'channels', channels);
-                                }}
-                                className={`px-1.5 py-0.5 rounded text-[10px] ${esc.channels.includes(ch) ? 'bg-reap3r-accent/20 text-reap3r-accent' : 'bg-reap3r-surface text-reap3r-muted'}`}>
-                                {ch}
-                              </button>
-                            ))}
-                          </div>
-                        </div>
-                      </div>
-                      {escalations.length > 1 && (
-                        <button onClick={() => removeEscalation(idx)} className="text-reap3r-muted hover:text-red-400 mt-2">
-                          <X className="w-3 h-3" />
-                        </button>
-                      )}
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              {/* Enabled toggle */}
-              <label className="flex items-center gap-2 text-sm text-reap3r-text cursor-pointer">
-                <input type="checkbox" checked={isEnabled} onChange={e => setIsEnabled(e.target.checked)}
-                  className="rounded border-reap3r-border" />
-                Enable rule immediately
-              </label>
-
-              {/* Save */}
-              <div className="flex justify-end gap-2">
-                <Button variant="secondary" onClick={() => { setShowForm(false); resetForm(); }}>Cancel</Button>
-                <Button onClick={handleSave} disabled={!name}>
-                  <Save className="w-3 h-3 mr-1" /> {editingRule ? 'Update' : 'Create'} Rule
-                </Button>
-              </div>
-            </div>
-          </Card>
-        )}
-
+      <div className="p-6 space-y-4 animate-fade-in">
         {/* Rules list */}
         {loading ? (
-          <div className="text-reap3r-muted text-sm">Loading rules...</div>
-        ) : rules.length === 0 && !showForm ? (
+          <div className="space-y-2">
+            {[...Array(3)].map((_, i) => <div key={i} className="h-16 bg-reap3r-card border border-reap3r-border rounded-xl animate-pulse" />)}
+          </div>
+        ) : rules.length === 0 ? (
           <EmptyState
-            icon={<Bell className="w-8 h-8" />}
+            icon={<Bell style={{ width: '28px', height: '28px' }} />}
             title="No alert rules"
-            description="Create your first alert rule to start monitoring your infrastructure."
+            description="Create your first alert rule to monitor your infrastructure."
           />
         ) : (
           <div className="space-y-2">
@@ -480,49 +249,248 @@ export default function RulesPage() {
               const info = ruleTypeInfo[rule.rule_type];
               const Icon = info?.icon ?? Bell;
               return (
-                <Card key={rule.id} className="flex items-center justify-between !py-3">
-                  <div className="flex items-center gap-3">
-                    <div className={`w-8 h-8 rounded-lg flex items-center justify-center ${rule.is_enabled ? 'bg-reap3r-accent/10' : 'bg-reap3r-bg'}`}>
-                      <Icon className={`w-4 h-4 ${rule.is_enabled ? 'text-reap3r-accent' : 'text-reap3r-muted'}`} />
+                <div key={rule.id} className="bg-reap3r-card border border-reap3r-border rounded-xl px-5 py-3.5 flex items-center justify-between gap-4 hover:border-reap3r-border-light transition-all">
+                  <div className="flex items-center gap-3 flex-1 min-w-0">
+                    <div className={`w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0 ${rule.is_enabled ? 'bg-white/6 border border-white/10' : 'bg-reap3r-surface border border-reap3r-border'}`}>
+                      <Icon style={{ width: '16px', height: '16px', color: rule.is_enabled ? '#fff' : '#5c5c5c' }} />
                     </div>
-                    <div>
-                      <p className="text-sm font-medium text-reap3r-text">{rule.name}</p>
-                      <p className="text-xs text-reap3r-muted">
+                    <div className="min-w-0 flex-1">
+                      <p className="text-[12px] font-semibold text-white truncate">{rule.name}</p>
+                      <p className="text-[10px] text-reap3r-muted font-mono mt-0.5">
                         {info?.label ?? rule.rule_type} · scope: {rule.scope_type}
-                        {rule.scope_value ? ` (${rule.scope_value})` : ''}
+                        {rule.scope_value ? ` (${rule.scope_value.slice(0, 8)})` : ''}
                         {' · '}{rule.escalations?.length ?? 0} escalation step(s)
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2">
-                    <Badge variant={severityColor(rule.severity) as any}>{rule.severity}</Badge>
-                    <Badge variant={rule.is_enabled ? 'success' : 'default'}>
-                      {rule.is_enabled ? 'Active' : 'Disabled'}
-                    </Badge>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Badge variant={severityVariant(rule.severity)}>{rule.severity}</Badge>
+                    <Badge variant={rule.is_enabled ? 'success' : 'default'}>{rule.is_enabled ? 'Active' : 'Disabled'}</Badge>
                     <Button size="sm" variant="secondary" onClick={() => handleToggle(rule)}>
                       {rule.is_enabled ? 'Disable' : 'Enable'}
                     </Button>
                     <Button size="sm" variant="secondary" onClick={() => openEdit(rule)}>Edit</Button>
                     <Button size="sm" variant="danger" onClick={() => handleDelete(rule.id)}>
-                      <Trash2 className="w-3 h-3" />
+                      <Trash2 style={{ width: '11px', height: '11px' }} />
                     </Button>
                   </div>
-                </Card>
+                </div>
               );
             })}
           </div>
         )}
       </div>
+
+      {/* Rule form modal */}
+      <Modal open={showForm} onClose={() => { setShowForm(false); resetForm(); }} title={editingRule ? 'Edit Rule' : 'Create Alert Rule'}>
+        <div className="space-y-4">
+          {/* Rule type picker */}
+          <div className="space-y-2">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Rule Type</label>
+            <div className="grid grid-cols-5 gap-2">
+              {Object.entries(ruleTypeInfo).map(([key, info]) => (
+                <button key={key} onClick={() => {
+                  setRuleType(key);
+                  if (key === 'agent_offline') setParams({ threshold_minutes: 10 });
+                  else if (key === 'job_failed') setParams({ failure_count: 3, window_minutes: 30 });
+                  else setParams({});
+                }}
+                  className={`flex flex-col items-center gap-1.5 p-3 rounded-xl border text-[10px] font-semibold uppercase tracking-[0.06em] transition-all ${
+                    ruleType === key ? 'bg-white/8 text-white border-white/20' : 'text-reap3r-muted border-reap3r-border hover:text-reap3r-light hover:border-reap3r-border-light'
+                  }`}>
+                  <info.icon style={{ width: '16px', height: '16px' }} />
+                  <span className="text-center leading-tight">{info.label}</span>
+                </button>
+              ))}
+            </div>
+            <p className="text-[10px] text-reap3r-muted">{ruleTypeInfo[ruleType]?.description}</p>
+          </div>
+
+          {/* Name & Severity */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Name</label>
+              <input value={name} onChange={e => setName(e.target.value)} placeholder="Rule name" className={inputCls} />
+            </div>
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Severity</label>
+              <select value={severity} onChange={e => setSeverity(e.target.value)} className={selectCls}>
+                {['info', 'low', 'medium', 'high', 'critical'].map(s => <option key={s} value={s}>{s}</option>)}
+              </select>
+            </div>
+          </div>
+
+          <div className="space-y-1.5">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Description</label>
+            <textarea value={description} onChange={e => setDescription(e.target.value)} rows={2}
+              className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-white resize-none placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20" />
+          </div>
+
+          {/* Scope */}
+          <div className="grid grid-cols-2 gap-3">
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Scope</label>
+              <select value={scopeType} onChange={e => setScopeType(e.target.value)} className={selectCls}>
+                <option value="all">All agents</option>
+                <option value="company">By Company</option>
+                <option value="folder">By Folder</option>
+                <option value="tag">By Tag</option>
+              </select>
+            </div>
+            {scopeType !== 'all' && (
+              <div className="space-y-1.5">
+                <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">{scopeType === 'tag' ? 'Tag' : `${scopeType} ID`}</label>
+                <input value={scopeValue} onChange={e => setScopeValue(e.target.value)}
+                  placeholder={scopeType === 'tag' ? 'production' : 'UUID'} className={inputCls} />
+              </div>
+            )}
+          </div>
+
+          {/* Rule-specific params */}
+          {renderParamFields()}
+
+          {/* Cooldown */}
+          <div className="space-y-1.5">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Cooldown / Dedup (seconds)</label>
+            <input type="number" value={cooldown} min={0} max={86400}
+              onChange={e => setCooldown(Number(e.target.value))} className={inputCls} />
+          </div>
+
+          {/* Escalation chain */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Escalation Chain</label>
+              <Button size="sm" variant="secondary" onClick={addEscalation}>
+                <Plus style={{ width: '11px', height: '11px', marginRight: '4px' }} />Add Step
+              </Button>
+            </div>
+            <div className="space-y-2">
+              {escalations.map((esc, idx) => (
+                <div key={idx} className="flex items-start gap-2 bg-reap3r-bg p-3 rounded-xl border border-reap3r-border">
+                  <span className="text-[11px] text-white/40 font-black mt-2 w-4 text-center">N{idx + 1}</span>
+                  <div className="flex-1 grid grid-cols-4 gap-2 text-xs">
+                    <div>
+                      <label className="block text-reap3r-muted mb-0.5">Delay (sec)</label>
+                      <input type="number" value={esc.delay_sec} min={0}
+                        onChange={e => updateEscalation(idx, 'delay_sec', Number(e.target.value))}
+                        className="w-full bg-reap3r-surface border border-reap3r-border rounded-lg px-2 py-1.5 text-white text-xs focus:outline-none focus:ring-1 focus:ring-white/20" />
+                    </div>
+                    <div>
+                      <label className="block text-reap3r-muted mb-0.5">Target</label>
+                      <select value={esc.target_type} onChange={e => updateEscalation(idx, 'target_type', e.target.value)}
+                        className="w-full bg-reap3r-surface border border-reap3r-border rounded-lg px-2 py-1.5 text-white text-xs focus:outline-none">
+                        <option value="role">Role</option>
+                        <option value="team">Team</option>
+                        <option value="user">User</option>
+                      </select>
+                    </div>
+                    <div>
+                      <label className="block text-reap3r-muted mb-0.5">{esc.target_type === 'role' ? 'Role' : 'ID'}</label>
+                      <input value={esc.target_type === 'role' ? (esc.target_role ?? '') : (esc.target_id ?? '')}
+                        onChange={e => updateEscalation(idx, esc.target_type === 'role' ? 'target_role' : 'target_id', e.target.value)}
+                        placeholder={esc.target_type === 'role' ? 'org_admin' : 'UUID'}
+                        className="w-full bg-reap3r-surface border border-reap3r-border rounded-lg px-2 py-1.5 text-white text-xs focus:outline-none focus:ring-1 focus:ring-white/20" />
+                    </div>
+                    <div>
+                      <label className="block text-reap3r-muted mb-0.5">Channels</label>
+                      <div className="flex flex-wrap gap-1 mt-0.5">
+                        {channelOptions.map(ch => (
+                          <button key={ch}
+                            onClick={() => {
+                              const channels = esc.channels.includes(ch)
+                                ? esc.channels.filter((c: string) => c !== ch)
+                                : [...esc.channels, ch];
+                              updateEscalation(idx, 'channels', channels);
+                            }}
+                            className={`px-1.5 py-0.5 rounded text-[10px] font-semibold transition-all ${
+                              esc.channels.includes(ch) ? 'bg-white/10 text-white' : 'bg-reap3r-surface text-reap3r-muted hover:text-reap3r-light'
+                            }`}>
+                            {ch}
+                          </button>
+                        ))}
+                      </div>
+                    </div>
+                  </div>
+                  {escalations.length > 1 && (
+                    <button onClick={() => removeEscalation(idx)} className="text-reap3r-muted hover:text-reap3r-danger mt-2 transition-colors">
+                      <X style={{ width: '12px', height: '12px' }} />
+                    </button>
+                  )}
+                </div>
+              ))}
+            </div>
+          </div>
+
+          {/* Enabled toggle */}
+          <label className="flex items-center gap-2.5 cursor-pointer">
+            <div
+              onClick={() => setIsEnabled(!isEnabled)}
+              className={`w-9 h-5 rounded-full transition-all relative ${isEnabled ? 'bg-white/20' : 'bg-reap3r-border'}`}
+            >
+              <div className={`absolute top-0.5 w-4 h-4 rounded-full transition-all ${isEnabled ? 'left-4 bg-white' : 'left-0.5 bg-reap3r-muted'}`} />
+            </div>
+            <span className="text-xs text-white/70">Enable rule immediately</span>
+          </label>
+
+          <div className="flex gap-2 justify-end pt-2 border-t border-reap3r-border">
+            <Button variant="secondary" onClick={() => { setShowForm(false); resetForm(); }}>Cancel</Button>
+            <Button onClick={handleSave} disabled={!name}>
+              <Check style={{ width: '11px', height: '11px', marginRight: '4px' }} />{editingRule ? 'Update' : 'Create'} Rule
+            </Button>
+          </div>
+        </div>
+      </Modal>
+
+      {/* Integrations modal */}
+      <Modal open={showIntegrations} onClose={() => setShowIntegrations(false)} title="Notification Integrations">
+        <div className="space-y-4">
+          {/* Existing integrations */}
+          {integrations.length > 0 && (
+            <div className="space-y-2">
+              {integrations.map(integ => (
+                <div key={integ.id} className="flex items-center justify-between bg-reap3r-bg p-3 rounded-xl border border-reap3r-border">
+                  <div className="flex items-center gap-3">
+                    {typeIcons[integ.type] ?? <Bell style={{ width: '13px', height: '13px' }} />}
+                    <div>
+                      <p className="text-[12px] font-semibold text-white">{integ.name}</p>
+                      <p className="text-[10px] text-reap3r-muted capitalize">{integ.type}</p>
+                    </div>
+                  </div>
+                  <div className="flex gap-1.5">
+                    <Button size="sm" variant="secondary" onClick={() => testChannel(integ.type)}>
+                      <Send style={{ width: '11px', height: '11px', marginRight: '4px' }} />Test
+                    </Button>
+                    <Button size="sm" variant="danger" onClick={() => deleteIntegration(integ.id)}>
+                      <Trash2 style={{ width: '11px', height: '11px' }} />
+                    </Button>
+                  </div>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Add integration form */}
+          <div className="pt-2 border-t border-reap3r-border space-y-3">
+            <p className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em]">Add Integration</p>
+            <div className="grid grid-cols-2 gap-2">
+              <select value={integType} onChange={e => setIntegType(e.target.value)} className={selectCls}>
+                {channelOptions.map(c => <option key={c} value={c}>{c}</option>)}
+              </select>
+              <input value={integName} onChange={e => setIntegName(e.target.value)}
+                placeholder="Integration name" className={inputCls} />
+            </div>
+            <textarea value={integConfig} onChange={e => setIntegConfig(e.target.value)} rows={2}
+              placeholder='{"webhook_url":"https://..."}'
+              className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-xs text-white font-mono resize-none focus:outline-none focus:ring-1 focus:ring-white/20" />
+            <p className="text-[10px] text-reap3r-muted">
+              Teams: {`{"webhook_url":"..."}`} · PagerDuty: {`{"routing_key":"..."}`} · Opsgenie: {`{"api_key":"..."}`}
+            </p>
+            <Button size="sm" onClick={saveIntegration} disabled={!integName}>
+              <Plus style={{ width: '11px', height: '11px', marginRight: '4px' }} />Add Integration
+            </Button>
+          </div>
+        </div>
+      </Modal>
     </>
   );
-}
-
-function severityColor(s: string) {
-  switch (s) {
-    case 'critical': return 'danger';
-    case 'high': return 'danger';
-    case 'medium': return 'warning';
-    case 'low': return 'default';
-    default: return 'default';
-  }
 }

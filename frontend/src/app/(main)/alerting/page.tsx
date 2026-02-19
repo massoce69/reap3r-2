@@ -1,35 +1,31 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
+import Link from 'next/link';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState } from '@/components/ui';
 import { api } from '@/lib/api';
 import {
-  Bell, BellOff, Check, CheckCheck, Clock, AlertTriangle,
-  Eye, Filter, ChevronDown, X, MessageSquare,
+  Bell, BellOff, Check, CheckCheck, Clock, AlertTriangle, X, Filter,
 } from 'lucide-react';
 
-const severityVariant = (s: string) => {
-  switch (s) {
-    case 'critical': return 'danger';
-    case 'high': return 'danger';
-    case 'medium': return 'warning';
-    case 'low': return 'default';
-    default: return 'default';
-  }
+const severityVariant = (s: string): 'default' | 'success' | 'warning' | 'danger' | 'accent' => {
+  if (s === 'critical' || s === 'high') return 'danger';
+  if (s === 'medium') return 'warning';
+  return 'default';
 };
 
 const statusIcon = (s: string) => {
   switch (s) {
-    case 'open': return <Bell className="w-4 h-4 text-red-400" />;
-    case 'acknowledged': return <Check className="w-4 h-4 text-yellow-400" />;
-    case 'snoozed': return <Clock className="w-4 h-4 text-blue-400" />;
-    case 'resolved': return <CheckCheck className="w-4 h-4 text-green-400" />;
-    default: return <Bell className="w-4 h-4" />;
+    case 'open':         return <Bell className="text-reap3r-danger" style={{ width: '13px', height: '13px' }} />;
+    case 'acknowledged': return <Check className="text-reap3r-warning" style={{ width: '13px', height: '13px' }} />;
+    case 'snoozed':      return <Clock style={{ width: '13px', height: '13px', color: '#60a5fa' }} />;
+    case 'resolved':     return <CheckCheck className="text-reap3r-success" style={{ width: '13px', height: '13px' }} />;
+    default:             return <Bell className="text-reap3r-muted" style={{ width: '13px', height: '13px' }} />;
   }
 };
 
 type StatusFilter = '' | 'open' | 'acknowledged' | 'snoozed' | 'resolved';
-type SeverityFilter = '' | 'critical' | 'high' | 'medium' | 'low' | 'info';
+type SeverityFilter = '' | 'critical' | 'high' | 'medium' | 'low';
 
 export default function AlertingPage() {
   const [events, setEvents] = useState<any[]>([]);
@@ -63,121 +59,123 @@ export default function AlertingPage() {
 
   const handleAck = async (id: string) => {
     await api.alerts.events.ack(id, actionNote || undefined);
-    setActionNote('');
-    loadEvents();
-    loadStats();
+    setActionNote(''); loadEvents(); loadStats();
   };
 
   const handleResolve = async (id: string) => {
     await api.alerts.events.resolve(id, actionNote || undefined);
-    setActionNote('');
-    loadEvents();
-    loadStats();
+    setActionNote(''); loadEvents(); loadStats();
   };
 
   const handleSnooze = async (id: string) => {
     await api.alerts.events.snooze(id, snoozeMin, actionNote || undefined);
-    setActionNote('');
-    loadEvents();
-    loadStats();
+    setActionNote(''); loadEvents(); loadStats();
   };
 
   const openDetail = async (eventId: string) => {
     const detail = await api.alerts.events.get(eventId);
-    setSelectedEvent(detail);
-    setShowDetail(true);
+    setSelectedEvent(detail); setShowDetail(true);
   };
-
-  const statCards = stats ? [
-    { label: 'Open', value: stats.open_count, color: 'text-red-400' },
-    { label: 'Acknowledged', value: stats.ack_count, color: 'text-yellow-400' },
-    { label: 'Snoozed', value: stats.snoozed_count, color: 'text-blue-400' },
-    { label: 'Resolved (24h)', value: stats.resolved_24h, color: 'text-green-400' },
-    { label: 'Critical Open', value: stats.critical_open, color: 'text-red-500' },
-  ] : [];
 
   return (
     <>
       <TopBar
         title="Alerting"
         actions={
-          <Button size="sm" onClick={() => window.location.href = '/alerting/rules'}>
-            <Filter className="w-3 h-3 mr-1" /> Manage Rules
-          </Button>
+          <Link href="/alerting/rules">
+            <Button size="sm" variant="secondary">
+              <Filter style={{ width: '12px', height: '12px', marginRight: '4px' }} />Manage Rules
+            </Button>
+          </Link>
         }
       />
 
-      <div className="p-6 space-y-6">
-        {/* Stats Row */}
+      <div className="p-6 space-y-5 animate-fade-in">
+
+        {/* Stats */}
         {stats && (
           <div className="grid grid-cols-2 md:grid-cols-5 gap-3">
-            {statCards.map(s => (
+            {[
+              { label: 'Open', value: stats.open_count, color: 'text-reap3r-danger' },
+              { label: 'Acknowledged', value: stats.ack_count, color: 'text-reap3r-warning' },
+              { label: 'Snoozed', value: stats.snoozed_count, color: 'text-blue-400' },
+              { label: 'Resolved (24h)', value: stats.resolved_24h, color: 'text-reap3r-success' },
+              { label: 'Critical Open', value: stats.critical_open, color: 'text-reap3r-danger' },
+            ].map(s => (
               <Card key={s.label} className="!py-3 text-center">
-                <p className={`text-2xl font-bold ${s.color}`}>{s.value}</p>
-                <p className="text-xs text-reap3r-muted">{s.label}</p>
+                <p className={`text-2xl font-black font-mono ${s.color}`}>{s.value}</p>
+                <p className="text-[10px] text-reap3r-muted uppercase tracking-[0.1em] mt-1">{s.label}</p>
               </Card>
             ))}
           </div>
         )}
 
         {/* Filters */}
-        <div className="flex flex-wrap gap-2 items-center">
-          <span className="text-xs text-reap3r-muted">Status:</span>
-          {(['', 'open', 'acknowledged', 'snoozed', 'resolved'] as StatusFilter[]).map(s => (
-            <button key={s || 'all'} onClick={() => { setStatusFilter(s); setPage(1); }}
-              className={`px-3 py-1 rounded-md text-xs transition-colors ${statusFilter === s ? 'bg-reap3r-accent/10 text-reap3r-accent' : 'text-reap3r-muted hover:text-reap3r-text'}`}>
-              {s || 'All'}
-            </button>
-          ))}
-          <span className="text-xs text-reap3r-muted ml-4">Severity:</span>
-          {(['', 'critical', 'high', 'medium', 'low'] as SeverityFilter[]).map(s => (
-            <button key={s || 'all'} onClick={() => { setSeverityFilter(s); setPage(1); }}
-              className={`px-3 py-1 rounded-md text-xs transition-colors ${severityFilter === s ? 'bg-reap3r-accent/10 text-reap3r-accent' : 'text-reap3r-muted hover:text-reap3r-text'}`}>
-              {s || 'All'}
-            </button>
-          ))}
-        </div>
+        <Card className="!py-3 !px-4 flex flex-wrap gap-3 items-center">
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-reap3r-muted uppercase tracking-wider mr-1">Status:</span>
+            {(['', 'open', 'acknowledged', 'snoozed', 'resolved'] as StatusFilter[]).map(s => (
+              <button key={s || 'all'} onClick={() => { setStatusFilter(s); setPage(1); }}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold uppercase tracking-[0.06em] transition-all ${
+                  statusFilter === s ? 'bg-white/8 text-white border border-white/12' : 'text-reap3r-muted hover:text-reap3r-light'
+                }`}>
+                {s || 'All'}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1">
+            <span className="text-[10px] text-reap3r-muted uppercase tracking-wider mr-1">Severity:</span>
+            {(['', 'critical', 'high', 'medium', 'low'] as SeverityFilter[]).map(s => (
+              <button key={s || 'all'} onClick={() => { setSeverityFilter(s); setPage(1); }}
+                className={`px-2.5 py-1 rounded-lg text-[10px] font-semibold uppercase tracking-[0.06em] transition-all ${
+                  severityFilter === s ? 'bg-white/8 text-white border border-white/12' : 'text-reap3r-muted hover:text-reap3r-light'
+                }`}>
+                {s || 'All'}
+              </button>
+            ))}
+          </div>
+          <span className="text-[10px] text-reap3r-muted font-mono ml-auto">{total} alerts</span>
+        </Card>
 
-        {/* Events list */}
+        {/* Events */}
         {loading ? (
-          <div className="text-reap3r-muted text-sm">Loading alerts...</div>
-        ) : events.length === 0 ? (
-          <EmptyState
-            icon={<BellOff className="w-8 h-8" />}
-            title="No alerts"
-            description="No alert events match your filters."
-          />
-        ) : (
           <div className="space-y-2">
+            {[...Array(5)].map((_, i) => <div key={i} className="h-16 bg-reap3r-card border border-reap3r-border rounded-xl animate-pulse" />)}
+          </div>
+        ) : events.length === 0 ? (
+          <EmptyState icon={<BellOff style={{ width: '28px', height: '28px' }} />} title="No alerts" description="No alert events match your filters." />
+        ) : (
+          <div className="space-y-1.5">
             {events.map(ev => (
-              <div key={ev.id} className="bg-reap3r-surface border border-reap3r-border rounded-xl px-5 py-3 hover:border-reap3r-accent/30 transition-colors cursor-pointer"
-                onClick={() => openDetail(ev.id)}>
-                <div className="flex items-center justify-between">
+              <div
+                key={ev.id}
+                className="bg-reap3r-card border border-reap3r-border rounded-xl px-5 py-3.5 hover:border-reap3r-border-light transition-all cursor-pointer"
+                onClick={() => openDetail(ev.id)}
+              >
+                <div className="flex items-center justify-between gap-4">
                   <div className="flex items-center gap-3 flex-1 min-w-0">
                     {statusIcon(ev.status)}
                     <div className="min-w-0 flex-1">
-                      <p className="text-sm font-medium text-reap3r-text truncate">{ev.title}</p>
-                      <p className="text-xs text-reap3r-muted">
+                      <p className="text-[12px] font-semibold text-white truncate">{ev.title}</p>
+                      <p className="text-[10px] text-reap3r-muted font-mono mt-0.5">
                         {ev.rule_name && <span className="mr-2">{ev.rule_name}</span>}
-                        {ev.entity_type}
-                        {ev.entity_id ? ` · ${ev.entity_id.slice(0, 8)}...` : ''}
-                        {' · '}{new Date(ev.created_at).toLocaleString()}
+                        {ev.entity_type} · {new Date(ev.created_at).toLocaleString()}
                       </p>
                     </div>
                   </div>
-                  <div className="flex items-center gap-2 ml-3 flex-shrink-0">
-                    <Badge variant={severityVariant(ev.severity) as any}>{ev.severity}</Badge>
-                    <Badge variant={ev.status === 'open' ? 'danger' : ev.status === 'acknowledged' ? 'warning' : ev.status === 'snoozed' ? 'default' : 'success'}>
+                  <div className="flex items-center gap-2 shrink-0">
+                    <Badge variant={severityVariant(ev.severity)}>{ev.severity}</Badge>
+                    <Badge variant={ev.status === 'open' ? 'danger' : ev.status === 'acknowledged' ? 'warning' : ev.status === 'resolved' ? 'success' : 'default'}>
                       {ev.status}
                     </Badge>
                     {ev.status === 'open' && (
                       <Button size="sm" variant="secondary" onClick={(e) => { e.stopPropagation(); handleAck(ev.id); }}>
-                        <Check className="w-3 h-3" />
+                        <Check style={{ width: '11px', height: '11px' }} />
                       </Button>
                     )}
                     {(ev.status === 'open' || ev.status === 'acknowledged') && (
-                      <Button size="sm" variant="primary" onClick={(e) => { e.stopPropagation(); handleResolve(ev.id); }}>
-                        <CheckCheck className="w-3 h-3" />
+                      <Button size="sm" onClick={(e) => { e.stopPropagation(); handleResolve(ev.id); }}>
+                        <CheckCheck style={{ width: '11px', height: '11px' }} />
                       </Button>
                     )}
                   </div>
@@ -187,70 +185,69 @@ export default function AlertingPage() {
           </div>
         )}
 
-        {/* Pagination */}
         {total > 25 && (
           <div className="flex justify-center gap-2">
-            <Button size="sm" variant="secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>Previous</Button>
-            <span className="text-sm text-reap3r-muted py-2">Page {page} of {Math.ceil(total / 25)}</span>
-            <Button size="sm" variant="secondary" disabled={page >= Math.ceil(total / 25)} onClick={() => setPage(p => p + 1)}>Next</Button>
+            <Button size="sm" variant="secondary" disabled={page <= 1} onClick={() => setPage(p => p - 1)}>← Prev</Button>
+            <span className="text-xs text-reap3r-muted py-2 font-mono">Page {page} / {Math.ceil(total / 25)}</span>
+            <Button size="sm" variant="secondary" disabled={page >= Math.ceil(total / 25)} onClick={() => setPage(p => p + 1)}>Next →</Button>
           </div>
         )}
       </div>
 
-      {/* Detail Slide-over */}
+      {/* Detail slide-over */}
       {showDetail && selectedEvent && (
         <div className="fixed inset-0 z-50 flex justify-end">
-          <div className="absolute inset-0 bg-black/50" onClick={() => setShowDetail(false)} />
-          <div className="relative w-full max-w-lg bg-reap3r-surface border-l border-reap3r-border h-full overflow-y-auto p-6 space-y-5">
+          <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" onClick={() => setShowDetail(false)} />
+          <div className="relative w-full max-w-lg bg-reap3r-surface border-l border-reap3r-border h-full overflow-y-auto p-6 space-y-5 animate-slide-up shadow-[0_0_80px_rgba(0,0,0,0.9)]">
             <div className="flex items-center justify-between">
-              <h3 className="text-lg font-semibold text-reap3r-text">Alert Detail</h3>
-              <button onClick={() => setShowDetail(false)} className="text-reap3r-muted hover:text-reap3r-text">
-                <X className="w-5 h-5" />
+              <h3 className="text-sm font-bold text-white tracking-[0.08em] uppercase">Alert Detail</h3>
+              <button onClick={() => setShowDetail(false)} className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all">
+                <X style={{ width: '14px', height: '14px' }} />
               </button>
             </div>
 
-            <div className="space-y-3">
+            <div className="space-y-4">
               <div>
-                <p className="text-xs text-reap3r-muted">Title</p>
-                <p className="text-sm text-reap3r-text font-medium">{selectedEvent.title}</p>
+                <p className="text-[10px] text-reap3r-muted uppercase tracking-wider mb-1">Title</p>
+                <p className="text-sm font-semibold text-white">{selectedEvent.title}</p>
               </div>
               <div className="flex gap-2">
-                <Badge variant={severityVariant(selectedEvent.severity) as any}>{selectedEvent.severity}</Badge>
+                <Badge variant={severityVariant(selectedEvent.severity)}>{selectedEvent.severity}</Badge>
                 <Badge>{selectedEvent.status}</Badge>
               </div>
               <div className="grid grid-cols-2 gap-3 text-xs">
-                <div><span className="text-reap3r-muted">Entity Type:</span> <span className="text-reap3r-text ml-1">{selectedEvent.entity_type}</span></div>
-                <div><span className="text-reap3r-muted">Entity ID:</span> <span className="text-reap3r-text ml-1 font-mono">{selectedEvent.entity_id?.slice(0, 12) ?? 'N/A'}</span></div>
-                <div><span className="text-reap3r-muted">Rule:</span> <span className="text-reap3r-text ml-1">{selectedEvent.rule_name ?? 'N/A'}</span></div>
-                <div><span className="text-reap3r-muted">Created:</span> <span className="text-reap3r-text ml-1">{new Date(selectedEvent.created_at).toLocaleString()}</span></div>
-                <div><span className="text-reap3r-muted">Escalation Step:</span> <span className="text-reap3r-text ml-1">{selectedEvent.escalation_step}</span></div>
-                {selectedEvent.snoozed_until && (
-                  <div><span className="text-reap3r-muted">Snoozed Until:</span> <span className="text-reap3r-text ml-1">{new Date(selectedEvent.snoozed_until).toLocaleString()}</span></div>
-                )}
+                {[
+                  ['Entity Type', selectedEvent.entity_type],
+                  ['Entity ID', selectedEvent.entity_id?.slice(0, 12) ?? 'N/A'],
+                  ['Rule', selectedEvent.rule_name ?? 'N/A'],
+                  ['Created', new Date(selectedEvent.created_at).toLocaleString()],
+                ].map(([label, value]) => (
+                  <div key={label}>
+                    <span className="text-reap3r-muted">{label}</span>
+                    <p className="text-white font-mono text-[11px] mt-0.5">{value}</p>
+                  </div>
+                ))}
               </div>
 
               {selectedEvent.details && Object.keys(selectedEvent.details).length > 0 && (
                 <div>
-                  <p className="text-xs text-reap3r-muted mb-1">Details</p>
-                  <pre className="text-xs bg-reap3r-bg p-3 rounded-lg border border-reap3r-border text-reap3r-text overflow-auto max-h-40">
-                    {JSON.stringify(selectedEvent.details, null, 2)}
-                  </pre>
+                  <p className="text-[10px] text-reap3r-muted uppercase tracking-wider mb-1.5">Details</p>
+                  <pre className="code-block text-[11px] max-h-40">{JSON.stringify(selectedEvent.details, null, 2)}</pre>
                 </div>
               )}
 
-              {/* Timeline */}
               {selectedEvent.acks?.length > 0 && (
                 <div>
-                  <p className="text-xs text-reap3r-muted mb-2">Timeline</p>
+                  <p className="text-[10px] text-reap3r-muted uppercase tracking-wider mb-2">Timeline</p>
                   <div className="space-y-2">
                     {selectedEvent.acks.map((a: any, i: number) => (
                       <div key={i} className="flex items-start gap-2 text-xs">
-                        <div className="w-2 h-2 mt-1 rounded-full bg-reap3r-accent flex-shrink-0" />
+                        <div className="w-1.5 h-1.5 mt-1.5 rounded-full bg-white/40 flex-shrink-0" />
                         <div>
-                          <span className="text-reap3r-text font-medium">{a.action}</span>
+                          <span className="text-white font-medium">{a.action}</span>
                           <span className="text-reap3r-muted"> by {a.user_email}</span>
                           {a.note && <p className="text-reap3r-muted mt-0.5">"{a.note}"</p>}
-                          <p className="text-reap3r-muted">{new Date(a.created_at).toLocaleString()}</p>
+                          <p className="text-reap3r-muted font-mono text-[10px]">{new Date(a.created_at).toLocaleString()}</p>
                         </div>
                       </div>
                     ))}
@@ -258,23 +255,6 @@ export default function AlertingPage() {
                 </div>
               )}
 
-              {/* Notifications */}
-              {selectedEvent.notifications?.length > 0 && (
-                <div>
-                  <p className="text-xs text-reap3r-muted mb-2">Notifications</p>
-                  <div className="space-y-1">
-                    {selectedEvent.notifications.map((n: any, i: number) => (
-                      <div key={i} className="flex items-center gap-2 text-xs">
-                        <Badge variant={n.status === 'sent' ? 'success' : n.status === 'failed' ? 'danger' : 'default'} >{n.status}</Badge>
-                        <span className="text-reap3r-text">{n.channel}</span>
-                        <span className="text-reap3r-muted">{n.sent_at ? new Date(n.sent_at).toLocaleString() : ''}</span>
-                      </div>
-                    ))}
-                  </div>
-                </div>
-              )}
-
-              {/* Actions */}
               {selectedEvent.status !== 'resolved' && (
                 <div className="border-t border-reap3r-border pt-4 space-y-3">
                   <textarea
@@ -282,29 +262,30 @@ export default function AlertingPage() {
                     onChange={e => setActionNote(e.target.value)}
                     placeholder="Note (optional)..."
                     rows={2}
-                    className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-reap3r-text resize-none"
+                    className="w-full bg-reap3r-bg border border-reap3r-border rounded-lg px-3 py-2 text-sm text-white resize-none
+                      placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20"
                   />
                   <div className="flex gap-2 flex-wrap">
                     {selectedEvent.status === 'open' && (
                       <Button size="sm" variant="secondary" onClick={() => { handleAck(selectedEvent.id); setShowDetail(false); }}>
-                        <Check className="w-3 h-3 mr-1" /> Acknowledge
+                        <Check style={{ width: '11px', height: '11px', marginRight: '4px' }} />Acknowledge
                       </Button>
                     )}
                     <Button size="sm" onClick={() => { handleResolve(selectedEvent.id); setShowDetail(false); }}>
-                      <CheckCheck className="w-3 h-3 mr-1" /> Resolve
+                      <CheckCheck style={{ width: '11px', height: '11px', marginRight: '4px' }} />Resolve
                     </Button>
                     <div className="flex items-center gap-1">
-                      <select value={snoozeMin} onChange={e => setSnoozeMin(Number(e.target.value))}
-                        className="bg-reap3r-bg border border-reap3r-border rounded-lg px-2 py-1.5 text-xs text-reap3r-text">
-                        <option value={15}>15 min</option>
-                        <option value={30}>30 min</option>
-                        <option value={60}>1 hour</option>
-                        <option value={240}>4 hours</option>
-                        <option value={480}>8 hours</option>
-                        <option value={1440}>24 hours</option>
+                      <select
+                        value={snoozeMin}
+                        onChange={e => setSnoozeMin(Number(e.target.value))}
+                        className="bg-reap3r-bg border border-reap3r-border rounded-lg px-2 py-1.5 text-xs text-white focus:outline-none"
+                      >
+                        {[15, 30, 60, 240, 480, 1440].map(m => (
+                          <option key={m} value={m}>{m < 60 ? `${m} min` : `${m / 60}h`}</option>
+                        ))}
                       </select>
                       <Button size="sm" variant="secondary" onClick={() => { handleSnooze(selectedEvent.id); setShowDetail(false); }}>
-                        <Clock className="w-3 h-3 mr-1" /> Snooze
+                        <Clock style={{ width: '11px', height: '11px', marginRight: '4px' }} />Snooze
                       </Button>
                     </div>
                   </div>

@@ -2,182 +2,160 @@
 import { useState } from 'react';
 import { useRouter } from 'next/navigation';
 import { useAuth } from '@/lib/auth';
-import { Button, Input } from '@/components/ui';
-import { Shield, KeyRound } from 'lucide-react';
+import { Shield, Lock, Eye, EyeOff, ArrowRight } from 'lucide-react';
 
 export default function LoginPage() {
+  const { login } = useAuth();
   const router = useRouter();
-  const { login, loading, error, mfaRequired, mfaEmail, mfaPassword } = useAuth();
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
-  const [mfaCode, setMfaCode] = useState('');
+  const [showPassword, setShowPassword] = useState(false);
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
-    const ok = await login(email, password);
-    if (ok === true) router.push('/dashboard');
-  };
-
-  const handleMfaSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    if (!mfaEmail || !mfaPassword) return;
-    const ok = await login(mfaEmail, mfaPassword, mfaCode);
-    if (ok === true) router.push('/dashboard');
+    setError('');
+    setLoading(true);
+    try {
+      await login(email, password);
+      router.push('/dashboard');
+    } catch (err: any) {
+      setError(err.message ?? 'Authentication failed');
+    } finally {
+      setLoading(false);
+    }
   };
 
   return (
-    <div className="min-h-screen flex items-center justify-center bg-reap3r-bg overflow-hidden relative">
+    <div className="min-h-screen bg-reap3r-bg flex items-center justify-center p-4 relative overflow-hidden">
 
-      {/* ── Background effects ── */}
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_50%_40%,rgba(0,70,160,0.1),transparent_65%)]" />
-      <div className="absolute inset-0 bg-[radial-gradient(ellipse_at_85%_85%,rgba(100,0,200,0.07),transparent_55%)]" />
+      {/* Background decorations */}
+      <div className="absolute inset-0 pointer-events-none">
+        <div className="absolute -top-32 -left-32 w-96 h-96 rounded-full"
+          style={{ background: 'radial-gradient(circle, rgba(255,255,255,0.025) 0%, transparent 70%)' }} />
+        <div className="absolute -bottom-32 -right-32 w-96 h-96 rounded-full"
+          style={{ background: 'radial-gradient(circle, rgba(255,255,255,0.015) 0%, transparent 70%)' }} />
+      </div>
 
-      {/* Corner bracket decorations */}
-      <div className="absolute top-8 left-8 w-16 h-16 border-t-2 border-l-2 border-reap3r-accent/15 rounded-tl-xl" />
-      <div className="absolute top-8 right-8 w-16 h-16 border-t-2 border-r-2 border-reap3r-accent/15 rounded-tr-xl" />
-      <div className="absolute bottom-8 left-8 w-16 h-16 border-b-2 border-l-2 border-reap3r-accent/15 rounded-bl-xl" />
-      <div className="absolute bottom-8 right-8 w-16 h-16 border-b-2 border-r-2 border-reap3r-accent/15 rounded-br-xl" />
+      {/* Corner brackets */}
+      <div className="absolute top-6 left-6 w-8 h-8 border-t-2 border-l-2 border-white/8 rounded-tl-md" />
+      <div className="absolute top-6 right-6 w-8 h-8 border-t-2 border-r-2 border-white/8 rounded-tr-md" />
+      <div className="absolute bottom-6 left-6 w-8 h-8 border-b-2 border-l-2 border-white/8 rounded-bl-md" />
+      <div className="absolute bottom-6 right-6 w-8 h-8 border-b-2 border-r-2 border-white/8 rounded-br-md" />
 
-      {/* ── Main content ── */}
-      <div className="w-full max-w-sm px-4 relative z-10">
+      {/* Main card */}
+      <div className="relative w-full max-w-sm animate-slide-up">
+        <div className="relative bg-reap3r-card border border-reap3r-border rounded-2xl p-8 shadow-[0_24px_80px_rgba(0,0,0,0.8)]">
+          <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/12 to-transparent rounded-t-2xl" />
 
-        {/* Logo */}
-        <div className="text-center mb-8">
-          <div className="relative inline-flex items-center justify-center mb-5">
-            <div className="absolute w-[72px] h-[72px] rounded-2xl border border-reap3r-accent/15 animate-pulse" />
-            <div
-              className="w-16 h-16 rounded-2xl flex items-center justify-center animate-glow relative"
-              style={{
-                background: 'linear-gradient(135deg, rgba(0,212,255,0.1), rgba(124,58,237,0.06))',
-                border: '1px solid rgba(0,212,255,0.22)',
-              }}
-            >
-              <Shield className="w-8 h-8 text-reap3r-accent" />
+          {/* Logo */}
+          <div className="flex flex-col items-center mb-8">
+            <div className="relative mb-4">
+              <div className="w-14 h-14 rounded-2xl bg-white/6 border border-white/10 flex items-center justify-center animate-glow">
+                <Shield className="text-white" style={{ width: '22px', height: '22px' }} />
+              </div>
+              <div className="absolute -top-1 -right-1 w-3 h-3 bg-reap3r-success rounded-full"
+                   style={{ boxShadow: '0 0 8px rgba(34,197,94,0.8)' }} />
             </div>
+            <h1 className="text-[13px] font-black text-white tracking-[0.3em] uppercase">MASSVISION</h1>
+            <p className="text-[9px] text-reap3r-light font-mono tracking-[0.6em] uppercase mt-0.5">REAP3R</p>
           </div>
 
-          <h1 className="text-2xl font-bold text-reap3r-text tracking-[0.18em] uppercase">
-            MASSVISION
-          </h1>
-          <div className="flex items-center justify-center gap-3 mt-2">
-            <div className="h-px w-10 bg-gradient-to-r from-transparent to-reap3r-accent/40" />
-            <p className="text-[9px] text-reap3r-accent font-mono tracking-[0.5em] uppercase">
-              REAP3R PLATFORM
-            </p>
-            <div className="h-px w-10 bg-gradient-to-l from-transparent to-reap3r-accent/40" />
+          <div className="text-center mb-6">
+            <h2 className="text-sm font-bold text-white tracking-[0.12em] uppercase">Secure Access</h2>
+            <p className="text-[11px] text-reap3r-muted mt-1">Enterprise Agent Management Platform</p>
+          </div>
+
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.18em]">Email</label>
+              <input
+                type="email"
+                value={email}
+                onChange={(e) => setEmail(e.target.value)}
+                placeholder="admin@company.com"
+                required
+                className="w-full px-3 py-2.5 bg-reap3r-surface border border-reap3r-border rounded-lg text-sm text-white
+                  placeholder:text-reap3r-muted/40 font-mono
+                  focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20
+                  transition-all duration-150"
+              />
+            </div>
+
+            <div className="space-y-1.5">
+              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.18em]">Password</label>
+              <div className="relative">
+                <input
+                  type={showPassword ? 'text' : 'password'}
+                  value={password}
+                  onChange={(e) => setPassword(e.target.value)}
+                  placeholder="••••••••••"
+                  required
+                  className="w-full px-3 py-2.5 pr-10 bg-reap3r-surface border border-reap3r-border rounded-lg text-sm text-white
+                    placeholder:text-reap3r-muted/40 font-mono
+                    focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20
+                    transition-all duration-150"
+                />
+                <button
+                  type="button"
+                  onClick={() => setShowPassword(!showPassword)}
+                  className="absolute right-3 top-1/2 -translate-y-1/2 text-reap3r-muted hover:text-reap3r-light transition-colors"
+                >
+                  {showPassword
+                    ? <EyeOff style={{ width: '14px', height: '14px' }} />
+                    : <Eye style={{ width: '14px', height: '14px' }} />
+                  }
+                </button>
+              </div>
+            </div>
+
+            {error && (
+              <div className="flex items-center gap-2 px-3 py-2.5 bg-reap3r-danger/8 border border-reap3r-danger/25 rounded-lg">
+                <Lock style={{ width: '12px', height: '12px', color: '#ef4444', flexShrink: 0 }} />
+                <p className="text-[11px] text-reap3r-danger font-mono">{error}</p>
+              </div>
+            )}
+
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full flex items-center justify-center gap-2 py-3 px-4 mt-2
+                bg-white text-black text-[11px] font-bold uppercase tracking-[0.1em] rounded-lg
+                hover:bg-white/90 active:scale-[0.99] transition-all duration-150
+                disabled:opacity-40 disabled:cursor-not-allowed
+                shadow-[0_0_20px_rgba(255,255,255,0.06)]"
+            >
+              {loading ? (
+                <>
+                  <svg className="animate-spin h-3.5 w-3.5" viewBox="0 0 24 24">
+                    <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
+                    <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                  </svg>
+                  Authenticating...
+                </>
+              ) : (
+                <>
+                  Sign In
+                  <ArrowRight style={{ width: '13px', height: '13px' }} />
+                </>
+              )}
+            </button>
+          </form>
+
+          <div className="mt-6 pt-4 border-t border-reap3r-border/60 flex items-center justify-center gap-4">
+            {['TLS 1.3', 'AES-256', 'JWT'].map((badge) => (
+              <span key={badge} className="text-[9px] text-reap3r-muted/50 font-mono uppercase tracking-wider">
+                {badge}
+              </span>
+            ))}
           </div>
         </div>
 
-        {/* MFA Form */}
-        {mfaRequired ? (
-          <div className="relative">
-            <div className="absolute inset-x-0 top-0 h-px rounded-t-2xl bg-gradient-to-r from-transparent via-reap3r-accent/50 to-transparent" />
-            <form
-              onSubmit={handleMfaSubmit}
-              className="bg-reap3r-card border border-reap3r-border rounded-2xl p-7 space-y-5 shadow-[0_24px_60px_rgba(0,0,0,0.6)]"
-            >
-              <div className="flex items-center gap-3">
-                <div className="w-10 h-10 rounded-xl bg-reap3r-accent/10 border border-reap3r-accent/20 flex items-center justify-center shrink-0">
-                  <KeyRound className="w-5 h-5 text-reap3r-accent" />
-                </div>
-                <div>
-                  <h3 className="text-xs font-bold text-reap3r-text uppercase tracking-[0.15em]">
-                    Two-Factor Auth
-                  </h3>
-                  <p className="text-[10px] text-reap3r-muted mt-0.5">
-                    Enter the 6-digit code from your authenticator
-                  </p>
-                </div>
-              </div>
-
-              <Input
-                label="Authentication Code"
-                type="text"
-                placeholder="0 0 0  0 0 0"
-                value={mfaCode}
-                onChange={(e) => setMfaCode(e.target.value.replace(/\D/g, '').slice(0, 6))}
-                required
-                autoFocus
-                maxLength={6}
-                className="text-center text-xl tracking-[0.6em]"
-              />
-              {error && <ErrorBox message={error} />}
-              <Button type="submit" className="w-full" size="lg" loading={loading} disabled={mfaCode.length !== 6}>
-                Verify Access
-              </Button>
-            </form>
-          </div>
-        ) : (
-          /* Login Form */
-          <div className="relative">
-            <div className="absolute inset-x-0 top-0 h-px rounded-t-2xl bg-gradient-to-r from-transparent via-reap3r-accent/50 to-transparent" />
-            <form
-              onSubmit={handleSubmit}
-              className="bg-reap3r-card border border-reap3r-border rounded-2xl p-7 space-y-5 shadow-[0_24px_60px_rgba(0,0,0,0.6)]"
-            >
-              {/* Subtle inner shine */}
-              <div className="absolute inset-0 bg-gradient-to-br from-white/[0.018] to-transparent rounded-2xl pointer-events-none" />
-
-              <Input
-                label="Email Address"
-                type="email"
-                placeholder="admin@massvision.local"
-                value={email}
-                onChange={(e) => setEmail(e.target.value)}
-                required
-                autoFocus
-              />
-              <Input
-                label="Password"
-                type="password"
-                placeholder="••••••••"
-                value={password}
-                onChange={(e) => setPassword(e.target.value)}
-                required
-              />
-              {error && <ErrorBox message={error} />}
-
-              <Button type="submit" className="w-full" size="lg" loading={loading}>
-                Authenticate
-              </Button>
-
-              <div className="flex items-center gap-3 pt-1">
-                <div className="flex-1 h-px bg-reap3r-border" />
-                <span className="text-[9px] text-reap3r-muted/50 font-mono uppercase tracking-widest">
-                  Secure
-                </span>
-                <div className="flex-1 h-px bg-reap3r-border" />
-              </div>
-              <div className="flex justify-center gap-5">
-                {['TLS 1.3', 'AES-256', 'JWT'].map((label) => (
-                  <span key={label} className="text-[9px] text-reap3r-muted/35 font-mono uppercase tracking-wider">
-                    {label}
-                  </span>
-                ))}
-              </div>
-            </form>
-          </div>
-        )}
-
-        <p className="text-center text-[9px] text-reap3r-muted/35 mt-6 font-mono tracking-[0.2em] uppercase">
-          MASSVISION REAP3R &copy; {new Date().getFullYear()}
+        <p className="text-center text-[10px] text-reap3r-muted/30 font-mono mt-4 tracking-widest uppercase">
+          MASSVISION © 2025
         </p>
       </div>
-    </div>
-  );
-}
-
-function ErrorBox({ message }: { message: string }) {
-  return (
-    <div className="bg-reap3r-danger/5 border border-reap3r-danger/20 rounded-lg px-3 py-2.5 text-xs text-reap3r-danger flex items-center gap-2">
-      <svg className="w-3.5 h-3.5 shrink-0" viewBox="0 0 20 20" fill="currentColor">
-        <path
-          fillRule="evenodd"
-          d="M10 18a8 8 0 100-16 8 8 0 000 16zM8.707 7.293a1 1 0 00-1.414 1.414L8.586 10l-1.293 1.293a1 1 0 101.414 1.414L10 11.414l1.293 1.293a1 1 0 001.414-1.414L11.414 10l1.293-1.293a1 1 0 00-1.414-1.414L10 8.586 8.707 7.293z"
-          clipRule="evenodd"
-        />
-      </svg>
-      {message}
     </div>
   );
 }

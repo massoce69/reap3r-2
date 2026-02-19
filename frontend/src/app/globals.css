@@ -6,71 +6,70 @@
 
 /* ── Design tokens ───────────────────────────────────── */
 :root {
-  --bg: #020208;
-  --surface: #06060d;
-  --card: #0c0c18;
-  --border: #181830;
-  --accent: #00d4ff;
-  --accent-dim: #0093b3;
-  --secondary: #7c3aed;
-  --success: #00e5a0;
-  --danger: #ff4757;
+  --bg:      #080808;
+  --surface: #0f0f0f;
+  --card:    #161616;
+  --border:  #252525;
+  --accent:  #ffffff;
+  --success: #22c55e;
+  --warning: #f59e0b;
+  --danger:  #ef4444;
 }
 
 /* ── Scrollbars ─────────────────────────────────────── */
 * {
   scrollbar-width: thin;
-  scrollbar-color: #181830 #06060d;
+  scrollbar-color: #282828 #0f0f0f;
 }
-*::-webkit-scrollbar { width: 4px; height: 4px; }
-*::-webkit-scrollbar-track { background: #06060d; }
-*::-webkit-scrollbar-thumb { background: #1a1a2e; border-radius: 2px; }
-*::-webkit-scrollbar-thumb:hover { background: #252545; }
+*::-webkit-scrollbar         { width: 4px; height: 4px; }
+*::-webkit-scrollbar-track   { background: #0f0f0f; }
+*::-webkit-scrollbar-thumb   { background: #2a2a2a; border-radius: 2px; }
+*::-webkit-scrollbar-thumb:hover { background: #383838; }
 
 /* ── Base ───────────────────────────────────────────── */
 html, body {
   background-color: var(--bg);
-  color: #eaeaf5;
+  color: #f0f0f0;
   min-height: 100vh;
 }
 
-/* Background grid overlay */
+/* Ultra-subtle grid */
 body::before {
   content: '';
   position: fixed;
   inset: 0;
   background-image:
-    linear-gradient(rgba(0, 212, 255, 0.012) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(0, 212, 255, 0.012) 1px, transparent 1px);
-  background-size: 48px 48px;
+    linear-gradient(rgba(255,255,255,0.018) 1px, transparent 1px),
+    linear-gradient(90deg, rgba(255,255,255,0.018) 1px, transparent 1px);
+  background-size: 64px 64px;
   pointer-events: none;
   z-index: 0;
 }
 
-/* Radial glow at top */
+/* Radial vignette at top */
 body::after {
   content: '';
   position: fixed;
   top: 0;
   left: 0;
   right: 0;
-  height: 60vh;
-  background: radial-gradient(ellipse at 25% 0%, rgba(0, 60, 160, 0.07) 0%, transparent 65%),
-              radial-gradient(ellipse at 80% 0%, rgba(100, 0, 180, 0.04) 0%, transparent 55%);
+  height: 50vh;
+  background:
+    radial-gradient(ellipse at 20% 0%, rgba(255,255,255,0.025) 0%, transparent 60%),
+    radial-gradient(ellipse at 80% 0%, rgba(255,255,255,0.012) 0%, transparent 50%);
   pointer-events: none;
   z-index: 0;
 }
 
-/* All content above pseudo-elements */
 body > * { position: relative; z-index: 1; }
 
 /* ── Skeleton ────────────────────────────────────────── */
 @keyframes shimmer {
   0%   { background-position: -200% 0; }
-  100% { background-position: 200% 0; }
+  100% { background-position:  200% 0; }
 }
 .skeleton {
-  background: linear-gradient(90deg, #0c0c18 25%, #13132a 50%, #0c0c18 75%);
+  background: linear-gradient(90deg, #161616 25%, #222222 50%, #161616 75%);
   background-size: 200% 100%;
   animation: shimmer 1.8s ease-in-out infinite;
   border-radius: 4px;
@@ -78,10 +77,10 @@ body > * { position: relative; z-index: 1; }
 
 /* ── Glow animations ────────────────────────────────── */
 @keyframes glow-pulse {
-  0%, 100% { box-shadow: 0 0 8px rgba(0, 212, 255, 0.2), 0 0 0 1px rgba(0, 212, 255, 0.08); }
-  50%       { box-shadow: 0 0 22px rgba(0, 212, 255, 0.4), 0 0 0 1px rgba(0, 212, 255, 0.18); }
+  0%, 100% { box-shadow: 0 0 6px rgba(255,255,255,0.06), 0 0 0 1px rgba(255,255,255,0.05); }
+  50%      { box-shadow: 0 0 18px rgba(255,255,255,0.12), 0 0 0 1px rgba(255,255,255,0.1); }
 }
-.animate-glow { animation: glow-pulse 2.5s ease-in-out infinite; }
+.animate-glow { animation: glow-pulse 3s ease-in-out infinite; }
 
 /* ── Status dots ────────────────────────────────────── */
 .status-dot {
@@ -92,18 +91,18 @@ body > * { position: relative; z-index: 1; }
   flex-shrink: 0;
 }
 .status-dot.online {
-  background: #00e5a0;
-  box-shadow: 0 0 0 2px rgba(0, 229, 160, 0.12), 0 0 7px rgba(0, 229, 160, 0.55);
+  background: #22c55e;
+  box-shadow: 0 0 0 2px rgba(34,197,94,0.12), 0 0 8px rgba(34,197,94,0.5);
 }
-.status-dot.offline { background: #25253a; }
+.status-dot.offline  { background: #2e2e2e; }
 .status-dot.degraded {
-  background: #f5a623;
-  box-shadow: 0 0 7px rgba(245, 166, 35, 0.5);
+  background: #f59e0b;
+  box-shadow: 0 0 8px rgba(245,158,11,0.4);
 }
 .status-dot.pending {
-  background: #00d4ff;
+  background: #ffffff;
   animation: pulse 2s infinite;
-  box-shadow: 0 0 7px rgba(0, 212, 255, 0.5);
+  box-shadow: 0 0 8px rgba(255,255,255,0.3);
 }
 
 /* ── Utility classes ────────────────────────────────── */
@@ -112,25 +111,14 @@ body > * { position: relative; z-index: 1; }
   font-variant-numeric: tabular-nums;
 }
 
-/* Gradient text utility */
-.text-gradient-accent {
-  background: linear-gradient(135deg, #00d4ff, #7c3aed);
+.text-gradient-white {
+  background: linear-gradient(135deg, #ffffff, #9a9a9a);
   -webkit-background-clip: text;
   -webkit-text-fill-color: transparent;
   background-clip: text;
 }
 
-/* Card shine overlay */
-.card-shine::after {
-  content: '';
-  position: absolute;
-  inset: 0;
-  background: linear-gradient(135deg, rgba(255,255,255,0.025) 0%, transparent 60%);
-  pointer-events: none;
-  border-radius: inherit;
-}
-
-/* Top highlight line on cards */
+/* Card top highlight line */
 .card-top-line::before {
   content: '';
   display: block;
@@ -138,6 +126,33 @@ body > * { position: relative; z-index: 1; }
   inset-x: 0;
   top: 0;
   height: 1px;
-  background: linear-gradient(90deg, transparent, rgba(0,212,255,0.2), transparent);
+  background: linear-gradient(90deg, transparent, rgba(255,255,255,0.08), transparent);
   border-radius: inherit;
+}
+
+/* Glass effect */
+.glass {
+  background: rgba(255,255,255,0.03);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+}
+
+/* Tabs */
+.tab-active {
+  background: rgba(255,255,255,0.06);
+  color: #ffffff;
+}
+
+/* Code blocks */
+.code-block {
+  background: #0a0a0a;
+  border: 1px solid #252525;
+  border-radius: 8px;
+  padding: 12px 16px;
+  font-family: 'JetBrains Mono', monospace;
+  font-size: 12px;
+  color: #f0f0f0;
+  overflow-x: auto;
+  white-space: pre-wrap;
+  word-break: break-all;
 }

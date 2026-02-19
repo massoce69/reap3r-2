@@ -1,313 +1,450 @@
 'use client';
 import { useEffect, useState, useCallback } from 'react';
-import { TopBar } from '@/components/layout/sidebar';
-import { Card, Skeleton, Badge, StatusDot } from '@/components/ui';
-import { api } from '@/lib/api';
-import { formatDate } from '@/lib/utils';
-import { useRealtimeClient } from '@/lib/ws';
-import {
-  Monitor, ListTodo, CheckCircle, AlertTriangle, Activity, Clock,
-  Shield, Lock, Cpu, Bell, Eye, ShieldAlert,
-} from 'lucide-react';
 import Link from 'next/link';
+import { TopBar } from '@/components/layout/sidebar';
+import { Card, Badge, StatusDot, Skeleton } from '@/components/ui';
+import { api } from '@/lib/api';
+import { useAuth } from '@/lib/auth';
+import {
+  Monitor, ListTodo, Bell, ShieldAlert,
+  TrendingUp, ArrowUpRight, Clock, RefreshCw,
+  Activity, Zap, AlertTriangle, CheckCircle,
+  Building2, Download, Settings, ChevronRight,
+} from 'lucide-react';
 
-interface DashboardData {
-  agents: { data: any[]; total: number };
-  agentStats: any;
-  jobs: { data: any[]; total: number };
-  jobStats: any;
-  alertStats: any;
-  edrDetections: { data: any[]; total: number };
-  edrIncidents: { data: any[]; total: number };
+/* ── Types ── */
+interface DashStats {
+  total_agents: number;
+  online_agents: number;
+  offline_agents: number;
+  degraded_agents: number;
+  pending_agents: number;
+  total_jobs: number;
+  running_jobs: number;
+  failed_jobs_24h: number;
+  completed_jobs_24h: number;
+  open_alerts: number;
+  critical_alerts: number;
+  open_detections: number;
 }
 
-export default function DashboardPage() {
-  const [data, setData] = useState<DashboardData | null>(null);
-  const [loading, setLoading] = useState(true);
-  const ws = useRealtimeClient();
+/* ── Stat Card ── */
+function StatCard({
+  label, value, sub, icon: Icon, href, color = 'white', trend,
+}: {
+  label: string;
+  value: number | string;
+  sub?: string;
+  icon: any;
+  href?: string;
+  color?: string;
+  trend?: { value: number; label: string };
+}) {
+  const colorMap: Record<string, { text: string; bg: string; border: string }> = {
+    white:   { text: 'text-white',              bg: 'bg-white/6',    border: 'border-white/10' },
+    success: { text: 'text-reap3r-success',     bg: 'bg-reap3r-success/8', border: 'border-reap3r-success/15' },
+    danger:  { text: 'text-reap3r-danger',      bg: 'bg-reap3r-danger/8',  border: 'border-reap3r-danger/15' },
+    warning: { text: 'text-reap3r-warning',     bg: 'bg-reap3r-warning/8', border: 'border-reap3r-warning/15' },
+  };
+  const c = colorMap[color] ?? colorMap.white;
 
-  const loadData = useCallback(() => {
-    Promise.all([
-      api.agents.list({ limit: '8', sort_by: 'last_seen_at', sort_order: 'desc' }),
-      api.agents.stats().catch(() => null),
-      api.jobs.list({ limit: '10', sort_order: 'desc' }),
-      api.jobs.stats().catch(() => null),
-      api.alerts.stats().catch(() => null),
-      api.edr.detections({ limit: '5', status: 'open' }).catch(() => ({ data: [], total: 0 })),
-      api.edr.incidents({ limit: '5', status: 'open' }).catch(() => ({ data: [], total: 0 })),
-    ]).then(([agents, agentStats, jobs, jobStats, alertStats, edrDetections, edrIncidents]) => {
-      setData({ agents, agentStats, jobs, jobStats, alertStats, edrDetections, edrIncidents });
-      setLoading(false);
-    }).catch(() => setLoading(false));
+  const inner = (
+    <div className="relative bg-reap3r-card border border-reap3r-border rounded-xl p-5 overflow-hidden
+      hover:border-reap3r-border-light transition-all duration-200 group cursor-pointer
+      shadow-[0_2px_12px_rgba(0,0,0,0.5)]">
+      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/6 to-transparent" />
+      <div className="flex items-start justify-between mb-4">
+        <div className={`w-9 h-9 rounded-lg ${c.bg} border ${c.border} flex items-center justify-center shrink-0`}>
+          <Icon className={c.text} style={{ width: '16px', height: '16px' }} />
+        </div>
+        {href && (
+          <ArrowUpRight className="text-reap3r-muted/40 group-hover:text-reap3r-light transition-colors"
+            style={{ width: '14px', height: '14px' }} />
+        )}
+      </div>
+      <p className={`text-3xl font-black font-mono tracking-tight ${c.text}`}>{value}</p>
+      <p className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.14em] mt-1">{label}</p>
+      {sub && <p className="text-[10px] text-reap3r-muted/60 mt-0.5">{sub}</p>}
+    </div>
+  );
+
+  return href ? <Link href={href}>{inner}</Link> : inner;
+}
+
+/* ── Coverage Bar ── */
+function CoverageBar({ online, total }: { online: number; total: number }) {
+  const pct = total > 0 ? Math.round((online / total) * 100) : 0;
+  return (
+    <div className="flex items-center gap-3">
+      <div className="flex-1 h-1.5 bg-reap3r-subtle rounded-full overflow-hidden">
+        <div
+          className="h-full rounded-full bg-reap3r-success transition-all duration-700"
+          style={{ width: `${pct}%` }}
+        />
+      </div>
+      <span className="text-xs font-bold font-mono text-reap3r-success w-10 text-right">{pct}%</span>
+    </div>
+  );
+}
+
+/* ── Quick Action ── */
+function QuickAction({ href, icon: Icon, label }: { href: string; icon: any; label: string }) {
+  return (
+    <Link
+      href={href}
+      className="flex items-center gap-3 px-4 py-3 bg-reap3r-hover border border-reap3r-border rounded-xl
+        hover:border-reap3r-border-light hover:bg-reap3r-subtle transition-all duration-150 group"
+    >
+      <Icon className="text-reap3r-muted group-hover:text-white transition-colors shrink-0"
+        style={{ width: '14px', height: '14px' }} />
+      <span className="text-[11px] font-semibold text-reap3r-muted group-hover:text-white transition-colors uppercase tracking-[0.06em]">
+        {label}
+      </span>
+      <ChevronRight className="text-reap3r-muted/30 group-hover:text-reap3r-light ml-auto transition-colors"
+        style={{ width: '12px', height: '12px' }} />
+    </Link>
+  );
+}
+
+/* ── Main Page ── */
+export default function DashboardPage() {
+  const { user } = useAuth();
+  const [stats, setStats] = useState<DashStats | null>(null);
+  const [recentAgents, setRecentAgents] = useState<any[]>([]);
+  const [recentJobs, setRecentJobs] = useState<any[]>([]);
+  const [recentAlerts, setRecentAlerts] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [lastRefresh, setLastRefresh] = useState(new Date());
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const [dashRes, agentsRes, jobsRes, alertsRes] = await Promise.allSettled([
+        (api as any).dashboard?.stats ? (api as any).dashboard.stats() : Promise.resolve(null),
+        api.agents.list({ limit: '8', sort: 'last_seen_at' }),
+        api.jobs.list({ limit: '6', sort: 'created_at' }),
+        (api as any).alerts?.events?.list ? (api as any).alerts.events.list({ limit: '5', status: 'open' }) : Promise.resolve({ data: [] }),
+      ]);
+
+      if (dashRes.status === 'fulfilled' && dashRes.value) {
+        setStats(dashRes.value);
+      } else if (agentsRes.status === 'fulfilled') {
+        const agents = agentsRes.value?.data ?? [];
+        const online = agents.filter((a: any) => a.status === 'online').length;
+        setStats({
+          total_agents: agentsRes.value?.total ?? agents.length,
+          online_agents: online,
+          offline_agents: agents.filter((a: any) => a.status === 'offline').length,
+          degraded_agents: agents.filter((a: any) => a.status === 'degraded').length,
+          pending_agents: agents.filter((a: any) => a.status === 'pending').length,
+          total_jobs: jobsRes.status === 'fulfilled' ? (jobsRes.value?.total ?? 0) : 0,
+          running_jobs: 0,
+          failed_jobs_24h: 0,
+          completed_jobs_24h: 0,
+          open_alerts: alertsRes.status === 'fulfilled' ? (alertsRes.value?.total ?? 0) : 0,
+          critical_alerts: 0,
+          open_detections: 0,
+        });
+      }
+
+      if (agentsRes.status === 'fulfilled') setRecentAgents(agentsRes.value?.data ?? []);
+      if (jobsRes.status === 'fulfilled') setRecentJobs(jobsRes.value?.data ?? []);
+      if (alertsRes.status === 'fulfilled') setRecentAlerts(alertsRes.value?.data ?? []);
+    } catch {}
+    setLoading(false);
+    setLastRefresh(new Date());
   }, []);
 
-  useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { load(); }, [load]);
 
-  useEffect(() => {
-    if (!ws) return;
-    const handleUpdate = () => {
-      const timer = setTimeout(loadData, 2000);
-      return () => clearTimeout(timer);
-    };
-    const unsub1 = ws.on('agent_online', handleUpdate);
-    const unsub2 = ws.on('agent_offline', handleUpdate);
-    const unsub3 = ws.on('job_update', handleUpdate);
-    const unsub4 = ws.on('alert_event', handleUpdate);
-    return () => { unsub1(); unsub2(); unsub3(); unsub4(); };
-  }, [ws, loadData]);
+  const statCards = stats ? [
+    {
+      label: 'Agents Online',
+      value: stats.online_agents,
+      sub: `${stats.total_agents} total`,
+      icon: Monitor,
+      href: '/agents',
+      color: stats.online_agents > 0 ? 'success' : 'white',
+    },
+    {
+      label: 'Active Jobs',
+      value: stats.running_jobs,
+      sub: `${stats.completed_jobs_24h} done today`,
+      icon: ListTodo,
+      href: '/jobs',
+      color: 'white',
+    },
+    {
+      label: 'Open Alerts',
+      value: stats.open_alerts,
+      sub: `${stats.critical_alerts} critical`,
+      icon: Bell,
+      href: '/alerting',
+      color: stats.open_alerts > 0 ? 'warning' : 'white',
+    },
+    {
+      label: 'EDR Detections',
+      value: stats.open_detections,
+      sub: 'Unresolved',
+      icon: ShieldAlert,
+      href: '/edr',
+      color: stats.open_detections > 0 ? 'danger' : 'white',
+    },
+  ] : [];
 
-  const stats      = data?.agentStats;
-  const jStats     = data?.jobStats;
-  const aStats     = data?.alertStats;
-
-  const agentsOnline   = stats?.online   ?? data?.agents.data.filter((a) => a.status === 'online').length  ?? 0;
-  const agentsTotal    = stats?.total    ?? data?.agents.total  ?? 0;
-  const agentsOffline  = stats?.offline  ?? 0;
-  const agentsIsolated = stats?.isolated ?? 0;
-
-  const jobsRunning = jStats?.running ?? data?.jobs.data.filter(j => j.status === 'running').length ?? 0;
-  const jobsSuccess = jStats?.success ?? data?.jobs.data.filter((j) => j.status === 'success').length ?? 0;
-  const jobsFailed  = jStats?.failed  ?? data?.jobs.data.filter((j) => j.status === 'failed').length  ?? 0;
-
-  const alertsOpen        = aStats?.open     ?? 0;
-  const alertsCritical    = aStats?.critical ?? 0;
-  const edrOpenDetections = data?.edrDetections?.total ?? 0;
-  const edrOpenIncidents  = data?.edrIncidents?.total  ?? 0;
+  const jobStatusColor = (status: string) => {
+    switch (status) {
+      case 'completed': return 'text-reap3r-success';
+      case 'failed': return 'text-reap3r-danger';
+      case 'running': return 'text-white';
+      default: return 'text-reap3r-muted';
+    }
+  };
 
   return (
     <>
-      <TopBar title="Dashboard" />
-      <div className="p-6 space-y-5">
+      <TopBar
+        title="Dashboard"
+        actions={
+          <div className="flex items-center gap-3">
+            <span className="text-[10px] text-reap3r-muted font-mono flex items-center gap-1.5">
+              <Clock style={{ width: '10px', height: '10px' }} />
+              {lastRefresh.toLocaleTimeString()}
+            </span>
+            <button
+              onClick={load}
+              className="p-1.5 text-reap3r-muted hover:text-white hover:bg-reap3r-hover rounded-lg transition-all"
+              title="Refresh"
+            >
+              <RefreshCw style={{ width: '13px', height: '13px' }} />
+            </button>
+          </div>
+        }
+      />
 
-        {/* ── Stat Row ── */}
-        <div className="grid grid-cols-2 sm:grid-cols-4 lg:grid-cols-8 gap-3">
-          <StatCard icon={<Monitor />}       label="Online"    value={loading ? '—' : `${agentsOnline}`}      sub={`/${agentsTotal}`} color="accent"  href="/agents" />
-          <StatCard icon={<Activity />}      label="Offline"   value={loading ? '—' : `${agentsOffline}`}                             color="warning" href="/agents" />
-          <StatCard icon={<Lock />}          label="Isolated"  value={loading ? '—' : `${agentsIsolated}`}                            color="danger"  href="/agents" />
-          <StatCard icon={<Cpu />}           label="Running"   value={loading ? '—' : `${jobsRunning}`}       sub="jobs"              color="accent"  href="/jobs" />
-          <StatCard icon={<CheckCircle />}   label="Success"   value={loading ? '—' : `${jobsSuccess}`}                               color="success" href="/jobs" />
-          <StatCard icon={<AlertTriangle />} label="Failed"    value={loading ? '—' : `${jobsFailed}`}                                color="danger"  href="/jobs" />
-          <StatCard icon={<Bell />}          label="Alerts"    value={loading ? '—' : `${alertsOpen}`}        sub="open"              color="warning" href="/alerting" />
-          <StatCard icon={<ShieldAlert />}   label="EDR"       value={loading ? '—' : `${edrOpenDetections}`} sub="det."              color="danger"  href="/edr" />
+      <div className="p-6 space-y-6 animate-fade-in">
+
+        {/* Welcome */}
+        <div className="flex items-center justify-between">
+          <div>
+            <h2 className="text-lg font-bold text-white">
+              Welcome back{user?.name ? `, ${user.name}` : ''}
+            </h2>
+            <p className="text-xs text-reap3r-muted mt-0.5">
+              {new Date().toLocaleDateString('en-US', { weekday: 'long', year: 'numeric', month: 'long', day: 'numeric' })}
+            </p>
+          </div>
+          {stats && (
+            <div className="hidden md:flex items-center gap-2 px-3 py-2 bg-reap3r-card border border-reap3r-border rounded-xl">
+              <Activity className="text-reap3r-success" style={{ width: '13px', height: '13px' }} />
+              <span className="text-[11px] font-semibold text-reap3r-success">System Operational</span>
+            </div>
+          )}
         </div>
 
-        {/* Coverage bar */}
-        {!loading && agentsTotal > 0 && (
-          <div className="flex items-center gap-3 px-1">
-            <span className="text-[9px] text-reap3r-muted uppercase tracking-[0.18em] font-mono shrink-0 w-24">Coverage</span>
-            <div className="flex-1 h-[3px] bg-reap3r-border rounded-full overflow-hidden">
-              <div
-                className="h-full rounded-full"
-                style={{
-                  width: `${Math.round((agentsOnline / agentsTotal) * 100)}%`,
-                  background: 'linear-gradient(90deg, #00d4ff, #00e5a0)',
-                  boxShadow: '0 0 6px rgba(0,212,255,0.5)',
-                  transition: 'width 0.8s cubic-bezier(0.4,0,0.2,1)',
-                }}
-              />
-            </div>
-            <span className="text-[10px] text-reap3r-accent font-mono font-bold shrink-0 w-10 text-right">
-              {Math.round((agentsOnline / agentsTotal) * 100)}%
-            </span>
+        {/* KPI Stats */}
+        {loading ? (
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+            {[...Array(4)].map((_, i) => (
+              <div key={i} className="bg-reap3r-card border border-reap3r-border rounded-xl p-5">
+                <Skeleton className="h-9 w-9 rounded-lg mb-4" />
+                <Skeleton className="h-8 w-16 mb-2" />
+                <Skeleton className="h-3 w-24" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 xl:grid-cols-4 gap-4">
+            {statCards.map((card) => (
+              <StatCard key={card.label} {...card} />
+            ))}
           </div>
         )}
 
-        {/* ── Main 3-col ── */}
-        <div className="grid grid-cols-1 lg:grid-cols-3 gap-5">
+        {/* Coverage */}
+        {stats && (
+          <Card className="!py-4">
+            <div className="flex items-center justify-between mb-3">
+              <div className="flex items-center gap-2">
+                <Zap className="text-reap3r-light" style={{ width: '13px', height: '13px' }} />
+                <span className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.14em]">Agent Coverage</span>
+              </div>
+              <span className="text-[10px] text-reap3r-muted font-mono">
+                {stats.online_agents} / {stats.total_agents} online
+              </span>
+            </div>
+            <CoverageBar online={stats.online_agents} total={stats.total_agents} />
+            <div className="flex gap-4 mt-3">
+              {[
+                { label: 'Online', count: stats.online_agents, color: 'text-reap3r-success' },
+                { label: 'Offline', count: stats.offline_agents, color: 'text-reap3r-muted' },
+                { label: 'Degraded', count: stats.degraded_agents, color: 'text-reap3r-warning' },
+                { label: 'Pending', count: stats.pending_agents, color: 'text-white/60' },
+              ].map((s) => (
+                <div key={s.label} className="flex items-center gap-1.5">
+                  <span className={`text-xs font-bold font-mono ${s.color}`}>{s.count}</span>
+                  <span className="text-[10px] text-reap3r-muted uppercase tracking-wider">{s.label}</span>
+                </div>
+              ))}
+            </div>
+          </Card>
+        )}
 
-          {/* Agents */}
-          <Card className="!p-0 overflow-hidden">
-            <SectionHeader icon={<Monitor className="w-3.5 h-3.5" />} title="Agents" href="/agents" color="accent" />
-            <div className="px-4 pb-4">
+        <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+          {/* Recent Agents */}
+          <div className="lg:col-span-2 space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.14em] flex items-center gap-2">
+                <Monitor style={{ width: '11px', height: '11px' }} />
+                Recent Agents
+              </h3>
+              <Link href="/agents" className="text-[10px] text-reap3r-muted hover:text-white transition-colors flex items-center gap-1">
+                View all <ChevronRight style={{ width: '10px', height: '10px' }} />
+              </Link>
+            </div>
+            <Card className="!p-0 overflow-hidden">
               {loading ? (
-                <div className="space-y-2 pt-2">{[...Array(5)].map((_, i) => <Skeleton key={i} className="h-9 w-full" />)}</div>
-              ) : data?.agents.data.length === 0 ? (
-                <p className="text-xs text-reap3r-muted py-6 text-center">No agents enrolled yet.</p>
+                <div className="p-4 space-y-3">
+                  {[...Array(5)].map((_, i) => <Skeleton key={i} className="h-8 w-full" />)}
+                </div>
+              ) : recentAgents.length === 0 ? (
+                <div className="py-10 text-center">
+                  <p className="text-xs text-reap3r-muted">No agents found.</p>
+                  <Link href="/deployment" className="text-[11px] text-white/60 hover:text-white mt-2 inline-block">
+                    Deploy your first agent →
+                  </Link>
+                </div>
               ) : (
-                <div className="divide-y divide-reap3r-border/40">
-                  {data?.agents.data.map((agent) => (
+                <div className="divide-y divide-reap3r-border/50">
+                  {recentAgents.map((agent) => (
                     <Link
                       key={agent.id}
                       href={`/agents/${agent.id}`}
-                      className="flex items-center gap-3 py-2.5 hover:bg-reap3r-hover/50 px-2 -mx-2 rounded-lg transition-colors group"
+                      className="flex items-center gap-3 px-5 py-3 hover:bg-reap3r-hover/50 transition-colors group"
                     >
                       <StatusDot status={agent.status} />
                       <div className="flex-1 min-w-0">
-                        <p className="text-xs font-semibold text-reap3r-text truncate group-hover:text-reap3r-accent transition-colors">
+                        <p className="text-[12px] font-semibold text-white truncate group-hover:text-white/90">
                           {agent.hostname}
                         </p>
-                        <p className="text-[10px] text-reap3r-muted font-mono">{agent.os} · {agent.arch}</p>
+                        <p className="text-[10px] text-reap3r-muted font-mono truncate">
+                          {agent.os} {agent.arch} · {agent.ip_address}
+                        </p>
                       </div>
-                      <div className="text-right shrink-0">
-                        {agent.cpu_percent > 0 && (
-                          <p className="text-[10px] text-reap3r-muted font-mono">CPU {Math.round(agent.cpu_percent)}%</p>
-                        )}
-                        <span className="text-[10px] text-reap3r-muted/50">{formatDate(agent.last_seen_at)}</span>
+                      <div className="flex items-center gap-2 shrink-0">
+                        {agent.tags?.slice(0, 1).map((tag: string) => (
+                          <Badge key={tag} variant="default">{tag}</Badge>
+                        ))}
+                        <span className="text-[10px] text-reap3r-muted font-mono capitalize">{agent.status}</span>
                       </div>
                     </Link>
                   ))}
                 </div>
               )}
-            </div>
-          </Card>
-
-          {/* Jobs */}
-          <Card className="!p-0 overflow-hidden">
-            <SectionHeader icon={<ListTodo className="w-3.5 h-3.5" />} title="Recent Jobs" href="/jobs" color="secondary" />
-            <div className="px-4 pb-4">
-              {loading ? (
-                <div className="space-y-2 pt-2">{[...Array(5)].map((_, i) => <Skeleton key={i} className="h-9 w-full" />)}</div>
-              ) : data?.jobs.data.length === 0 ? (
-                <p className="text-xs text-reap3r-muted py-6 text-center">No jobs yet.</p>
-              ) : (
-                <div className="divide-y divide-reap3r-border/40">
-                  {data?.jobs.data.map((job) => (
-                    <div key={job.id} className="flex items-center gap-3 py-2.5">
-                      <div className="w-6 h-6 rounded-md bg-reap3r-hover border border-reap3r-border flex items-center justify-center shrink-0">
-                        <Clock className="w-3 h-3 text-reap3r-muted" />
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium text-reap3r-text truncate">{job.type}</p>
-                        <p className="text-[10px] text-reap3r-muted/60 font-mono">{formatDate(job.created_at)}</p>
-                      </div>
-                      <Badge variant={
-                        job.status === 'success' ? 'success'
-                        : job.status === 'failed' ? 'danger'
-                        : job.status === 'running' ? 'accent'
-                        : 'default'
-                      }>
-                        {job.status}
-                      </Badge>
-                    </div>
-                  ))}
-                </div>
-              )}
-            </div>
-          </Card>
-
-          {/* Security */}
-          <div className="space-y-4">
-            {/* Alerts */}
-            <Card className="!p-0 overflow-hidden">
-              <SectionHeader icon={<Bell className="w-3.5 h-3.5" />} title="Open Alerts" href="/alerting" color="warning" />
-              <div className="px-4 pb-4 pt-1">
-                {loading ? <Skeleton className="h-10 w-full" /> : alertsOpen === 0 ? (
-                  <div className="flex items-center gap-2 text-xs text-reap3r-success py-1">
-                    <CheckCircle className="w-3.5 h-3.5" /> All clear
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <MetricRow label="Open alerts" value={alertsOpen} variant="warning" />
-                    {alertsCritical > 0 && <MetricRow label="Critical" value={alertsCritical} variant="danger" />}
-                  </div>
-                )}
-              </div>
-            </Card>
-
-            {/* EDR */}
-            <Card className="!p-0 overflow-hidden">
-              <SectionHeader icon={<ShieldAlert className="w-3.5 h-3.5" />} title="EDR Status" href="/edr" color="danger" />
-              <div className="px-4 pb-4 pt-1">
-                {loading ? <Skeleton className="h-10 w-full" /> : edrOpenDetections === 0 && edrOpenIncidents === 0 ? (
-                  <div className="flex items-center gap-2 text-xs text-reap3r-success py-1">
-                    <Shield className="w-3.5 h-3.5" /> No open threats
-                  </div>
-                ) : (
-                  <div className="space-y-2">
-                    <MetricRow label="Detections" value={edrOpenDetections} variant="warning" />
-                    <MetricRow label="Incidents"  value={edrOpenIncidents}  variant="danger" />
-                  </div>
-                )}
-              </div>
-            </Card>
-
-            {/* Health */}
-            <Card className="!p-0 overflow-hidden">
-              <SectionHeader icon={<Eye className="w-3.5 h-3.5" />} title="Platform Health" color="accent" />
-              <div className="px-4 pb-4 pt-1 space-y-2.5">
-                <HealthRow label="Agent coverage"  value={agentsTotal > 0 ? `${Math.round((agentsOnline / agentsTotal) * 100)}%` : '—'} loading={loading} />
-                <HealthRow label="Job success"     value={(jobsSuccess + jobsFailed) > 0 ? `${Math.round((jobsSuccess / (jobsSuccess + jobsFailed)) * 100)}%` : '—'} loading={loading} />
-                <HealthRow label="Total agents"    value={loading ? '—' : `${agentsTotal}`} loading={loading} />
-              </div>
             </Card>
           </div>
+
+          {/* Right column: Quick Actions + Recent Jobs */}
+          <div className="space-y-6">
+
+            {/* Quick Actions */}
+            <div className="space-y-3">
+              <h3 className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.14em] flex items-center gap-2">
+                <Zap style={{ width: '11px', height: '11px' }} />
+                Quick Actions
+              </h3>
+              <div className="space-y-1.5">
+                <QuickAction href="/deployment" icon={Download} label="Deploy Agent" />
+                <QuickAction href="/jobs" icon={ListTodo} label="View Jobs" />
+                <QuickAction href="/alerting/rules" icon={Bell} label="Alert Rules" />
+                <QuickAction href="/edr" icon={ShieldAlert} label="EDR / SOC" />
+                <QuickAction href="/settings" icon={Settings} label="Settings" />
+              </div>
+            </div>
+
+            {/* Recent Jobs */}
+            <div className="space-y-3">
+              <div className="flex items-center justify-between">
+                <h3 className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.14em] flex items-center gap-2">
+                  <ListTodo style={{ width: '11px', height: '11px' }} />
+                  Recent Jobs
+                </h3>
+                <Link href="/jobs" className="text-[10px] text-reap3r-muted hover:text-white transition-colors">
+                  View all →
+                </Link>
+              </div>
+              <Card className="!p-0 overflow-hidden">
+                {loading ? (
+                  <div className="p-3 space-y-2">
+                    {[...Array(4)].map((_, i) => <Skeleton key={i} className="h-7" />)}
+                  </div>
+                ) : recentJobs.length === 0 ? (
+                  <p className="text-xs text-reap3r-muted p-4 text-center">No jobs yet.</p>
+                ) : (
+                  <div className="divide-y divide-reap3r-border/50">
+                    {recentJobs.map((job) => (
+                      <div key={job.id} className="flex items-center gap-3 px-4 py-2.5">
+                        <div className={`w-1.5 h-1.5 rounded-full shrink-0 ${
+                          job.status === 'completed' ? 'bg-reap3r-success' :
+                          job.status === 'failed' ? 'bg-reap3r-danger' :
+                          job.status === 'running' ? 'bg-white' : 'bg-reap3r-muted'
+                        }`} />
+                        <div className="flex-1 min-w-0">
+                          <p className="text-[11px] font-medium text-white/80 truncate">{job.type}</p>
+                          <p className="text-[10px] text-reap3r-muted font-mono truncate">
+                            {new Date(job.created_at).toLocaleTimeString()}
+                          </p>
+                        </div>
+                        <span className={`text-[10px] font-semibold capitalize font-mono ${jobStatusColor(job.status)}`}>
+                          {job.status}
+                        </span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </Card>
+            </div>
+          </div>
         </div>
+
+        {/* Recent Alerts */}
+        {recentAlerts.length > 0 && (
+          <div className="space-y-3">
+            <div className="flex items-center justify-between">
+              <h3 className="text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.14em] flex items-center gap-2">
+                <AlertTriangle style={{ width: '11px', height: '11px' }} />
+                Open Alerts
+              </h3>
+              <Link href="/alerting" className="text-[10px] text-reap3r-muted hover:text-white transition-colors">
+                View all →
+              </Link>
+            </div>
+            <div className="space-y-1.5">
+              {recentAlerts.map((alert) => (
+                <Link
+                  key={alert.id}
+                  href="/alerting"
+                  className="flex items-center gap-4 px-5 py-3 bg-reap3r-card border border-reap3r-border rounded-xl
+                    hover:border-reap3r-border-light transition-all duration-150"
+                >
+                  <AlertTriangle
+                    className={alert.severity === 'critical' || alert.severity === 'high' ? 'text-reap3r-danger' : 'text-reap3r-warning'}
+                    style={{ width: '13px', height: '13px', flexShrink: 0 }}
+                  />
+                  <p className="flex-1 text-[12px] font-medium text-white truncate">{alert.title}</p>
+                  <Badge variant={alert.severity === 'critical' || alert.severity === 'high' ? 'danger' : 'warning'}>
+                    {alert.severity}
+                  </Badge>
+                  <span className="text-[10px] text-reap3r-muted font-mono shrink-0">
+                    {new Date(alert.created_at).toLocaleTimeString()}
+                  </span>
+                </Link>
+              ))}
+            </div>
+          </div>
+        )}
       </div>
     </>
-  );
-}
-
-/* ── Sub-components ───────────────────────────────────── */
-
-const COLORS: Record<string, { icon: string; bar: string }> = {
-  accent:    { icon: 'text-reap3r-accent   bg-reap3r-accent/10   border-reap3r-accent/20',   bar: '#00d4ff' },
-  success:   { icon: 'text-reap3r-success  bg-reap3r-success/10  border-reap3r-success/20',  bar: '#00e5a0' },
-  danger:    { icon: 'text-reap3r-danger   bg-reap3r-danger/10   border-reap3r-danger/20',   bar: '#ff4757' },
-  warning:   { icon: 'text-reap3r-warning  bg-reap3r-warning/10  border-reap3r-warning/20',  bar: '#f5a623' },
-  secondary: { icon: 'text-reap3r-secondary bg-reap3r-secondary/10 border-reap3r-secondary/20', bar: '#7c3aed' },
-};
-
-function StatCard({
-  icon, label, value, sub, color, href,
-}: {
-  icon: React.ReactNode; label: string; value: string; sub?: string; color: string; href?: string;
-}) {
-  const c = COLORS[color] ?? COLORS.accent;
-  const inner = (
-    <div
-      className="relative bg-reap3r-card border border-reap3r-border rounded-xl p-3.5 overflow-hidden transition-all duration-200 hover:border-reap3r-border-light h-full"
-      style={{ boxShadow: '0 4px 16px rgba(0,0,0,0.35), inset 0 1px 0 rgba(255,255,255,0.02)' }}
-    >
-      <div className="absolute inset-x-0 top-0 h-px" style={{ background: `linear-gradient(90deg, transparent, ${c.bar}50, transparent)` }} />
-      <div className="absolute inset-0 bg-gradient-to-br from-white/[0.012] to-transparent pointer-events-none" />
-      <div className={`w-7 h-7 rounded-lg border flex items-center justify-center mb-2.5 ${c.icon}`}>
-        <span style={{ width: '13px', height: '13px', display: 'flex' }}>{icon}</span>
-      </div>
-      <div className="flex items-baseline gap-1">
-        <p className="text-xl font-bold text-reap3r-text font-mono leading-none">{value}</p>
-        {sub && <span className="text-[10px] text-reap3r-muted font-mono">{sub}</span>}
-      </div>
-      <p className="text-[9px] text-reap3r-muted uppercase tracking-[0.12em] mt-1 font-semibold">{label}</p>
-    </div>
-  );
-  return href ? <Link href={href} className="block">{inner}</Link> : <div>{inner}</div>;
-}
-
-function SectionHeader({
-  icon, title, href, color = 'accent',
-}: {
-  icon: React.ReactNode; title: string; href?: string; color?: string;
-}) {
-  const c = COLORS[color] ?? COLORS.accent;
-  return (
-    <div className="flex items-center justify-between px-4 py-3 border-b border-reap3r-border/50">
-      <div className="flex items-center gap-2">
-        <span className={`w-5 h-5 rounded border flex items-center justify-center shrink-0 ${c.icon}`}>{icon}</span>
-        <span className="text-[10px] font-bold text-reap3r-text uppercase tracking-[0.15em]">{title}</span>
-      </div>
-      {href && (
-        <Link href={href} className="text-[10px] text-reap3r-muted hover:text-reap3r-accent transition-colors font-mono">
-          All →
-        </Link>
-      )}
-    </div>
-  );
-}
-
-function MetricRow({ label, value, variant }: { label: string; value: number; variant: any }) {
-  return (
-    <div className="flex items-center justify-between py-0.5">
-      <span className="text-xs text-reap3r-light">{label}</span>
-      <Badge variant={variant}>{value}</Badge>
-    </div>
-  );
-}
-
-function HealthRow({ label, value, loading }: { label: string; value: string; loading: boolean }) {
-  return (
-    <div className="flex items-center justify-between">
-      <span className="text-[11px] text-reap3r-muted">{label}</span>
-      {loading ? <Skeleton className="h-3 w-10" /> : <span className="text-[11px] font-bold text-reap3r-text font-mono">{value}</span>}
-    </div>
   );
 }

@@ -19,19 +19,19 @@ export function Button({
 }: ButtonProps) {
   const base =
     'inline-flex items-center justify-center font-semibold rounded-lg transition-all duration-150 ' +
-    'focus:outline-none focus-visible:ring-2 focus-visible:ring-reap3r-accent/40 ' +
-    'disabled:opacity-40 disabled:cursor-not-allowed select-none tracking-[0.08em] uppercase';
+    'focus:outline-none focus-visible:ring-1 focus-visible:ring-white/30 ' +
+    'disabled:opacity-30 disabled:cursor-not-allowed select-none tracking-[0.06em] uppercase';
 
   const variants = {
     primary:
-      'bg-reap3r-accent text-black hover:bg-reap3r-accent/90 active:scale-[0.98] ' +
-      'shadow-[0_0_20px_rgba(0,212,255,0.18)] hover:shadow-[0_0_28px_rgba(0,212,255,0.3)]',
+      'bg-white text-black hover:bg-white/90 active:scale-[0.98] ' +
+      'shadow-[0_0_16px_rgba(255,255,255,0.08)]',
     secondary:
-      'bg-reap3r-card-alt border border-reap3r-border-light text-reap3r-text ' +
-      'hover:bg-reap3r-hover hover:border-reap3r-accent/20 active:scale-[0.98]',
+      'bg-reap3r-card border border-reap3r-border text-reap3r-text ' +
+      'hover:bg-reap3r-hover hover:border-reap3r-border-light active:scale-[0.98]',
     danger:
-      'bg-reap3r-danger/8 border border-reap3r-danger/25 text-reap3r-danger ' +
-      'hover:bg-reap3r-danger/15 hover:border-reap3r-danger/40 active:scale-[0.98]',
+      'bg-reap3r-danger/10 border border-reap3r-danger/30 text-reap3r-danger ' +
+      'hover:bg-reap3r-danger/18 hover:border-reap3r-danger/50 active:scale-[0.98]',
     ghost:
       'text-reap3r-muted hover:text-reap3r-text hover:bg-reap3r-hover active:scale-[0.98]',
   };
@@ -77,10 +77,10 @@ export function Input({ label, error, className, ...props }: InputProps) {
       <input
         className={cn(
           'w-full px-3 py-2.5 bg-reap3r-surface border border-reap3r-border rounded-lg text-sm text-reap3r-text',
-          'placeholder:text-reap3r-muted/35 font-mono',
-          'focus:outline-none focus:ring-1 focus:ring-reap3r-accent/40 focus:border-reap3r-accent/40',
+          'placeholder:text-reap3r-muted/40 font-mono',
+          'focus:outline-none focus:ring-1 focus:ring-white/20 focus:border-white/20',
           'transition-all duration-150',
-          error && 'border-reap3r-danger/60 focus:border-reap3r-danger focus:ring-reap3r-danger/30',
+          error && 'border-reap3r-danger/60 focus:border-reap3r-danger focus:ring-reap3r-danger/20',
           className
         )}
         {...props}
@@ -100,16 +100,16 @@ export function Badge({
   variant?: 'default' | 'success' | 'warning' | 'danger' | 'accent';
 }) {
   const colors = {
-    default: 'bg-reap3r-border/50 text-reap3r-light border-reap3r-border-light/60',
-    success:  'bg-reap3r-success/8  text-reap3r-success  border-reap3r-success/20',
-    warning:  'bg-reap3r-warning/8  text-reap3r-warning  border-reap3r-warning/20',
-    danger:   'bg-reap3r-danger/8   text-reap3r-danger   border-reap3r-danger/20',
-    accent:   'bg-reap3r-accent/8   text-reap3r-accent   border-reap3r-accent/20',
+    default: 'bg-reap3r-subtle/60 text-reap3r-light border-reap3r-border-light/60',
+    success:  'bg-reap3r-success/10  text-reap3r-success  border-reap3r-success/20',
+    warning:  'bg-reap3r-warning/10  text-reap3r-warning  border-reap3r-warning/20',
+    danger:   'bg-reap3r-danger/10   text-reap3r-danger   border-reap3r-danger/20',
+    accent:   'bg-white/8            text-white           border-white/15',
   };
   return (
     <span
       className={cn(
-        'inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold rounded border uppercase tracking-[0.08em] font-mono',
+        'inline-flex items-center px-1.5 py-0.5 text-[10px] font-bold rounded border uppercase tracking-[0.06em] font-mono',
         colors[variant]
       )}
     >
@@ -125,14 +125,12 @@ export function Card({ children, className }: { children: React.ReactNode; class
     <div
       className={cn(
         'relative bg-reap3r-card border border-reap3r-border rounded-xl p-6 overflow-hidden',
-        'shadow-[0_4px_20px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.025)]',
+        'shadow-[0_2px_16px_rgba(0,0,0,0.5),inset_0_1px_0_rgba(255,255,255,0.03)]',
         className
       )}
     >
       {/* Top accent gradient line */}
-      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-reap3r-accent/18 to-transparent" />
-      {/* Subtle diagonal shine */}
-      <div className="absolute inset-0 bg-gradient-to-br from-white/[0.015] to-transparent pointer-events-none" />
+      <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/8 to-transparent" />
       {children}
     </div>
   );
@@ -158,7 +156,7 @@ export function EmptyState({
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
       {icon && (
-        <div className="w-14 h-14 rounded-2xl bg-reap3r-hover border border-reap3r-border flex items-center justify-center text-reap3r-muted mb-4">
+        <div className="w-14 h-14 rounded-2xl bg-reap3r-subtle border border-reap3r-border flex items-center justify-center text-reap3r-muted mb-4">
           {icon}
         </div>
       )}
@@ -190,6 +188,84 @@ export function PermissionBanner({ message }: { message: string }) {
         />
       </svg>
       {message}
+    </div>
+  );
+}
+
+/* ── Modal ──────────────────────────────────────────── */
+
+export function Modal({
+  open,
+  onClose,
+  title,
+  children,
+  maxWidth = 'max-w-md',
+}: {
+  open: boolean;
+  onClose: () => void;
+  title: string;
+  children: React.ReactNode;
+  maxWidth?: string;
+}) {
+  if (!open) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" onClick={onClose}>
+      <div className="absolute inset-0 bg-black/70 backdrop-blur-sm" />
+      <div
+        className={cn(
+          'relative w-full bg-reap3r-card border border-reap3r-border rounded-2xl p-6 animate-slide-up',
+          'shadow-[0_24px_80px_rgba(0,0,0,0.9),inset_0_1px_0_rgba(255,255,255,0.04)]',
+          maxWidth
+        )}
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Top line */}
+        <div className="absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-white/10 to-transparent rounded-t-2xl" />
+        <div className="flex items-center justify-between mb-5">
+          <h3 className="text-sm font-bold text-reap3r-text tracking-[0.08em] uppercase">{title}</h3>
+          <button
+            onClick={onClose}
+            className="text-reap3r-muted hover:text-reap3r-text transition-colors p-1 rounded-lg hover:bg-reap3r-hover"
+          >
+            <svg className="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M6 18L18 6M6 6l12 12" />
+            </svg>
+          </button>
+        </div>
+        {children}
+      </div>
+    </div>
+  );
+}
+
+/* ── TabBar ─────────────────────────────────────────── */
+
+export function TabBar<T extends string>({
+  tabs,
+  active,
+  onChange,
+}: {
+  tabs: { key: T; label: string; icon?: React.ReactNode }[];
+  active: T;
+  onChange: (key: T) => void;
+}) {
+  return (
+    <div className="flex gap-0.5 bg-reap3r-surface border border-reap3r-border rounded-xl p-1 w-fit">
+      {tabs.map((t) => (
+        <button
+          key={t.key}
+          onClick={() => onChange(t.key)}
+          className={cn(
+            'flex items-center gap-2 px-4 py-2 rounded-lg text-[11px] font-semibold uppercase tracking-[0.06em] transition-all duration-150',
+            active === t.key
+              ? 'bg-white/8 text-white border border-white/10'
+              : 'text-reap3r-muted hover:text-reap3r-light hover:bg-reap3r-hover'
+          )}
+        >
+          {t.icon}
+          {t.label}
+        </button>
+      ))}
     </div>
   );
 }
