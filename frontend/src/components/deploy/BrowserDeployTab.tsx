@@ -19,7 +19,7 @@ interface ZabbixConfig {
   script?: string;
 }
 
-class BrowserZabbixClient {
+export class BrowserZabbixClient {
   private url: string;
   private token: string | null = null;
   private scriptName: string;
@@ -111,6 +111,12 @@ export function BrowserDeployTab() {
   const [serverUrl, setServerUrl] = useState('https://massvision.pro');
   
   const addLog = (msg: string) => setLogs(p => [...p, `[${new Date().toLocaleTimeString()}] ${msg}`]);
+  const formatDeployError = useCallback((message: string) => {
+    if (message.includes('UND_ERR_CONNECT_TIMEOUT')) {
+      return 'Zabbix unreachable (connect timeout). Check URL/port and firewall from your current network.';
+    }
+    return message;
+  }, []);
 
   const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -202,10 +208,11 @@ export function BrowserDeployTab() {
           });
           
         } catch (err: any) {
+          const message = formatDeployError(String(err?.message ?? 'Unknown error'));
           setItems(prev => {
              const next = [...prev];
              next[i].status = 'failed';
-             next[i].message = err.message;
+             next[i].message = message;
              return next;
           });
         }
@@ -213,8 +220,9 @@ export function BrowserDeployTab() {
       addLog('Deployment complete.');
 
     } catch (err: any) {
-      addLog(`FATAL ERROR: ${err.message}`);
-      alert(`Deployment stopped: ${err.message}`);
+      const message = formatDeployError(String(err?.message ?? 'Unknown error'));
+      addLog(`FATAL ERROR: ${message}`);
+      alert(`Deployment stopped: ${message}`);
     } finally {
       setIsRunning(false);
     }

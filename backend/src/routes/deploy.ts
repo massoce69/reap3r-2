@@ -125,10 +125,17 @@ export default async function deployRoutes(fastify: FastifyInstance) {
       });
       return result;
     } catch (err: any) {
+      const rawMessage = String(err?.message ?? 'Unknown Zabbix validation error');
+      const connectTimeout =
+        rawMessage.includes('UND_ERR_CONNECT_TIMEOUT') ||
+        rawMessage.toLowerCase().includes('cannot reach zabbix endpoint');
+      const message = connectTimeout
+        ? `${rawMessage}. Action required: allow outbound TCP from backend/VPS to this Zabbix host:port (firewall/ACL/NAT), or use Browser Deploy mode from a network that can reach Zabbix.`
+        : rawMessage;
       return reply.status(502).send({
         statusCode: 502,
         error: 'Zabbix Error',
-        message: err.message,
+        message,
       });
     }
   };

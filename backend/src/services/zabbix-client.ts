@@ -10,6 +10,19 @@ interface ZabbixConfig {
   timeout?: number;   // ms, default 15000
 }
 
+function parseEndpoint(inputUrl: string): { host: string; port: string; protocol: string } {
+  try {
+    const u = new URL(inputUrl);
+    return {
+      host: u.hostname,
+      port: u.port || (u.protocol === 'https:' ? '443' : '80'),
+      protocol: u.protocol,
+    };
+  } catch {
+    return { host: 'unknown-host', port: 'unknown-port', protocol: 'unknown:' };
+  }
+}
+
 export interface ZabbixHost {
   hostid: string;
   host: string;
@@ -57,6 +70,7 @@ const CIRCUIT_COOLDOWN_MS = 60 * 1000;        // 1 minute cooldown
 
 export class ZabbixClient {
   private url: string;
+  private endpoint: { host: string; port: string; protocol: string };
   private user: string;
   private password: string;
   private timeout: number;
@@ -76,6 +90,7 @@ export class ZabbixClient {
   constructor(cfg: ZabbixConfig) {
     // Ensure URL ends with /api_jsonrpc.php
     this.url = cfg.url.replace(/\/?$/, '').replace(/\/api_jsonrpc\.php$/, '') + '/api_jsonrpc.php';
+    this.endpoint = parseEndpoint(this.url);
     this.user = cfg.user;
     this.password = cfg.password;
     this.timeout = cfg.timeout ?? 15_000;
@@ -187,7 +202,11 @@ export class ZabbixClient {
       if (err instanceof ZabbixCircuitOpenError) throw err;
       if (err.name === 'AbortError') {
         this.recordFailure();
-        throw new ZabbixApiError('Request timeout', method, true);
+        throw new ZabbixApiError(
+          `Request timeout (${this.endpoint.host}:${this.endpoint.port})`,
+          method,
+          true,
+        );
       }
       if (err instanceof ZabbixApiError) {
         if (err.retryable) this.recordFailure();
@@ -196,7 +215,19 @@ export class ZabbixClient {
       // Network error
       this.recordFailure();
       const detailed = (err.cause as any)?.code || (err.cause as any)?.message || err.message;
-      throw new ZabbixApiError(`Network error: ${detailed}`, method, true);
+      const isConnectTimeout = String(detailed).includes('UND_ERR_CONNECT_TIMEOUT');
+      if (isConnectTimeout) {
+        throw new ZabbixApiError(
+          `Network error: cannot reach Zabbix endpoint ${this.endpoint.host}:${this.endpoint.port} from backend (${detailed})`,
+          method,
+          true,
+        );
+      }
+      throw new ZabbixApiError(
+        `Network error (${this.endpoint.host}:${this.endpoint.port}): ${detailed}`,
+        method,
+        true,
+      );
     } finally {
       clearTimeout(timer);
     }
