@@ -182,7 +182,8 @@ export class ZabbixClient {
       }
       // Network error
       this.recordFailure();
-      throw new ZabbixApiError(`Network error: ${err.message}`, method, true);
+      const detailed = (err.cause as any)?.code || (err.cause as any)?.message || err.message;
+      throw new ZabbixApiError(`Network error: ${detailed}`, method, true);
     } finally {
       clearTimeout(timer);
     }
