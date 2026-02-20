@@ -3,11 +3,12 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, Modal, TabBar } from '@/components/ui';
 import { api } from '@/lib/api';
+import { BrowserDeployTab } from '@/components/deploy/BrowserDeployTab';
 import {
   Download, Copy, Key, Terminal, Monitor as MonitorIcon, Check,
   Plus, Trash2, ArrowRight, Upload, Play, RotateCcw, XCircle,
   FileSpreadsheet, Server, Shield, Clock, CheckCircle2, AlertTriangle,
-  Activity, RefreshCw
+  Activity, RefreshCw, Monitor
 } from 'lucide-react';
 
 // ═══════════════════════════════════════════
@@ -65,7 +66,7 @@ const itemStatusBadge = (s: string) => {
 // MAIN COMPONENT
 // ═══════════════════════════════════════════
 export default function DeploymentPage() {
-  const [activeTab, setActiveTab] = useState<'zabbix' | 'tokens'>('zabbix');
+  const [activeTab, setActiveTab] = useState<'zabbix' | 'tokens' | 'browser'>('zabbix');
 
   return (
     <>
@@ -74,13 +75,16 @@ export default function DeploymentPage() {
         <TabBar
           tabs={[
             { key: 'zabbix' as const, label: 'Zabbix DAT Deploy', icon: <Server style={{ width: '13px', height: '13px' }} /> },
+            { key: 'browser' as const, label: 'Browser Mode (Firewall Bypass)', icon: <Monitor style={{ width: '13px', height: '13px' }} /> },
             { key: 'tokens' as const, label: 'Enrollment Tokens', icon: <Key style={{ width: '13px', height: '13px' }} /> },
           ]}
           active={activeTab}
           onChange={setActiveTab}
         />
 
-        {activeTab === 'zabbix' ? <ZabbixDeployTab /> : <EnrollmentTokensTab />}
+        {activeTab === 'zabbix' && <ZabbixDeployTab />}
+        {activeTab === 'browser' && <BrowserDeployTab />}
+        {activeTab === 'tokens' && <EnrollmentTokensTab />}
       </div>
     </>
   );

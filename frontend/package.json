@@ -10,16 +10,18 @@
   },
   "dependencies": {
     "@massvision/shared": "*",
-    "next": "^15.0.0",
-    "react": "^19.0.0",
-    "react-dom": "^19.0.0",
-    "lucide-react": "^0.460.0",
     "clsx": "^2.1.0",
     "date-fns": "^4.1.0",
+    "lucide-react": "^0.460.0",
+    "next": "^15.0.0",
+    "papaparse": "^5.5.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
     "zustand": "^5.0.0"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
+    "@types/papaparse": "^5.5.2",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "autoprefixer": "^10.4.0",
