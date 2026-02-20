@@ -63,7 +63,7 @@ export default function AgentDetailPage() {
   const [rdStreaming, setRdStreaming] = useState(false);
   const [rdQuality, setRdQuality] = useState(50);
   const [rdScale, setRdScale] = useState(50);
-  const [rdFps, setRdFps] = useState(2);
+  const [rdFps, setRdFps] = useState(15);
   const [rdError, setRdError] = useState<string | null>(null);
   const [rdFullscreen, setRdFullscreen] = useState(false);
   const [rdFrameCount, setRdFrameCount] = useState(0);
@@ -113,6 +113,67 @@ export default function AgentDetailPage() {
   }, [id]);
 
   useEffect(() => { refresh(); }, [refresh]);
+
+  // Live WS updates for telemetry/state so UI reflects agent changes immediately.
+  useEffect(() => {
+    if (!id) return;
+
+    const unsubMetrics = realtime.on('agent:metrics', (msg: any) => {
+      const p = msg?.payload ?? msg;
+      if (p?.agent_id !== id) return;
+      const m = p?.metrics ?? {};
+      const memUsed = Number(m.memory_used_bytes ?? 0);
+      const memTotal = Number(m.memory_total_bytes ?? 0);
+      const diskUsed = Number(m.disk_used_bytes ?? 0);
+      const diskTotal = Number(m.disk_total_bytes ?? 0);
+      const memPercent = memTotal > 0 ? Math.round((memUsed / memTotal) * 100) : undefined;
+      const diskPercent = diskTotal > 0 ? Math.round((diskUsed / diskTotal) * 100) : undefined;
+
+      setAgent((prev: any) => prev ? ({
+        ...prev,
+        status: 'online',
+        last_seen_at: new Date().toISOString(),
+        cpu_percent: Number(m.cpu_percent ?? prev.cpu_percent ?? 0),
+        mem_percent: memPercent ?? prev.mem_percent,
+        disk_percent: diskPercent ?? prev.disk_percent,
+      }) : prev);
+
+      setMetricsData((prev: any[]) => {
+        const point = {
+          ts: new Date().toISOString(),
+          cpu_percent: Number(m.cpu_percent ?? 0),
+          memory_used_mb: memUsed / 1048576,
+          memory_total_mb: memTotal / 1048576,
+          disk_used_gb: diskUsed / 1073741824,
+          disk_total_gb: diskTotal / 1073741824,
+          network_rx_bytes: Number(m.net_rx_bytes ?? 0),
+          network_tx_bytes: Number(m.net_tx_bytes ?? 0),
+          processes_count: Number(m.process_count ?? 0),
+        };
+        return [...prev.slice(-719), point];
+      });
+    });
+
+    const unsubOffline = realtime.on('agent:offline', (msg: any) => {
+      const p = msg?.payload ?? msg;
+      if (p?.agent_id !== id) return;
+      setAgent((prev: any) => prev ? { ...prev, status: 'offline' } : prev);
+    });
+
+    const unsubInventory = realtime.on('agent:inventory', (msg: any) => {
+      const p = msg?.payload ?? msg;
+      if (p?.agent_id !== id) return;
+      if (tab === 'inventory') {
+        api.agents.inventory(id).then(setInventory).catch(() => {});
+      }
+    });
+
+    return () => {
+      unsubMetrics();
+      unsubOffline();
+      unsubInventory();
+    };
+  }, [id, tab]);
 
   // Load update manifest
   useEffect(() => {
@@ -557,6 +618,8 @@ export default function AgentDetailPage() {
   const rdMouseDown = (e: React.MouseEvent<HTMLImageElement>) => {
     if (!rdInteractive || !rdStreaming) return;
     e.preventDefault();
+    // Focus the container div so keyboard events are captured immediately after mouse click
+    rdContainerRef.current?.focus();
     const { x, y } = getNormalizedCoords(e);
     const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
     sendRdInput('mouse_down', { x, y, button });
@@ -585,6 +648,7 @@ export default function AgentDetailPage() {
 
   const rdKeyDown = (e: React.KeyboardEvent<HTMLDivElement>) => {
     if (!rdInteractive || !rdStreaming) return;
+    // Allow browser shortcuts (F5, Ctrl+R, etc.) to pass through — only capture printable/control keys
     e.preventDefault();
     e.stopPropagation();
     const vk = keyToVk[e.code];
@@ -602,6 +666,14 @@ export default function AgentDetailPage() {
       sendRdInput('key_up', { key: e.code, vk });
     }
   };
+
+  // Auto-focus the RD container div whenever interactive control mode is activated
+  // (without this, keyboard events won't fire until the user manually clicks the div)
+  useEffect(() => {
+    if (rdInteractive && rdStreaming && rdContainerRef.current) {
+      rdContainerRef.current.focus();
+    }
+  }, [rdInteractive, rdStreaming]);
 
   const deleteAgent = async () => {
     if (!agent || !confirm('Are you sure you want to delete this agent?')) return;
@@ -1225,12 +1297,14 @@ export default function AgentDetailPage() {
             {/* Video/Screenshot Display */}
             {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
             <div
+              ref={rdContainerRef}
               className={`bg-[#0d1117] border border-reap3r-border rounded-lg overflow-hidden flex items-center justify-center outline-none ${
                 rdFullscreen ? 'flex-1 mx-4 mb-4 mt-2' : 'min-h-[400px]'
               } ${rdInteractive && rdStreaming ? 'cursor-none ring-2 ring-blue-500/30' : ''}`}
               tabIndex={rdInteractive && rdStreaming ? 0 : -1}
               onKeyDown={rdKeyDown}
               onKeyUp={rdKeyUp}
+              onClick={() => { if (rdInteractive && rdStreaming) rdContainerRef.current?.focus(); }}
             >
               {!rdFrame && !rdLoading && !rdStreaming && (
                 <div className="text-center py-16">

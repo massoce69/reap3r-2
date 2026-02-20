@@ -105,6 +105,15 @@ function nowEnvelopeBase(agentId: string, type: string, payload: any, extra?: Pa
   };
 }
 
+function normalizeMetricsPayload(input: unknown) {
+  const parsed = MetricsPushPayload.safeParse(input);
+  if (!parsed.success) return null;
+  const p = parsed.data;
+  const memPercent = p.memory_total_bytes > 0 ? (p.memory_used_bytes / p.memory_total_bytes) * 100 : undefined;
+  const diskPercent = p.disk_total_bytes > 0 ? (p.disk_used_bytes / p.disk_total_bytes) * 100 : undefined;
+  return { payload: p, memPercent, diskPercent };
+}
+
 function tokenFromRequest(request: IncomingMessage): string | null {
   const url = new URL(request.url ?? '/', `http://${request.headers.host || 'localhost'}`);
   const queryToken = url.searchParams.get('token');
@@ -348,11 +357,58 @@ export function setupAgentGateway(fastify: FastifyInstance) {
             agentSockets.set(aid, ws);
 
             const p = pParsed.data;
+            const heartbeatCpu = typeof (msg.payload as any)?.cpu_percent === 'number'
+              ? Number((msg.payload as any).cpu_percent)
+              : undefined;
             await agentService.heartbeat(fastify, aid, {
               last_ip: remoteIp(ws),
+              cpu_percent: heartbeatCpu,
               mem_percent: p.memory_percent,
               disk_percent: p.disk_percent,
             });
+
+            // Agent v5 embeds full metrics in heartbeat.metrics.
+            // Accept either embedded metrics object or full metrics heartbeat payload.
+            const embeddedMetrics = (msg.payload as any)?.metrics ?? msg.payload;
+            const normalized = normalizeMetricsPayload(embeddedMetrics);
+            if (normalized) {
+              const m = normalized.payload;
+              await agentService.heartbeat(fastify, aid, {
+                cpu_percent: m.cpu_percent,
+                mem_percent: normalized.memPercent,
+                disk_percent: normalized.diskPercent,
+              });
+
+              // Persist time-series (same behavior as metrics_push).
+              try {
+                const agent = await agentService.getAgentById(fastify, aid);
+                if (agent) {
+                  await fastify.pg.query(
+                    `INSERT INTO metrics_timeseries (
+                       agent_id, org_id, collected_at, cpu_percent,
+                       memory_used_mb, memory_total_mb, disk_used_gb, disk_total_gb,
+                       network_rx_bytes, network_tx_bytes, processes_count
+                     ) VALUES ($1, $2, now(), $3, $4, $5, $6, $7, $8, $9, $10)`,
+                    [
+                      aid,
+                      agent.org_id,
+                      m.cpu_percent,
+                      m.memory_used_bytes / 1048576,
+                      m.memory_total_bytes / 1048576,
+                      m.disk_used_bytes / 1073741824,
+                      m.disk_total_bytes / 1073741824,
+                      m.net_rx_bytes ?? 0,
+                      m.net_tx_bytes ?? 0,
+                      m.process_count ?? 0,
+                    ],
+                  );
+                }
+              } catch (err) {
+                fastify.log.warn({ err }, 'Failed to store heartbeat-embedded time-series metric');
+              }
+
+              fastify.broadcastToUI('agent:metrics', { agent_id: aid, metrics: m });
+            }
 
             // Dispatch pending jobs.
             const pending = await jobService.getPendingJobs(fastify, aid);
@@ -387,12 +443,11 @@ export function setupAgentGateway(fastify: FastifyInstance) {
             agentSockets.set(aid, ws);
 
             const p = pParsed.data;
-            const memPercent = p.memory_total_bytes > 0 ? (p.memory_used_bytes / p.memory_total_bytes) * 100 : undefined;
-            const diskPercent = p.disk_total_bytes > 0 ? (p.disk_used_bytes / p.disk_total_bytes) * 100 : undefined;
+            const normalized = normalizeMetricsPayload(p)!;
             await agentService.heartbeat(fastify, aid, {
-              cpu_percent: p.cpu_percent,
-              mem_percent: memPercent,
-              disk_percent: diskPercent,
+              cpu_percent: normalized.payload.cpu_percent,
+              mem_percent: normalized.memPercent,
+              disk_percent: normalized.diskPercent,
             });
 
             // Store time-series in existing schema (MB/GB floats).
@@ -408,14 +463,14 @@ export function setupAgentGateway(fastify: FastifyInstance) {
                   [
                     aid,
                     agent.org_id,
-                    p.cpu_percent,
-                    p.memory_used_bytes / 1048576,
-                    p.memory_total_bytes / 1048576,
-                    p.disk_used_bytes / 1073741824,
-                    p.disk_total_bytes / 1073741824,
-                    p.net_rx_bytes ?? 0,
-                    p.net_tx_bytes ?? 0,
-                    p.process_count ?? 0,
+                    normalized.payload.cpu_percent,
+                    normalized.payload.memory_used_bytes / 1048576,
+                    normalized.payload.memory_total_bytes / 1048576,
+                    normalized.payload.disk_used_bytes / 1073741824,
+                    normalized.payload.disk_total_bytes / 1073741824,
+                    normalized.payload.net_rx_bytes ?? 0,
+                    normalized.payload.net_tx_bytes ?? 0,
+                    normalized.payload.process_count ?? 0,
                   ],
                 );
               }
@@ -423,7 +478,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
               fastify.log.warn({ err }, 'Failed to store time-series metric');
             }
 
-            fastify.broadcastToUI('agent:metrics', { agent_id: aid, metrics: p });
+            fastify.broadcastToUI('agent:metrics', { agent_id: aid, metrics: normalized.payload });
             break;
           }
 
@@ -782,4 +837,3 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
   return wss;
 }
-

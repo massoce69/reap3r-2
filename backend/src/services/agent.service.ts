@@ -122,6 +122,8 @@ export async function listAgents(
 
   const dataRes = await fastify.pg.query(
     `SELECT a.*, c.name as company_name,
+       (SELECT COALESCE(json_agg(ac.capability), '[]'::json)
+        FROM agent_capabilities ac WHERE ac.agent_id = a.id) as capabilities,
        (SELECT json_agg(json_build_object('id', f.id, 'name', f.name))
         FROM agent_folder_membership afm JOIN folders f ON f.id = afm.folder_id WHERE afm.agent_id = a.id) as folders
      FROM agents a
@@ -139,6 +141,8 @@ export async function listAgents(
 export async function getAgentById(fastify: FastifyInstance, id: string) {
   const { rows } = await fastify.pg.query(
     `SELECT a.*, c.name as company_name,
+       (SELECT COALESCE(json_agg(ac.capability), '[]'::json)
+        FROM agent_capabilities ac WHERE ac.agent_id = a.id) as capabilities,
        (SELECT json_agg(json_build_object('id', f.id, 'name', f.name))
         FROM agent_folder_membership afm JOIN folders f ON f.id = afm.folder_id WHERE afm.agent_id = a.id) as folders
      FROM agents a LEFT JOIN companies c ON c.id = a.company_id

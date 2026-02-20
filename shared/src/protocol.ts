@@ -103,8 +103,11 @@ export type EnrollResponse = z.infer<typeof EnrollResponsePayload>;
 // Heartbeat (cheap "liveness" message).
 export const HeartbeatPayload = z.object({
   uptime_sec: z.number().int().nonnegative(),
+  cpu_percent: z.number().int().min(0).max(100).optional(),
   memory_percent: z.number().int().min(0).max(100),
   disk_percent: z.number().int().min(0).max(100),
+  // Agent v5 embeds full metrics here to reduce WS message count.
+  metrics: z.record(z.unknown()).optional(),
 });
 export type Heartbeat = z.infer<typeof HeartbeatPayload>;
 

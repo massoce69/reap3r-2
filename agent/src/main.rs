@@ -1,5 +1,5 @@
 // ─────────────────────────────────────────────
-// MASSVISION Reap3r Agent — Main Entry Point
+// XEFI Agent 2 — Main Entry Point
 // ─────────────────────────────────────────────
 
 use clap::Parser;
@@ -135,11 +135,11 @@ mod eventlog {
         OsStr::new(s).encode_wide().chain(Some(0)).collect()
     }
 
-    /// Write an entry to Windows Event Log under source "Reap3r Agent".
+    /// Write an entry to Windows Event Log under source "XEFI Agent 2".
     /// level: "INFO", "WARN", or "ERROR"
     pub fn write(level: &str, msg: &str) {
         unsafe {
-            let source = to_wide("Reap3r Agent");
+            let source = to_wide("XEFI Agent 2");
             let h = RegisterEventSourceW(ptr::null(), source.as_ptr());
             if h.is_null() {
                 return;
@@ -195,7 +195,7 @@ macro_rules! ferror { ($($arg:tt)*) => {{ let s = format!($($arg)*); error!("{}"
 // ── CLI Args ──────────────────────────────────────────────
 
 #[derive(Parser, Debug)]
-#[command(name = "reap3r-agent", version, about = "MASSVISION Reap3r Agent")]
+#[command(name = "xefi-agent-2", version, about = "XEFI Agent 2")]
 struct Args {
     /// One-shot enrollment (persist credentials then exit)
     #[arg(long)]
@@ -224,6 +224,14 @@ struct Args {
     /// Heartbeat interval in seconds
     #[arg(long, default_value = "30", env = "REAP3R_HEARTBEAT_INTERVAL")]
     heartbeat_interval: u64,
+
+    /// Maximum reconnect back-off in seconds (spread 20k agents, default=300)
+    #[arg(long, default_value = "300", env = "REAP3R_MAX_BACKOFF")]
+    max_backoff: u64,
+
+    /// Local HTTP health-check port (0 = disabled). Exposes GET /health for Zabbix/Prometheus.
+    #[arg(long, default_value = "0", env = "REAP3R_HEALTH_PORT")]
+    health_port: u16,
 
     /// Print diagnostic information (OS, paths, connectivity) and exit
     #[arg(long)]
@@ -359,14 +367,14 @@ struct AgentConfig {
 }
 
 /// Returns the primary config/data directory.
-/// - Windows (admin/SYSTEM): %ProgramData%\Reap3r
-/// - Windows (user):         %LocalAppData%\Reap3r  (fallback)
-/// - Linux/macOS:            /etc/reap3r
+/// - Windows (admin/SYSTEM): %ProgramData%\XefiAgent2
+/// - Windows (user):         %LocalAppData%\XefiAgent2  (fallback)
+/// - Linux/macOS:            /etc/xefi-agent-2
 fn config_dir() -> PathBuf {
     if cfg!(target_os = "windows") {
         // Try %ProgramData% first (service / admin mode)
         if let Ok(pd) = std::env::var("ProgramData") {
-            let p = PathBuf::from(pd).join("Reap3r");
+            let p = PathBuf::from(pd).join("XefiAgent2");
             // Quick write-access probe
             if std::fs::create_dir_all(&p).is_ok() {
                 let probe = p.join(".probe");
@@ -376,12 +384,12 @@ fn config_dir() -> PathBuf {
                 }
             }
         }
-        // Fallback: %LocalAppData%\Reap3r (user mode)
+        // Fallback: %LocalAppData%\XefiAgent2 (user mode)
         let local = std::env::var("LocalAppData")
             .unwrap_or_else(|_| "C:\\Users\\Default\\AppData\\Local".to_string());
-        PathBuf::from(local).join("Reap3r")
+        PathBuf::from(local).join("XefiAgent2")
     } else {
-        PathBuf::from("/etc/reap3r")
+        PathBuf::from("/etc/xefi-agent-2")
     }
 }
 
@@ -624,7 +632,7 @@ async fn run_status_command(args: &Args) {
         }
     }
 
-    println!("Reap3r Agent status");
+    println!("XEFI Agent 2 status");
     println!("  enrolled: {}", if enrolled { "yes" } else { "no" });
     println!("  server reachable: {}", if http_ok { "yes" } else { "no" });
     println!("  ws connected: {}", if ws_ok { "yes" } else { "no" });
@@ -674,7 +682,7 @@ async fn run_diagnostics(args: &Args) {
     let cfg_path = config_path();
 
     println!("═══════════════════════════════════════════");
-    println!("  Reap3r Agent v{} — Diagnostic Report", env!("CARGO_PKG_VERSION"));
+    println!("  XEFI Agent 2 v{} — Diagnostic Report", env!("CARGO_PKG_VERSION"));
     println!("  {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z"));
     println!("═══════════════════════════════════════════");
     println!();
@@ -901,7 +909,7 @@ async fn run_startup_diagnostic(server: &str, insecure_tls: bool) {
         let win_ver = get_windows_version_detail();
         finfo!("Windows: {}", win_ver);
         eventlog_info(&format!(
-            "Reap3r Agent v{} starting — {} — {} ({}) — {}",
+            "XEFI Agent 2 v{} starting — {} — {} ({}) — {}",
             env!("CARGO_PKG_VERSION"), hostname, os, arch, win_ver
         ));
     }
@@ -1159,6 +1167,9 @@ fn collect_metrics() -> serde_json::Value {
     // sysinfo returns a floating CPU usage; protocol v1 uses an int percent to avoid
     // cross-language JSON float formatting issues in the signature.
     let cpu_percent = sys.global_cpu_usage().round().clamp(0.0, 100.0) as u64;
+    let networks = sysinfo::Networks::new_with_refreshed_list();
+    let net_rx_bytes: u64 = networks.iter().map(|(_, data)| data.total_received()).sum();
+    let net_tx_bytes: u64 = networks.iter().map(|(_, data)| data.total_transmitted()).sum();
 
     serde_json::json!({
         "ts": now_ms(),
@@ -1167,6 +1178,8 @@ fn collect_metrics() -> serde_json::Value {
         "memory_total_bytes": memory_total_bytes,
         "disk_used_bytes": disk_used_bytes,
         "disk_total_bytes": disk_total_bytes,
+        "net_rx_bytes": net_rx_bytes,
+        "net_tx_bytes": net_tx_bytes,
         "process_count": sys.processes().len(),
     })
 }
@@ -1894,8 +1907,8 @@ try {
 "#;
 
 /// PowerShell script that runs persistently in the user session to simulate mouse/keyboard input.
-/// Polls `rd_input.dat` for JSON commands and executes them via Win32 user32.dll calls.
-/// Placeholders __DIR__ and __MONITOR__ replaced at runtime.
+/// Uses SendInput (modern Win32 API) for reliable input injection in all applications.
+/// Placeholders __DIR__, __MONITOR__, __SCALE__ replaced at runtime.
 const RD_INPUT_LOOP_PS: &str = r#"
 $dir = '__DIR__'
 $stop = "$dir\rd_stop.flag"
@@ -1903,26 +1916,111 @@ $inputFile = "$dir\rd_input.dat"
 $monIdx = [int]__MONITOR__
 $scale = [double]__SCALE__
 $errLog = "$dir\rd_input_error.log"
-"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Input handler started in session $([System.Diagnostics.Process]::GetCurrentProcess().SessionId)" | Out-File $errLog
+"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] XEFI Agent 2 input handler started (session $([System.Diagnostics.Process]::GetCurrentProcess().SessionId))" | Out-File $errLog
 try {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
+    # Modern SendInput API — works with Win7 through Win11 and all applications
     Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class RdInput {
+    // ── Structs ──────────────────────────────────────────────────────────────
+    [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
+        public int dx, dy;
+        public uint mouseData;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct KEYBDINPUT {
+        public ushort wVk;
+        public ushort wScan;
+        public uint dwFlags;
+        public uint time;
+        public IntPtr dwExtraInfo;
+    }
+    [StructLayout(LayoutKind.Sequential)] public struct HARDWAREINPUT {
+        public uint uMsg;
+        public ushort wParamL;
+        public ushort wParamH;
+    }
+    [StructLayout(LayoutKind.Explicit)] public struct INPUT {
+        [FieldOffset(0)] public uint type;
+        [FieldOffset(4)] public MOUSEINPUT mi;
+        [FieldOffset(4)] public KEYBDINPUT ki;
+        [FieldOffset(4)] public HARDWAREINPUT hi;
+    }
+    // ── P/Invoke ─────────────────────────────────────────────────────────────
+    [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint n, INPUT[] inputs, int cb);
+    [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, int dwData, IntPtr dwExtraInfo);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, IntPtr dwExtraInfo);
-    public const uint MOUSEEVENTF_MOVE       = 0x0001;
-    public const uint MOUSEEVENTF_LEFTDOWN   = 0x0002;
-    public const uint MOUSEEVENTF_LEFTUP     = 0x0004;
-    public const uint MOUSEEVENTF_RIGHTDOWN  = 0x0008;
-    public const uint MOUSEEVENTF_RIGHTUP    = 0x0010;
-    public const uint MOUSEEVENTF_MIDDLEDOWN = 0x0020;
-    public const uint MOUSEEVENTF_MIDDLEUP   = 0x0040;
-    public const uint MOUSEEVENTF_WHEEL      = 0x0800;
-    public const uint KEYEVENTF_KEYDOWN      = 0x0000;
-    public const uint KEYEVENTF_KEYUP        = 0x0002;
+    // Input type constants
+    public const uint INPUT_MOUSE    = 0;
+    public const uint INPUT_KEYBOARD = 1;
+    // Mouse flags
+    public const uint MOUSEEVENTF_MOVE        = 0x0001;
+    public const uint MOUSEEVENTF_LEFTDOWN    = 0x0002;
+    public const uint MOUSEEVENTF_LEFTUP      = 0x0004;
+    public const uint MOUSEEVENTF_RIGHTDOWN   = 0x0008;
+    public const uint MOUSEEVENTF_RIGHTUP     = 0x0010;
+    public const uint MOUSEEVENTF_MIDDLEDOWN  = 0x0020;
+    public const uint MOUSEEVENTF_MIDDLEUP    = 0x0040;
+    public const uint MOUSEEVENTF_WHEEL       = 0x0800;
+    public const uint MOUSEEVENTF_ABSOLUTE    = 0x8000;
+    public const uint MOUSEEVENTF_VIRTUALDESK = 0x4000;
+    // Keyboard flags
+    public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
+    public const uint KEYEVENTF_KEYUP       = 0x0002;
+    public const uint KEYEVENTF_SCANCODE    = 0x0008;
+    // ── Helpers ───────────────────────────────────────────────────────────────
+    // Mouse move + click via SendInput (absolute coords in 0-65535 virtual desktop space)
+    public static void MouseMoveAbs(int absX, int absY, int virtW, int virtH) {
+        int normX = (int)((absX * 65535L) / virtW);
+        int normY = (int)((absY * 65535L) / virtH);
+        INPUT[] inp = new INPUT[1];
+        inp[0].type = INPUT_MOUSE;
+        inp[0].mi.dx = normX;
+        inp[0].mi.dy = normY;
+        inp[0].mi.dwFlags = MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK;
+        SendInput(1, inp, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+    }
+    public static void MouseButton(uint flags) {
+        INPUT[] inp = new INPUT[1];
+        inp[0].type = INPUT_MOUSE;
+        inp[0].mi.dwFlags = flags;
+        SendInput(1, inp, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+    }
+    public static void MouseWheel(int delta) {
+        INPUT[] inp = new INPUT[1];
+        inp[0].type = INPUT_MOUSE;
+        inp[0].mi.dwFlags = MOUSEEVENTF_WHEEL;
+        inp[0].mi.mouseData = (uint)delta;
+        SendInput(1, inp, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+    }
+    // Keyboard via SendInput with scan code (more compatible than VK-only)
+    public static void KeyEvent(ushort vk, bool keyUp) {
+        ushort scan = (ushort)MapVirtualKey(vk, 0);
+        uint flags = KEYEVENTF_SCANCODE | (keyUp ? KEYEVENTF_KEYUP : 0u);
+        // Extended keys: arrows, ins, del, home, end, pgup, pgdn, right ctrl/alt, numlock, etc.
+        if (vk >= 0x21 && vk <= 0x28 || vk == 0x2D || vk == 0x2E || vk == 0x5B || vk == 0x5C ||
+            vk == 0x11 || vk == 0x12) {
+            // Use VK for extended keys (more reliable)
+            flags = (keyUp ? KEYEVENTF_KEYUP : 0u);
+            INPUT[] inp2 = new INPUT[1];
+            inp2[0].type = INPUT_KEYBOARD;
+            inp2[0].ki.wVk = vk;
+            inp2[0].ki.wScan = scan;
+            inp2[0].ki.dwFlags = flags | KEYEVENTF_EXTENDEDKEY;
+            SendInput(1, inp2, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+            return;
+        }
+        INPUT[] inp = new INPUT[1];
+        inp[0].type = INPUT_KEYBOARD;
+        inp[0].ki.wVk = vk;
+        inp[0].ki.wScan = scan;
+        inp[0].ki.dwFlags = flags;
+        SendInput(1, inp, System.Runtime.InteropServices.Marshal.SizeOf(typeof(INPUT)));
+    }
 }
 "@ -ErrorAction Stop
 } catch {
@@ -1945,7 +2043,12 @@ function Get-ScreenBounds {
     return New-Object System.Drawing.Rectangle($minX,$minY,($maxX-$minX),($maxY-$minY))
 }
 $bounds = Get-ScreenBounds
-"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Screen bounds: $($bounds.X),$($bounds.Y) ${($bounds.Width)}x$($bounds.Height)" | Out-File $errLog -Append
+# Virtual desktop dimensions (entire desktop across all monitors)
+$virtW = [System.Windows.Forms.SystemInformation]::VirtualScreen.Width
+$virtH = [System.Windows.Forms.SystemInformation]::VirtualScreen.Height
+$virtX = [System.Windows.Forms.SystemInformation]::VirtualScreen.X
+$virtY = [System.Windows.Forms.SystemInformation]::VirtualScreen.Y
+"[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Screen bounds: $($bounds.X),$($bounds.Y) $($bounds.Width)x$($bounds.Height) | VirtDesk: ${virtX},${virtY} ${virtW}x${virtH}" | Out-File $errLog -Append
 while (-not (Test-Path $stop)) {
     if (Test-Path $inputFile) {
         try {
@@ -1961,39 +2064,39 @@ while (-not (Test-Path $stop)) {
                     $absY = [int]($bounds.Y + $evt.y * $bounds.Height)
                     switch ($evt.type) {
                         'mouse_move' {
-                            [RdInput]::SetCursorPos($absX, $absY)
+                            [RdInput]::MouseMoveAbs($absX, $absY, $virtW, $virtH)
                         }
                         'mouse_down' {
-                            [RdInput]::SetCursorPos($absX, $absY)
+                            [RdInput]::MouseMoveAbs($absX, $absY, $virtW, $virtH)
                             switch ($evt.button) {
-                                'right'  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_RIGHTDOWN,  0, 0, 0, [IntPtr]::Zero) }
-                                'middle' { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_MIDDLEDOWN, 0, 0, 0, [IntPtr]::Zero) }
-                                default  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_LEFTDOWN,   0, 0, 0, [IntPtr]::Zero) }
+                                'right'  { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_RIGHTDOWN)  }
+                                'middle' { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_MIDDLEDOWN) }
+                                default  { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_LEFTDOWN)   }
                             }
                         }
                         'mouse_up' {
-                            [RdInput]::SetCursorPos($absX, $absY)
+                            [RdInput]::MouseMoveAbs($absX, $absY, $virtW, $virtH)
                             switch ($evt.button) {
-                                'right'  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_RIGHTUP,  0, 0, 0, [IntPtr]::Zero) }
-                                'middle' { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_MIDDLEUP, 0, 0, 0, [IntPtr]::Zero) }
-                                default  { [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_LEFTUP,   0, 0, 0, [IntPtr]::Zero) }
+                                'right'  { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_RIGHTUP)  }
+                                'middle' { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_MIDDLEUP) }
+                                default  { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_LEFTUP)   }
                             }
                         }
                         'mouse_wheel' {
-                            [RdInput]::mouse_event([RdInput]::MOUSEEVENTF_WHEEL, 0, 0, [int]($evt.delta * 120), [IntPtr]::Zero)
+                            [RdInput]::MouseWheel([int]($evt.delta * 120))
                         }
                         'key_down' {
-                            [RdInput]::keybd_event([byte]$evt.vk, 0, [RdInput]::KEYEVENTF_KEYDOWN, [IntPtr]::Zero)
+                            [RdInput]::KeyEvent([ushort]$evt.vk, $false)
                         }
                         'key_up' {
-                            [RdInput]::keybd_event([byte]$evt.vk, 0, [RdInput]::KEYEVENTF_KEYUP, [IntPtr]::Zero)
+                            [RdInput]::KeyEvent([ushort]$evt.vk, $true)
                         }
                     }
                 } catch { }
             }
         } catch { }
     }
-    Start-Sleep -Milliseconds 25
+    Start-Sleep -Milliseconds 10
 }
 "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Input handler stopped" | Out-File $errLog -Append
 "#;
@@ -2498,8 +2601,8 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
         .ok_or_else(|| "Cannot determine exe directory".to_string())?;
 
     let ext = if cfg!(target_os = "windows") { ".exe" } else { "" };
-    let new_binary_path = current_dir.join(format!("reap3r-agent-new{}", ext));
-    let backup_path = current_dir.join(format!("reap3r-agent-old{}", ext));
+    let new_binary_path = current_dir.join(format!("xefi-agent-2-new{}", ext));
+    let backup_path = current_dir.join(format!("xefi-agent-2-old{}", ext));
 
     // 2. Download the new binary
     finfo!("Downloading new agent binary from {}", download_url);
@@ -2603,7 +2706,7 @@ try {{
 $maxWait = 30
 $waited = 0
 while ($waited -lt $maxWait) {{
-    $proc = Get-Process -Name "reap3r-agent" -ErrorAction SilentlyContinue
+    $proc = Get-Process -Name "xefi-agent-2" -ErrorAction SilentlyContinue
     if (-not $proc) {{ break }}
     Start-Sleep -Seconds 1
     $waited++
@@ -2611,7 +2714,7 @@ while ($waited -lt $maxWait) {{
 
 if ($waited -ge $maxWait) {{
     Log "Force killing process"
-    Stop-Process -Name "reap3r-agent" -Force -ErrorAction SilentlyContinue
+    Stop-Process -Name "xefi-agent-2" -Force -ErrorAction SilentlyContinue
     Start-Sleep -Seconds 2
 }}
 
@@ -2695,7 +2798,7 @@ Log "Update complete"
 
         // Restart the service (this will kill us, so fire and forget)
         let _ = std::process::Command::new("systemctl")
-            .args(["restart", "reap3r-agent"])
+            .args(["restart", "xefi-agent-2"])
             .spawn();
 
         Ok(serde_json::json!({
@@ -2716,7 +2819,8 @@ async fn start_remote_desktop(
     let tx = tx.ok_or_else(|| "No WS channel available for streaming".to_string())?;
 
     // Parse parameters
-    let fps = payload["fps"].as_u64().unwrap_or(2).clamp(1, 15);
+    // Keep RD smooth by default while staying safe for CPU/network.
+    let fps = payload["fps"].as_u64().unwrap_or(15).clamp(1, 30);
     let quality = payload["quality"].as_u64().unwrap_or(50).clamp(10, 100);
     let scale = payload["scale"].as_f64().unwrap_or(0.5).clamp(0.2, 1.0);
     let monitor: i64 = payload["monitor"].as_i64().unwrap_or(-1).clamp(-1, 15);
@@ -2831,11 +2935,10 @@ async fn start_remote_desktop(
         let mut sequence: u64 = 0;
         let mut last_seq: i64 = -1;
         let mut empty_count: u64 = 0;
-        let mut error_reported = false;
 
         while RD_ACTIVE.load(Ordering::SeqCst) {
             // Check for capture error log (PS script logs errors there)
-            if !error_reported && empty_count > 10 {
+            if empty_count > 10 {
                 if let Ok(err_log) = tokio::fs::read_to_string(&err_log_path).await {
                     if err_log.contains("FATAL") || err_log.contains("CopyFromScreen error") || err_log.contains("Too many errors") {
                         ferror!("RD: Capture script reported errors:\n{}", err_log.trim());
@@ -2852,7 +2955,6 @@ async fn start_remote_desktop(
                             &secret,
                         );
                         let _ = tx.send(err_msg).await;
-                        error_reported = true;
                         // Stop after reporting error
                         break;
                     }
@@ -2954,9 +3056,9 @@ async fn execute_system_command(action: &str, delay_secs: u64) -> Result<serde_j
 // Placed here so finfo!/fwarn!/ferror! macros and all agent functions are in scope.
 
 #[cfg(windows)]
-const SERVICE_NAME: &str = "MASSVISION-Reap3r-Agent";
+const SERVICE_NAME: &str = "XEFI-Agent-2";
 #[cfg(windows)]
-const LEGACY_SERVICE_NAMES: [&str; 2] = ["Reap3rAgent", "ReaP3rAgent"];
+const LEGACY_SERVICE_NAMES: [&str; 4] = ["MASSVISION-Reap3r-Agent", "Reap3rAgent", "ReaP3rAgent", "xefi-agent-2"];
 
 #[cfg(windows)]
 fn service_name_candidates() -> Vec<&'static str> {
@@ -3023,7 +3125,7 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
     });
     flog("INFO", "Windows Service: Running");
     eventlog::write("INFO", &format!(
-        "Reap3r Agent service started — v{} (PID {})",
+        "XEFI Agent 2 service started — v{} (PID {})",
         env!("CARGO_PKG_VERSION"), std::process::id()
     ));
 
@@ -3041,6 +3143,7 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
         run_startup_diagnostic(&server, args.insecure_tls).await;
 
         let mut state = AgentRuntimeState::load();
+        spawn_health_server(args.health_port);
         let mut backoff: u64 = 1;
         loop {
             if shutdown_rx.try_recv().is_ok() { break; }
@@ -3050,8 +3153,9 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
                 Err(e) => ferror!("Error: {}. Reconnecting in {}s...", e, backoff),
             }
             if shutdown_rx.try_recv().is_ok() { break; }
-            tokio::time::sleep(Duration::from_secs(backoff)).await;
-            backoff = if res.is_ok() { 1 } else { (backoff * 2).min(60) };
+            let jitter_ms = (Uuid::new_v4().as_u128() % 2000) as u64;
+            tokio::time::sleep(Duration::from_millis(backoff * 1000 + jitter_ms)).await;
+            backoff = if res.is_ok() { 1 } else { (backoff * 2).min(300) };
         }
     });
 
@@ -3065,7 +3169,7 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
         process_id: None,
     });
     flog("INFO", "Windows Service: Stopped");
-    eventlog::write("INFO", "Reap3r Agent service stopped");
+    eventlog::write("INFO", "XEFI Agent 2 service stopped");
 }
 
 #[cfg(windows)]
@@ -3075,7 +3179,7 @@ fn install_windows_service() {
     let service_bin_path = format!("\"{}\" --run", exe_path);
     let service_name = detect_installed_service_name().unwrap_or_else(|| SERVICE_NAME.to_string());
     println!("═══════════════════════════════════════════════════════════");
-    println!("  MASSVISION Reap3r Agent — Service Installer");
+    println!("  XEFI Agent 2 — Service Installer");
     println!("  Version: {}", env!("CARGO_PKG_VERSION"));
     println!("  Binary : {}", exe_path);
     println!("  Arch   : {}", if cfg!(target_arch = "x86_64") { "x64" } else { "x86" });
@@ -3143,7 +3247,7 @@ fn install_windows_service() {
     // ── 1. Register Windows Event Log source ──
     println!("[*] Registering Event Log source...");
     let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-        .create_subkey("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Reap3r Agent")
+        .create_subkey("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\XEFI Agent 2")
         .map(|(key, _)| {
             let _ = key.set_value("EventMessageFile", &exe_path);
             let _ = key.set_value::<u32, _>("TypesSupported", &7u32);
@@ -3156,7 +3260,7 @@ fn install_windows_service() {
             "create", &service_name,
             "binPath=", &service_bin_path,
             "start=", "auto",
-            "DisplayName=", "MASSVISION Reap3r Agent",
+            "DisplayName=", "XEFI Agent 2",
         ])
         .output();
     match output {
@@ -3184,7 +3288,7 @@ fn install_windows_service() {
 
     // ── 3. Set description ──
     let desc = format!(
-        "MASSVISION Reap3r Agent v{} — Enterprise remote management. Runs as SYSTEM, auto-starts on boot, auto-recovers on failure.",
+        "XEFI Agent 2 v{} — Enterprise remote management. Runs as SYSTEM, auto-starts on boot, auto-recovers on failure.",
         env!("CARGO_PKG_VERSION")
     );
     let _ = std::process::Command::new("sc.exe")
@@ -3312,6 +3416,10 @@ fn build_args_from_config() -> Args {
             .or_else(|| std::env::var("REAP3R_HMAC_KEY").ok()),
         heartbeat_interval: std::env::var("REAP3R_HEARTBEAT_INTERVAL")
             .ok().and_then(|v| v.parse().ok()).unwrap_or(30),
+        max_backoff: std::env::var("REAP3R_MAX_BACKOFF")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(300),
+        health_port: std::env::var("REAP3R_HEALTH_PORT")
+            .ok().and_then(|v| v.parse().ok()).unwrap_or(0),
         diagnose: false,
         status: false,
         logs: false,
@@ -3540,6 +3648,7 @@ async fn main() {
     run_startup_diagnostic(&server, args.insecure_tls).await;
 
     let mut state = AgentRuntimeState::load();
+    spawn_health_server(args.health_port);
     let mut backoff_secs: u64 = 1;
 
     if args.run_for_secs > 0 {
@@ -3564,10 +3673,73 @@ async fn main() {
             Err(e) => { ferror!("Agent error: {}. Reconnecting in {}s...", e, backoff_secs) }
         }
 
-        let jitter_ms = (Uuid::new_v4().as_u128() % 500) as u64;
+        let max_bo = args.max_backoff.max(10);
+        let jitter_ms = (Uuid::new_v4().as_u128() % 2000) as u64;
         tokio::time::sleep(Duration::from_millis(backoff_secs * 1000 + jitter_ms)).await;
-        backoff_secs = if res.is_ok() { 1 } else { (backoff_secs * 2).min(60) };
+        backoff_secs = if res.is_ok() { 1 } else { (backoff_secs * 2).min(max_bo) };
     }
+}
+
+// ── Local HTTP health-check server ────────────────────────────────────────────
+// Listens on 0.0.0.0:{port}, responds to any GET request with JSON.
+// Designed to be checked by Zabbix userparameter or Prometheus.
+//
+//   UserParameter=reap3r.health,curl -sf http://127.0.0.1:9090/health
+//
+// Response example:
+//   {"status":"ok","version":"1.2.0","enrolled":true,"uptime_sec":3600}
+fn spawn_health_server(port: u16) {
+    if port == 0 {
+        return;
+    }
+    finfo!("Health check server starting on 0.0.0.0:{}", port);
+    tokio::spawn(async move {
+        let addr = format!("0.0.0.0:{}", port);
+        let listener = match tokio::net::TcpListener::bind(&addr).await {
+            Ok(l) => { finfo!("Health server listening on {}", addr); l }
+            Err(e) => { ferror!("Health server failed to bind {}: {}", addr, e); return; }
+        };
+        loop {
+            match listener.accept().await {
+                Err(e) => { fwarn!("Health server accept error: {}", e); continue; }
+                Ok((mut stream, peer)) => {
+                    tokio::spawn(async move {
+                        // Drain the HTTP request (we don't need to parse it — respond to any GET).
+                        // Give the OS a moment to buffer the client's headers, then drain.
+                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        {
+                            use tokio::io::AsyncReadExt;
+                            let mut buf = [0u8; 512];
+                            let _ = stream.read(&mut buf).await;
+                        }
+
+                        let enrolled = load_config()
+                            .map(|c| !c.agent_id.is_empty())
+                            .unwrap_or(false);
+                        let uptime = sysinfo::System::uptime();
+
+                        let body = serde_json::json!({
+                            "status": "ok",
+                            "version": env!("CARGO_PKG_VERSION"),
+                            "enrolled": enrolled,
+                            "uptime_sec": uptime,
+                            "pid": std::process::id(),
+                        }).to_string();
+
+                        let response = format!(
+                            "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{}",
+                            body.len(), body
+                        );
+
+                        use tokio::io::AsyncWriteExt;
+                        let _ = stream.write_all(response.as_bytes()).await;
+                        let _ = stream.flush().await;
+                        finfo!("Health check served to {}", peer);
+                    });
+                }
+            }
+        }
+    });
 }
 
 async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> Result<(), Box<dyn std::error::Error>> {
@@ -3687,14 +3859,16 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
     let key_hb = hmac_key.clone();
     let hb_interval = args.heartbeat_interval;
 
-    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(64);
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(256);
     let tx_hb = tx.clone();
 
     tokio::spawn(async move {
         let mut interval = tokio::time::interval(Duration::from_secs(hb_interval));
         let mut inventory_counter: u64 = 0;
+        let mut heartbeat_counter: u64 = 0;
         loop {
             interval.tick().await;
+            heartbeat_counter += 1;
             let metrics = collect_metrics();
             let mem_used = metrics["memory_used_bytes"].as_u64().unwrap_or(0);
             let mem_total = metrics["memory_total_bytes"].as_u64().unwrap_or(0);
@@ -3703,37 +3877,49 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
 
             let memory_percent = if mem_total > 0 { ((mem_used as f64 / mem_total as f64) * 100.0).round() as u64 } else { 0 };
             let disk_percent = if disk_total > 0 { ((disk_used as f64 / disk_total as f64) * 100.0).round() as u64 } else { 0 };
+            let cpu_percent = metrics["cpu_percent"].as_u64().unwrap_or(0);
+
+            // Combined heartbeat + metrics in a single message (halves server message volume at scale).
+            // The backend should prefer to read metrics from heartbeat.metrics rather than
+            // waiting for separate metrics_push.
             let hb = build_message(
                 &agent_id_hb,
                 "heartbeat",
                 serde_json::json!({
                     "uptime_sec": sysinfo::System::uptime(),
+                    "cpu_percent": cpu_percent,
                     "memory_percent": memory_percent,
                     "disk_percent": disk_percent,
+                    // Full metrics embedded so the server doesn't need a separate message.
+                    "metrics": metrics.clone(),
                 }),
                 &key_hb,
             );
-            finfo!(
-                "Heartbeat queued (cpu={}% mem={}% disk={}%)",
-                metrics["cpu_percent"].as_u64().unwrap_or(0),
-                memory_percent,
-                disk_percent
-            );
+            if heartbeat_counter % 5 == 0 {
+                finfo!(
+                    "Heartbeat queued (cpu={}% mem={}% disk={}%)",
+                    cpu_percent, memory_percent, disk_percent
+                );
+            }
             if tx_hb.send(hb).await.is_err() {
                 break;
             }
 
-            // Also send metrics
-            let metrics_msg = build_message(
-                &agent_id_hb,
-                "metrics_push",
-                metrics,
-                &key_hb,
-            );
-            finfo!("Metrics queued");
-            if tx_hb.send(metrics_msg).await.is_err() {
-                break;
+            // Compatibility pulse: keep a periodic metrics_push for older backend nodes.
+            if heartbeat_counter % 5 == 0 {
+                let metrics_msg = build_message(
+                    &agent_id_hb,
+                    "metrics_push",
+                    metrics.clone(),
+                    &key_hb,
+                );
+                if tx_hb.send(metrics_msg).await.is_err() {
+                    break;
+                }
             }
+
+            // NOTE: metrics_push is no longer sent separately — metrics are embedded in
+            // the heartbeat payload above. This halves the number of messages at 20k scale.
 
             // Send inventory every 10 heartbeats (~5min at 30s interval)
             inventory_counter += 1;
@@ -3847,6 +4033,13 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                                     "vk": vk,
                                 });
                                 let input_path = rd_input_data_path();
+                                // Keep control responsive: if the input queue file grows too much,
+                                // drop stale events instead of replaying old pointer movements.
+                                if let Ok(meta) = std::fs::metadata(&input_path) {
+                                    if meta.len() > 1024 * 1024 {
+                                        let _ = std::fs::remove_file(&input_path);
+                                    }
+                                }
                                 // Append to file (multiple events per poll cycle)
                                 let line = format!("{}\n", cmd.to_string());
                                 let _ = std::fs::OpenOptions::new()
