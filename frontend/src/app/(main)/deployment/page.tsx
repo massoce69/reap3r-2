@@ -76,12 +76,23 @@ class ZabbixBrowserClient {
   }
 
   async getScriptId(): Promise<string> {
-    const scripts = await this.rpc('script.get', {
-      filter: { name: this.scriptName },
+    // Fetch all scripts then match case-insensitively
+    const all = await this.rpc('script.get', {
       output: ['scriptid', 'name'],
-    }) as Array<{ scriptid: string }>;
-    if (!scripts || scripts.length === 0) throw new Error(`Script "${this.scriptName}" introuvable dans Zabbix`);
-    return scripts[0].scriptid;
+    }) as Array<{ scriptid: string; name: string }>;
+
+    const target = this.scriptName.trim().toLowerCase();
+    const match = (all || []).find(s => s.name.trim().toLowerCase() === target)
+                ?? (all || []).find(s => s.name.trim().toLowerCase().includes(target))
+                ?? (all || []).find(s => target.includes(s.name.trim().toLowerCase()));
+
+    if (!match) {
+      const available = (all || []).map(s => `"${s.name}"`).join(', ') || '(aucun script trouvé)';
+      throw new Error(
+        `Script "${this.scriptName}" introuvable.\nScripts disponibles dans Zabbix : ${available}`
+      );
+    }
+    return match.scriptid;
   }
 
   async getHostId(hostname: string): Promise<string | null> {
