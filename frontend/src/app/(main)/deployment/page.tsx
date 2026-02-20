@@ -300,6 +300,13 @@ function ZabbixDeployTab() {
   };
 
   const handleValidate = async (batchId: string) => {
+    // Skip backend validation because firewall blocks it.
+    // Mark items as 'ready' locally or warn user.
+    if (browserMode) {
+        alert("Server validation skipped (firewall bypass mode). You can proceed to Start Deployment directly.");
+        return;
+    }
+
     const pw = prompt('Enter Zabbix password to validate:');
     if (!pw) return;
     try {
