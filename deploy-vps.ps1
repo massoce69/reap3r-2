@@ -10,6 +10,9 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+# Native tools (ssh/git/apt) often write progress on stderr even on success.
+# Disable PS7 behavior that promotes native stderr to terminating errors.
+$global:PSNativeCommandUseErrorActionPreference = $false
 
 $colors = @{
     Success = "Green"
@@ -38,21 +41,29 @@ function Invoke-SSHCommand {
         [string]$Command
     )
 
-    $isScript = $Command.Contains("`n")
-    if ($isScript) {
-        $result = $Command | & ssh -o "StrictHostKeyChecking=accept-new" `
-                                 -p $VpsPort `
-                                 "$VpsUser@$VpsIP" `
-                                 "bash -s" 2>&1
+    $scriptText = if ($Command.Contains("`n")) {
+        $Command
     } else {
-        $result = & ssh -o "StrictHostKeyChecking=accept-new" `
-                         -p $VpsPort `
-                         "$VpsUser@$VpsIP" `
-                         $Command 2>&1
+        "#!/bin/bash`nset -e`n$Command`n"
     }
 
-    if ($LASTEXITCODE -ne 0) {
-        Write-Log "SSH command failed:`n$result" "Error"
+    $tmpFile = [System.IO.Path]::GetTempFileName()
+    $oldErrorPreference = $global:ErrorActionPreference
+    try {
+        $global:ErrorActionPreference = "Continue"
+        Set-Content -Path $tmpFile -Value $scriptText -Encoding Ascii -NoNewline
+
+        $sshCmd = "type `"$tmpFile`" | ssh -o StrictHostKeyChecking=accept-new -p $VpsPort $VpsUser@$VpsIP bash -s"
+        $result = & cmd.exe /d /s /c $sshCmd 2>&1
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $global:ErrorActionPreference = $oldErrorPreference
+        Remove-Item -Path $tmpFile -Force -ErrorAction SilentlyContinue
+    }
+
+    if ($exitCode -ne 0) {
+        Write-Log "SSH command failed (code $exitCode):`n$result" "Error"
         return $null
     }
 
@@ -81,7 +92,8 @@ fi
 echo "repo_ok"
 "@
 
-    Invoke-SSHCommand $script | Out-Null
+    $res = Invoke-SSHCommand $script
+    if ($null -eq $res) { throw "Clone-Repository failed" }
     Write-Log "Repository synced" "Success"
 }
 
@@ -107,7 +119,8 @@ apt-get install -y postgresql postgresql-contrib nginx git
 echo "deps_ok"
 "@
 
-    Invoke-SSHCommand $script | Out-Null
+    $res = Invoke-SSHCommand $script
+    if ($null -eq $res) { throw "Setup-Dependencies failed" }
     Write-Log "Dependencies ready" "Success"
 }
 
@@ -126,7 +139,8 @@ sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'reap3r'" |
 echo "db_ok"
 "@
 
-    Invoke-SSHCommand $script | Out-Null
+    $res = Invoke-SSHCommand $script
+    if ($null -eq $res) { throw "Setup-Database failed" }
     Write-Log "Database ready" "Success"
 }
 
@@ -143,50 +157,50 @@ upstream frontend {
 }
 
 server {
-    listen 80 default_server;
+    listen 80;
     server_name _;
     client_max_body_size 100M;
 
     location /api/ {
         proxy_pass http://backend_http;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade `$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host `$host;
+        proxy_set_header X-Real-IP `$remote_addr;
+        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto `$scheme;
     }
 
     location /ws/agent {
         proxy_pass http://backend_http;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade `$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host `$host;
+        proxy_set_header X-Real-IP `$remote_addr;
+        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto `$scheme;
     }
 
     location /ws {
         proxy_pass http://backend_http;
         proxy_http_version 1.1;
-        proxy_set_header Upgrade \$http_upgrade;
+        proxy_set_header Upgrade `$http_upgrade;
         proxy_set_header Connection "upgrade";
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host `$host;
+        proxy_set_header X-Real-IP `$remote_addr;
+        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto `$scheme;
     }
 
     location / {
         proxy_pass http://frontend;
         proxy_http_version 1.1;
-        proxy_set_header Host \$host;
-        proxy_set_header X-Real-IP \$remote_addr;
-        proxy_set_header X-Forwarded-For \$proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto \$scheme;
+        proxy_set_header Host `$host;
+        proxy_set_header X-Real-IP `$remote_addr;
+        proxy_set_header X-Forwarded-For `$proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto `$scheme;
     }
 }
 "@
@@ -207,7 +221,8 @@ systemctl enable nginx
 echo "nginx_ok"
 "@
 
-    Invoke-SSHCommand $script | Out-Null
+    $res = Invoke-SSHCommand $script
+    if ($null -eq $res) { throw "Setup-Nginx failed" }
     Write-Log "Nginx configured" "Success"
 }
 
@@ -221,33 +236,33 @@ cd $AppDir
 
 ENV_FILE="$AppDir/backend/.env"
 
-if [ ! -f "$ENV_FILE" ]; then
+if [ ! -f "`$ENV_FILE" ]; then
   JWT_SECRET="`$(openssl rand -base64 32)"
   HMAC_SECRET="`$(openssl rand -base64 32)"
   VAULT_MASTER_KEY="`$(openssl rand -base64 32)"
-  cat > "$ENV_FILE" <<EOF
+  cat > "`$ENV_FILE" <<EOF
 NODE_ENV=production
 PORT=4000
 WS_PORT=4000
 API_BASE_URL=http://$VpsIP
 DATABASE_URL=postgresql://reap3r:reap3r_secret@localhost:5432/reap3r
-JWT_SECRET=$JWT_SECRET
-HMAC_SECRET=$HMAC_SECRET
-VAULT_MASTER_KEY=$VAULT_MASTER_KEY
+JWT_SECRET=`$JWT_SECRET
+HMAC_SECRET=`$HMAC_SECRET
+VAULT_MASTER_KEY=`$VAULT_MASTER_KEY
 LOG_LEVEL=info
 EOF
-  chmod 600 "$ENV_FILE"
+  chmod 600 "`$ENV_FILE"
 fi
 
-if ! grep -q '^VAULT_MASTER_KEY=' "$ENV_FILE"; then
-  echo "VAULT_MASTER_KEY=`$(openssl rand -base64 32)" >> "$ENV_FILE"
+if ! grep -q '^VAULT_MASTER_KEY=' "`$ENV_FILE"; then
+  echo "VAULT_MASTER_KEY=`$(openssl rand -base64 32)" >> "`$ENV_FILE"
 fi
 
 set -a
-. "$ENV_FILE"
+. "`$ENV_FILE"
 set +a
 
-npm ci --workspaces
+npm ci --workspaces --include=dev
 npm -w shared run build
 npm -w backend run db:migrate
 npm -w backend run build
@@ -258,7 +273,8 @@ pm2 save
 echo "backend_ok"
 "@
 
-    Invoke-SSHCommand $script | Out-Null
+    $res = Invoke-SSHCommand $script
+    if ($null -eq $res) { throw "Deploy-Backend failed" }
     Write-Log "Backend deployed" "Success"
 }
 
@@ -278,12 +294,13 @@ pm2 save
 echo "frontend_ok"
 "@
 
-    Invoke-SSHCommand $script | Out-Null
+    $res = Invoke-SSHCommand $script
+    if ($null -eq $res) { throw "Deploy-Frontend failed" }
     Write-Log "Frontend deployed" "Success"
 }
 
 Write-Log "=== MASSVISION Reap3r VPS deploy ===" "Info"
-Write-Log "Server: $VpsIP:$VpsPort ($VpsUser)" "Info"
+Write-Log "Server: ${VpsIP}:$VpsPort ($VpsUser)" "Info"
 
 try {
     $test = Invoke-SSHCommand "echo OK"
@@ -308,4 +325,3 @@ catch {
     Write-Log "Deployment failed: $_" "Error"
     exit 1
 }
-
