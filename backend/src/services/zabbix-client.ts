@@ -73,6 +73,13 @@ export class ZabbixClient {
     this.user = cfg.user;
     this.password = cfg.password;
     this.timeout = cfg.timeout ?? 15_000;
+    
+    // Support static API token if provided via password (heuristic) OR external config
+    // If password is exactly 64 hex chars, treat as API token
+    if (/^[a-f0-9]{64}$/i.test(this.password)) {
+      this.authToken = this.password;
+      this.tokenExpiresAt = Number.MAX_SAFE_INTEGER; // Never expires
+    }
   }
 
   // ════════════════════════════════════════
