@@ -23,6 +23,12 @@ export interface ZabbixScript {
   type: string;
 }
 
+interface ZabbixHostMacro {
+  hostmacroid: string;
+  macro: string;
+  value?: string;
+}
+
 interface ZabbixScriptExecResult {
   response: string;   // 'success' | 'failed'
   value?: string;
@@ -337,6 +343,44 @@ export class ZabbixClient {
   // ════════════════════════════════════════
   // SCRIPT
   // ════════════════════════════════════════
+
+  /**
+   * Upsert one user macro on a host.
+   */
+  async upsertHostMacro(hostId: string, macro: string, value: string): Promise<void> {
+    await this.ensureAuth();
+
+    const existing = await this.rpc<ZabbixHostMacro[]>('usermacro.get', {
+      hostids: [hostId],
+      filter: { macro: [macro] },
+      output: ['hostmacroid', 'macro'],
+      limit: 1,
+    });
+
+    if (existing.length > 0) {
+      await this.rpc('usermacro.update', {
+        hostmacroid: existing[0].hostmacroid,
+        value,
+      });
+      return;
+    }
+
+    await this.rpc('usermacro.create', {
+      hostid: hostId,
+      macro,
+      value,
+    });
+  }
+
+  /**
+   * Upsert many host macros.
+   */
+  async upsertHostMacros(hostId: string, macros: Record<string, string>): Promise<void> {
+    for (const [macro, value] of Object.entries(macros)) {
+      if (!macro) continue;
+      await this.upsertHostMacro(hostId, macro, value ?? '');
+    }
+  }
 
   /**
    * Find a Zabbix global script by name.

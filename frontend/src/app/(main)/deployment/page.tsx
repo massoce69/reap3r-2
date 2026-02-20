@@ -3,6 +3,7 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, Modal, TabBar } from '@/components/ui';
 import { api } from '@/lib/api';
+import { ZabbixBatchDeployTab } from '@/components/deploy/ZabbixBatchDeployTab';
 import {
   Download, Copy, Key, Terminal, Monitor as MonitorIcon, Check,
   Plus, Trash2, ArrowRight, Upload, Play, RotateCcw, XCircle,
@@ -311,7 +312,7 @@ export default function DeploymentPage() {
           active={activeTab}
           onChange={setActiveTab}
         />
-        {activeTab === 'zabbix' ? <ZabbixDeployTab /> : <EnrollmentTokensTab />}
+        {activeTab === 'zabbix' ? <ZabbixBatchDeployTab /> : <EnrollmentTokensTab />}
       </div>
     </>
   );
@@ -325,7 +326,7 @@ function ZabbixDeployTab() {
   // Config
   const [zabbixUrl,   setZabbixUrl]   = useState('https://prod-zabbix.hypervision.fr:8081');
   const [zabbixUser,  setZabbixUser]  = useState('massvision');
-  const [zabbixPass,  setZabbixPass]  = useState('Chenhao.macross69');
+  const [zabbixPass,  setZabbixPass]  = useState('');
   const [scriptName,  setScriptName]  = useState('Reap3rEnroll');
   const [serverUrl,   setServerUrl]   = useState('https://massvision.pro');
 

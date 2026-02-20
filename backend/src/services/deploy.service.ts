@@ -536,17 +536,45 @@ export async function acquireItems(limit = 5): Promise<DeployItem[]> {
  */
 export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, serverUrl: string, callbackKey: string): Promise<void> {
   try {
-    // Build the command macros/parameters for the Zabbix script
-    const result = await zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!, {
+    const hostMacros = {
       '{$DAT}': item.dat,
       '{$SERVER}': serverUrl,
       '{$BATCH_ID}': item.batch_id,
       '{$CALLBACK_KEY}': callbackKey,
+    };
+    const manualInputPayload = {
+      ...hostMacros,
       DAT: item.dat,
       SERVER_URL: serverUrl,
       BATCH_ID: item.batch_id,
       CALLBACK_KEY: callbackKey,
-    });
+    };
+
+    // Keep host macros in sync so scripts can work without manual input support.
+    await zbxClient.upsertHostMacros(item.zabbix_hostid!, hostMacros);
+
+    let result: { value?: string; response?: string };
+    try {
+      // Preferred path on Zabbix with manual input support.
+      result = await zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!, manualInputPayload);
+    } catch (err: any) {
+      const msg = String(err?.message || '').toLowerCase();
+      const manualInputUnsupported =
+        msg.includes('manualinput') ||
+        msg.includes('/params/manualinput') ||
+        msg.includes('invalid parameter') ||
+        msg.includes('unexpected parameter');
+
+      if (!manualInputUnsupported) {
+        throw err;
+      }
+
+      console.warn(
+        `[deploy] script.execute manualinput rejected for ${item.zabbix_host}, retrying without manualinput`,
+      );
+      result = await zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!);
+    }
+
     const execId = String(result?.value ?? result?.response ?? `exec-${Date.now()}`);
 
     // Update item: script was sent
