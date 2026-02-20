@@ -92,10 +92,11 @@ class ZabbixBrowserClient {
       );
     }
 
-    // scope:4 = Manual host action (requis pour script.execute).
-    // Si le script existant a scope:1 (Action), on le corrige automatiquement.
-    if (String(match.scope) !== '4') {
-      await this.rpc('script.update', { scriptid: match.scriptid, scope: 4 });
+    // scope:2 = Manual host action (requis pour script.execute sur un hôte).
+    // scope:1 = Action operation (non exécutable à la demande)
+    // scope:4 = Manual event action (pour les events, pas les hôtes)
+    if (String(match.scope) !== '2') {
+      await this.rpc('script.update', { scriptid: match.scriptid, scope: 2 });
     }
 
     return match.scriptid;
@@ -203,7 +204,7 @@ class ZabbixBrowserClient {
       type: 0,       // Script (shell)
       execute_on: 0, // Sur l'agent Zabbix de l'hôte supervisé
       command,
-      scope: 4,      // Manual host action — REQUIS pour script.execute via API
+      scope: 2,      // Manual host action — REQUIS pour script.execute via API
     }) as { scriptids: string[] };
 
     if (!result?.scriptids?.[0]) throw new Error('Zabbix n\'a pas retourné d\'ID pour le script créé');
