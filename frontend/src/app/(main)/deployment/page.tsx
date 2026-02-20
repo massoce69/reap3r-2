@@ -75,10 +75,28 @@ class ZabbixBrowserClient {
     this.authToken = await this.rpc('user.login', { user, password: pass }) as string;
   }
 
+  // Retourne execute_on + type d'un script de référence qui fonctionne déjà sur ces hôtes.
+  // Ces scripts utilisent nécessairement la bonne méthode d'exécution pour l'infra.
+  private async detectWorkingExecuteOn(): Promise<{ execute_on: number; type: number }> {
+    const REF_NAMES = ['massvision xefi install', 'install xefi agent', 'agent mass', 'massvision v5', 'agent mass secour'];
+    const all = await this.rpc('script.get', {
+      output: ['scriptid', 'name', 'execute_on', 'type'],
+    }) as Array<{ scriptid: string; name: string; execute_on: number; type: number }>;
+
+    for (const ref of REF_NAMES) {
+      const found = (all || []).find(s => s.name.trim().toLowerCase().includes(ref));
+      if (found) return { execute_on: Number(found.execute_on), type: Number(found.type) };
+    }
+    // Fallback : même exécution que le premier script de type 0 (shell)
+    const shell = (all || []).find(s => Number(s.type) === 0);
+    if (shell) return { execute_on: Number(shell.execute_on), type: 0 };
+    return { execute_on: 0, type: 0 };
+  }
+
   async getScriptId(): Promise<string> {
     const all = await this.rpc('script.get', {
-      output: ['scriptid', 'name', 'scope'],
-    }) as Array<{ scriptid: string; name: string; scope: number }>;
+      output: ['scriptid', 'name', 'scope', 'execute_on', 'type'],
+    }) as Array<{ scriptid: string; name: string; scope: number; execute_on: number; type: number }>;
 
     const target = this.scriptName.trim().toLowerCase();
     const match = (all || []).find(s => s.name.trim().toLowerCase() === target)
@@ -92,11 +110,17 @@ class ZabbixBrowserClient {
       );
     }
 
-    // scope:2 = Manual host action (requis pour script.execute sur un hôte).
-    // scope:1 = Action operation (non exécutable à la demande)
-    // scope:4 = Manual event action (pour les events, pas les hôtes)
-    if (String(match.scope) !== '2') {
-      await this.rpc('script.update', { scriptid: match.scriptid, scope: 2 });
+    // Détecte le bon execute_on depuis les scripts existants qui fonctionnent
+    const { execute_on: goodExecOn } = await this.detectWorkingExecuteOn();
+
+    // Corrige scope ET execute_on si nécessaire (sans toucher au reste)
+    const needsUpdate = String(match.scope) !== '2' || Number(match.execute_on) !== goodExecOn;
+    if (needsUpdate) {
+      await this.rpc('script.update', {
+        scriptid: match.scriptid,
+        scope: 2,
+        execute_on: goodExecOn,
+      });
     }
 
     return match.scriptid;
@@ -199,10 +223,13 @@ class ZabbixBrowserClient {
       'echo "✅ Déploiement terminé sur $(hostname)"',
     ].join('\n');
 
+    // Copie le execute_on des scripts existants qui fonctionnent sur cette infra
+    const { execute_on: goodExecOn } = await this.detectWorkingExecuteOn();
+
     const result = await this.rpc('script.create', {
       name,
-      type: 0,       // Script (shell)
-      execute_on: 0, // Sur l'agent Zabbix de l'hôte supervisé
+      type: 0,
+      execute_on: goodExecOn,
       command,
       scope: 2,      // Manual host action — REQUIS pour script.execute via API
     }) as { scriptids: string[] };
@@ -410,7 +437,7 @@ function ZabbixDeployTab() {
       let scriptId: string;
       try {
         scriptId = await client.getScriptId();
-        log(`✅ Script trouvé (ID: ${scriptId})`);
+        log(`✅ Script trouvé et configuré (execute_on calqué sur tes scripts existants)`);
       } catch {
         log(`⚠️  Script "${scriptName}" introuvable — création automatique dans Zabbix...`);
         try {
