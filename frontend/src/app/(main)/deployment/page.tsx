@@ -3,12 +3,11 @@ import { useEffect, useState, useCallback, useRef } from 'react';
 import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, Modal, TabBar } from '@/components/ui';
 import { api } from '@/lib/api';
-import { BrowserDeployTab } from '@/components/deploy/BrowserDeployTab';
 import {
   Download, Copy, Key, Terminal, Monitor as MonitorIcon, Check,
   Plus, Trash2, ArrowRight, Upload, Play, RotateCcw, XCircle,
   FileSpreadsheet, Server, Shield, Clock, CheckCircle2, AlertTriangle,
-  Activity, RefreshCw, Monitor
+  Activity, RefreshCw
 } from 'lucide-react';
 
 // ═══════════════════════════════════════════
@@ -63,11 +62,73 @@ const itemStatusBadge = (s: string) => {
 };
 
 // ═══════════════════════════════════════════
+// BROWSER ZABBIX CLIENT
+// ═══════════════════════════════════════════
+class BrowserZabbixClient {
+  private url: string;
+  private token: string | null = null;
+  private scriptName: string;
+
+  constructor(cfg: { url: string; user: string; password?: string; token?: string; script?: string }) {
+    this.url = cfg.url.replace(/\/api_jsonrpc\.php$/, '') + '/api_jsonrpc.php';
+    this.scriptName = cfg.script || 'Reap3rEnroll';
+    if (cfg.token) {
+        this.token = cfg.token;
+    } else if (cfg.password && /^[a-f0-9]{64}$/i.test(cfg.password)) {
+        this.token = cfg.password;
+    }
+  }
+
+  async rpc(method: string, params: any) {
+    const body: any = {
+      jsonrpc: '2.0',
+      method,
+      params,
+      id: Date.now(),
+      auth: this.token,
+    };
+    if (method === 'user.login') delete body.auth;
+
+    const res = await fetch(this.url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json-rpc' },
+      body: JSON.stringify(body),
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
+    const json = await res.json() as any;
+    if (json.error) throw new Error(`Zabbix API Error: ${json.error.message} (${json.error.data})`);
+    return json.result;
+  }
+
+  async login(user: string, pass: string) {
+    if (this.token) return;
+    this.token = await this.rpc('user.login', { user, password: pass });
+  }
+
+  async getScriptId() {
+    const scripts = await this.rpc('script.get', { filter: { name: this.scriptName }, output: ['scriptid'] });
+    if (scripts.length === 0) throw new Error(`Global script "${this.scriptName}" not found`);
+    return scripts[0].scriptid;
+  }
+
+  async resolveHost(hostname: string) {
+    const hosts = await this.rpc('host.get', { filter: { host: [hostname] }, output: ['hostid', 'host'] });
+    return hosts.length > 0 ? hosts[0].hostid : null;
+  }
+
+  async executeScript(scriptId: string, hostId: string, manualInput: string) {
+    return this.rpc('script.execute', { scriptid: scriptId, hostid: hostId, manualinput: manualInput });
+  }
+}
+
+// ═══════════════════════════════════════════
 // MAIN COMPONENT
 // ═══════════════════════════════════════════
 export default function DeploymentPage() {
-  const [activeTab, setActiveTab] = useState<'zabbix' | 'tokens' | 'browser'>('zabbix');
+  const [activeTab, setActiveTab] = useState<'zabbix' | 'tokens'>('zabbix');
 
+  if (activeTab === 'tokens') {
   return (
     <>
       <TopBar title="Deployment" />
@@ -75,19 +136,33 @@ export default function DeploymentPage() {
         <TabBar
           tabs={[
             { key: 'zabbix' as const, label: 'Zabbix DAT Deploy', icon: <Server style={{ width: '13px', height: '13px' }} /> },
-            { key: 'browser' as const, label: 'Browser Mode (Firewall Bypass)', icon: <Monitor style={{ width: '13px', height: '13px' }} /> },
             { key: 'tokens' as const, label: 'Enrollment Tokens', icon: <Key style={{ width: '13px', height: '13px' }} /> },
           ]}
           active={activeTab}
           onChange={setActiveTab}
         />
-
-        {activeTab === 'zabbix' && <ZabbixDeployTab />}
-        {activeTab === 'browser' && <BrowserDeployTab />}
-        {activeTab === 'tokens' && <EnrollmentTokensTab />}
+        <EnrollmentTokensTab />
       </div>
     </>
   );
+} else {
+  return (
+    <>
+      <TopBar title="Deployment" />
+      <div className="p-6 space-y-4 animate-fade-in">
+        <TabBar
+          tabs={[
+            { key: 'zabbix' as const, label: 'Zabbix DAT Deploy', icon: <Server style={{ width: '13px', height: '13px' }} /> },
+            { key: 'tokens' as const, label: 'Enrollment Tokens', icon: <Key style={{ width: '13px', height: '13px' }} /> },
+          ]}
+          active={activeTab}
+          onChange={setActiveTab}
+        />
+        <ZabbixDeployTab />
+      </div>
+    </>
+  );
+} 
 }
 
 // ═══════════════════════════════════════════
@@ -101,17 +176,20 @@ function ZabbixDeployTab() {
   const [items, setItems] = useState<DeployItem[]>([]);
   const [itemsLoading, setItemsLoading] = useState(false);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [browserMode, setBrowserMode] = useState(true);
+  const [browserLogs, setBrowserLogs] = useState<string[]>([]);
+  const [isRunning, setIsRunning] = useState(false);
 
   // Import form state
   const [csvContent, setCsvContent] = useState('');
   const [fileBase64, setFileBase64] = useState('');
   const [filename, setFilename] = useState('');
   const [mode, setMode] = useState<'dry_run' | 'live'>('dry_run');
-  const [zabbixUrl, setZabbixUrl] = useState('');
-  const [zabbixUser, setZabbixUser] = useState('');
-  const [zabbixPassword, setZabbixPassword] = useState('');
-  const [zabbixScript, setZabbixScript] = useState('Reap3r Enrollment');
-  const [serverUrl, setServerUrl] = useState('');
+  const [zabbixUrl, setZabbixUrl] = useState('https://prod-zabbix.hypervision.fr:8081/api_jsonrpc.php');
+  const [zabbixUser, setZabbixUser] = useState('massvision');
+  const [zabbixPassword, setZabbixPassword] = useState('Chenhao.macross69');
+  const [zabbixScript, setZabbixScript] = useState('Reap3rEnroll');
+  const [serverUrl, setServerUrl] = useState('https://massvision.pro');
   const [importing, setImporting] = useState(false);
   const [importError, setImportError] = useState('');
 
@@ -234,7 +312,78 @@ function ZabbixDeployTab() {
   };
 
   const handleStart = async (batchId: string) => {
-    if (!confirm('Start live deployment? This will execute scripts via Zabbix.')) return;
+    if (!confirm('Start deployment? This will execute scripts via Zabbix.')) return;
+    
+    // Check if Browser Mode is blocked by backend state? No.
+    // If browser mode, run locally.
+    if (browserMode) {
+        setIsRunning(true);
+        setBrowserLogs(p => [...p, 'Initializing client-side deployment...']);
+        try {
+            const client = new BrowserZabbixClient({
+                url: zabbixUrl,
+                user: zabbixUser,
+                password: zabbixPassword,
+                script: zabbixScript
+            });
+
+            await client.login(zabbixUser, zabbixPassword);
+            setBrowserLogs(p => [...p, 'Logged in. Resolving script...']);
+            
+            const scriptId = await client.getScriptId();
+            setBrowserLogs(p => [...p, `Script found: ${scriptId}`]);
+            
+            // Iterate items
+            for (let i = 0; i < items.length; i++) {
+                const item = items[i];
+                if (item.status === 'success') continue;
+                
+                // Set pending
+                setItems(curr => {
+                    const next = [...curr];
+                    next[i] = { ...next[i], status: 'running' };
+                    return next;
+                });
+                
+                try {
+                    const hostId = await client.resolveHost(item.zabbix_host);
+                    if (!hostId) throw new Error('Host not found via API');
+                    
+                    const manualInput = `${serverUrl.replace(/\/+$/, '')} ${item.dat}`;
+                    const res = await client.executeScript(scriptId, hostId, manualInput) as { response: string; value: string };
+                    
+                    const ok = res.response === 'success';
+                    setItems(curr => {
+                        const next = [...curr];
+                        next[i] = { 
+                            ...next[i], 
+                            status: ok ? 'success' : 'failed',
+                            last_error: ok ? res.value : (res.value || 'Script failed')
+                        };
+                        return next;
+                    });
+                    
+                } catch (err: any) {
+                    setItems(curr => {
+                        const next = [...curr];
+                        next[i] = { ...next[i], status: 'failed', last_error: err.message };
+                        return next;
+                    });
+                }
+                // Small delay to be nice to API
+                await new Promise(r => setTimeout(r, 200));
+            }
+            alert('Browser Deployment Complete');
+        } catch (err: any) {
+             setBrowserLogs(p => [...p, `FATAL ERROR: ${err.message}`]);
+             alert(`Deployment Error: ${err.message}`);
+        } finally {
+            setIsRunning(false);
+        }
+        return;
+    }
+
+    // Default Server behavior
     try {
       await api.deploy.start(batchId);
       loadBatches();
