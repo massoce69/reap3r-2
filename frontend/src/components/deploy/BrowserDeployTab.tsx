@@ -138,7 +138,7 @@ export class BrowserZabbixClient {
     }
   }
 
-  async normalizeAgentInterfacePort(hostId: string): Promise<number> {
+  async normalizeAgentInterfacePort(hostId: string, aggressive = false): Promise<number> {
     const ifaces = await this.rpc('hostinterface.get', {
       hostids: [hostId],
       output: ['interfaceid', 'type', 'main', 'port'],
@@ -147,11 +147,20 @@ export class BrowserZabbixClient {
     const agentIfaces = ifaces.filter((i) => Number(i.type) === 1);
     let updated = 0;
     for (const iface of agentIfaces) {
-      if (String(iface.port) !== '10051') continue;
-      await this.rpc('hostinterface.update', {
-        interfaceid: iface.interfaceid,
-        port: '10050',
-      });
+      const portRaw = String(iface.port ?? '').trim();
+      if (portRaw === '10051') {
+        await this.rpc('hostinterface.update', {
+          interfaceid: iface.interfaceid,
+          port: '10050',
+        });
+        updated++;
+        continue;
+      }
+
+      const macroMatch = portRaw.match(/^\{\$[A-Z0-9_.]+\}$/i);
+      if (!aggressive || !macroMatch) continue;
+      const macro = macroMatch[0];
+      await this.upsertHostMacro(hostId, macro, '10050');
       updated++;
     }
     return updated;
@@ -188,7 +197,7 @@ export function BrowserDeployTab() {
       return 'Zabbix unreachable (connect timeout). Check URL/port and firewall from your current network.';
     }
     if (message.toLowerCase().includes('get value from agent failed') && message.includes(':10051')) {
-      return 'Zabbix host interface uses port 10051 (wrong for agent). Auto-fix attempted to 10050; retry this host.';
+      return 'Zabbix host still resolves agent port 10051 after auto-fix. Check Zabbix permissions and template/interface port macros.';
     }
     return message;
   }, []);
@@ -289,7 +298,7 @@ export function BrowserDeployTab() {
               msg.includes(':10051');
             if (!badAgentPort) throw firstErr;
 
-            const fixed = await client.normalizeAgentInterfacePort(hostId);
+            const fixed = await client.normalizeAgentInterfacePort(hostId, true);
             if (fixed <= 0) throw firstErr;
             addLog(`${item.hostname}: fixed ${fixed} Zabbix interface port(s) 10051->10050, retrying`);
             res = await client.executeScript(scriptId, hostId, manualInput);

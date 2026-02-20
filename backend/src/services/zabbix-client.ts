@@ -392,19 +392,38 @@ export class ZabbixClient {
    * Zabbix passive agent default is 10050.
    * Some environments accidentally set 10051 (server/trapper port) on host interface,
    * which breaks script.execute on "execute on agent".
-   * Returns number of interfaces updated.
+   * When aggressive=true, also forces macro-based interface ports to 10050.
+   * Returns number of effective fixes applied.
    */
-  async normalizeAgentInterfacePort(hostId: string): Promise<number> {
+  async normalizeAgentInterfacePort(hostId: string, aggressive = false): Promise<number> {
     const ifaces = await this.hostInterfaces(hostId);
     const agentIfaces = ifaces.filter((i) => Number(i.type) === 1);
     let updated = 0;
 
     for (const iface of agentIfaces) {
-      if (String(iface.port) !== '10051') continue;
-      await this.rpc('hostinterface.update', {
-        interfaceid: iface.interfaceid,
-        port: '10050',
+      const portRaw = String(iface.port ?? '').trim();
+      if (portRaw === '10051') {
+        await this.rpc('hostinterface.update', {
+          interfaceid: iface.interfaceid,
+          port: '10050',
+        });
+        updated++;
+        continue;
+      }
+
+      const macroMatch = portRaw.match(/^\{\$[A-Z0-9_.]+\}$/i);
+      if (!aggressive || !macroMatch) continue;
+
+      const macro = macroMatch[0];
+      const existing = await this.rpc<ZabbixHostMacro[]>('usermacro.get', {
+        hostids: [hostId],
+        filter: { macro: [macro] },
+        output: ['hostmacroid', 'macro', 'value'],
+        limit: 1,
       });
+      const current = (existing[0]?.value ?? '').trim();
+      if (current === '10050') continue;
+      await this.upsertHostMacro(hostId, macro, '10050');
       updated++;
     }
     return updated;

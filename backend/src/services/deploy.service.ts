@@ -584,7 +584,7 @@ export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, ser
         msg.includes(':10051');
       if (!badAgentPort) throw err;
 
-      const fixed = await zbxClient.normalizeAgentInterfacePort(item.zabbix_hostid!);
+      const fixed = await zbxClient.normalizeAgentInterfacePort(item.zabbix_hostid!, true);
       if (fixed <= 0) throw err;
 
       console.warn(
