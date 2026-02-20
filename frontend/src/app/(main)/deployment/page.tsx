@@ -109,6 +109,38 @@ class ZabbixBrowserClient {
     }) as { response: string; value?: string };
     return { ok: res.response === 'success', value: res.value ?? '' };
   }
+
+  async createEnrollScript(name: string): Promise<string> {
+    // Script shell qui parse {MANUALINPUT} = "SERVER_URL DAT_TOKEN"
+    // et lance reap3r-agent --enroll sur l'hôte via l'agent Zabbix
+    const command = [
+      '#!/bin/bash',
+      'SERVER=$(echo "{MANUALINPUT}" | cut -d\' \' -f1)',
+      'TOKEN=$(echo "{MANUALINPUT}" | cut -d\' \' -f2)',
+      'if [ -z "$SERVER" ] || [ -z "$TOKEN" ]; then echo "Usage: SERVER_URL TOKEN"; exit 1; fi',
+      'AGENT=""',
+      'for p in /opt/reap3r/reap3r-agent /usr/local/bin/reap3r-agent /usr/bin/reap3r-agent; do',
+      '  [ -x "$p" ] && AGENT="$p" && break',
+      'done',
+      'if [ -z "$AGENT" ]; then echo "ERROR: reap3r-agent not found"; exit 1; fi',
+      '$AGENT --enroll --server "$SERVER" --token "$TOKEN" 2>&1',
+    ].join('\n');
+
+    const result = await this.rpc('script.create', {
+      name,
+      type: 0,           // Script (shell)
+      execute_on: 0,     // Zabbix agent (s'exécute SUR l'hôte supervisé)
+      command,
+      scope: 1,          // Action operation
+      manualinput: 1,
+      manualinput_prompt: 'URL Serveur + Token DAT (séparés par un espace) : ex. https://massvision.pro abc123...',
+      manualinput_validator: '',
+      manualinput_default_value: '',
+    }) as { scriptids: string[] };
+
+    if (!result?.scriptids?.[0]) throw new Error('Zabbix n\'a pas retourné d\'ID pour le script créé');
+    return result.scriptids[0];
+  }
 }
 
 // ═══════════════════════════════════════════
@@ -207,6 +239,10 @@ function ZabbixDeployTab() {
   // Data
   const [items,    setItems]    = useState<LocalItem[]>([]);
   const [filename, setFilename] = useState('');
+
+  // Create script
+  const [createState, setCreateState] = useState<'idle' | 'creating' | 'done' | 'error'>('idle');
+  const [createMsg,   setCreateMsg]   = useState('');
 
   // State machine
   const [phase,   setPhase]   = useState<'idle' | 'ready' | 'running' | 'done'>('idle');
@@ -401,6 +437,39 @@ function ZabbixDeployTab() {
               disabled={phase === 'running'}
               className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50" />
           </div>
+        </div>
+
+        {/* ── Créer le script dans Zabbix ── */}
+        <div className="mt-4 pt-4 border-t border-reap3r-border/40 flex items-center gap-3 flex-wrap">
+          <Button
+            variant="secondary"
+            size="sm"
+            disabled={phase === 'running' || createState === 'creating'}
+            onClick={async () => {
+              setCreateState('creating');
+              setCreateMsg('');
+              try {
+                const client = new ZabbixBrowserClient(zabbixUrl, scriptName);
+                await client.login(zabbixUser, zabbixPass);
+                const id = await client.createEnrollScript(scriptName);
+                setCreateState('done');
+                setCreateMsg(`✅ Script "${scriptName}" créé dans Zabbix (ID: ${id}). Vous pouvez maintenant lancer le déploiement.`);
+              } catch (err: any) {
+                setCreateState('error');
+                setCreateMsg(`❌ ${err.message}`);
+              }
+            }}
+          >
+            {createState === 'creating'
+              ? <><RotateCcw className="animate-spin" style={{ width: '11px', height: '11px', marginRight: '5px' }} />Création en cours...</>
+              : <><Plus style={{ width: '11px', height: '11px', marginRight: '5px' }} />Créer le script &quot;{scriptName}&quot; dans Zabbix</>
+            }
+          </Button>
+          {createMsg && (
+            <span className={`text-[11px] ${createState === 'done' ? 'text-green-400' : 'text-red-400'}`}>
+              {createMsg}
+            </span>
+          )}
         </div>
       </Card>
 
