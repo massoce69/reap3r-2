@@ -75,55 +75,50 @@ class ZabbixBrowserClient {
     this.authToken = await this.rpc('user.login', { user, password: pass }) as string;
   }
 
-  // Retourne execute_on + type d'un script de référence qui fonctionne déjà sur ces hôtes.
-  // Ces scripts utilisent nécessairement la bonne méthode d'exécution pour l'infra.
-  private async detectWorkingExecuteOn(): Promise<{ execute_on: number; type: number }> {
-    const REF_NAMES = ['massvision xefi install', 'install xefi agent', 'agent mass', 'massvision v5', 'agent mass secour'];
+  // Récupère la config COMPLÈTE du script de référence qui fonctionne (massvision v5 ou autre)
+  private async getReferenceScript(): Promise<Record<string, unknown>> {
+    const REF_NAMES = ['massvision v5', 'massvision xefi install', 'install xefi agent', 'agent mass secour', 'agent mass'];
     const all = await this.rpc('script.get', {
-      output: ['scriptid', 'name', 'execute_on', 'type'],
-    }) as Array<{ scriptid: string; name: string; execute_on: number; type: number }>;
+      output: 'extend',
+    }) as Array<Record<string, unknown>>;
 
     for (const ref of REF_NAMES) {
-      const found = (all || []).find(s => s.name.trim().toLowerCase().includes(ref));
-      if (found) return { execute_on: Number(found.execute_on), type: Number(found.type) };
+      const found = (all || []).find(s => String(s.name).trim().toLowerCase().includes(ref));
+      if (found) return found;
     }
-    // Fallback : même exécution que le premier script de type 0 (shell)
-    const shell = (all || []).find(s => Number(s.type) === 0);
-    if (shell) return { execute_on: Number(shell.execute_on), type: 0 };
-    return { execute_on: 0, type: 0 };
+    // Fallback : premier script de type shell (type=0)
+    const shell = (all || []).find(s => String(s.type) === '0');
+    if (shell) return shell;
+    return {};
   }
 
   async getScriptId(): Promise<string> {
     const all = await this.rpc('script.get', {
-      output: ['scriptid', 'name', 'scope', 'execute_on', 'type'],
-    }) as Array<{ scriptid: string; name: string; scope: number; execute_on: number; type: number }>;
+      output: 'extend',
+    }) as Array<Record<string, unknown>>;
 
     const target = this.scriptName.trim().toLowerCase();
-    const match = (all || []).find(s => s.name.trim().toLowerCase() === target)
-                ?? (all || []).find(s => s.name.trim().toLowerCase().includes(target))
-                ?? (all || []).find(s => target.includes(s.name.trim().toLowerCase()));
+    const match = (all || []).find(s => String(s.name).trim().toLowerCase() === target)
+                ?? (all || []).find(s => String(s.name).trim().toLowerCase().includes(target))
+                ?? (all || []).find(s => target.includes(String(s.name).trim().toLowerCase()));
 
     if (!match) {
       const available = (all || []).map(s => `"${s.name}"`).join(', ') || '(aucun script trouvé)';
-      throw new Error(
-        `Script "${this.scriptName}" introuvable.\nScripts disponibles dans Zabbix : ${available}`
-      );
+      throw new Error(`Script "${this.scriptName}" introuvable.\nScripts disponibles : ${available}`);
     }
 
-    // Détecte le bon execute_on depuis les scripts existants qui fonctionnent
-    const { execute_on: goodExecOn } = await this.detectWorkingExecuteOn();
-
-    // Corrige scope ET execute_on si nécessaire (sans toucher au reste)
-    const needsUpdate = String(match.scope) !== '2' || Number(match.execute_on) !== goodExecOn;
-    if (needsUpdate) {
-      await this.rpc('script.update', {
-        scriptid: match.scriptid,
-        scope: 2,
-        execute_on: goodExecOn,
-      });
+    // Cloner tous les paramètres du script de référence qui fonctionne
+    const ref = await this.getReferenceScript();
+    if (Object.keys(ref).length > 0) {
+      const update: Record<string, unknown> = { scriptid: match.scriptid, scope: 2 };
+      // Copie les champs d'exécution depuis le script de référence
+      for (const key of ['type', 'execute_on', 'groupid', 'host_access', 'usrgrpid', 'confirmation']) {
+        if (ref[key] !== undefined) update[key] = ref[key];
+      }
+      await this.rpc('script.update', update);
     }
 
-    return match.scriptid;
+    return String(match.scriptid);
   }
 
   async getHostId(hostname: string): Promise<string | null> {
@@ -223,16 +218,18 @@ class ZabbixBrowserClient {
       'echo "✅ Déploiement terminé sur $(hostname)"',
     ].join('\n');
 
-    // Copie le execute_on des scripts existants qui fonctionnent sur cette infra
-    const { execute_on: goodExecOn } = await this.detectWorkingExecuteOn();
-
-    const result = await this.rpc('script.create', {
+    // Clone tous les paramètres d'exécution du script de référence qui fonctionne
+    const ref = await this.getReferenceScript();
+    const createParams: Record<string, unknown> = {
       name,
-      type: 0,
-      execute_on: goodExecOn,
       command,
-      scope: 2,      // Manual host action — REQUIS pour script.execute via API
-    }) as { scriptids: string[] };
+      scope: 2, // Manual host action
+    };
+    for (const key of ['type', 'execute_on', 'groupid', 'host_access', 'usrgrpid']) {
+      if (ref[key] !== undefined) createParams[key] = ref[key];
+    }
+
+    const result = await this.rpc('script.create', createParams) as { scriptids: string[] };
 
     if (!result?.scriptids?.[0]) throw new Error('Zabbix n\'a pas retourné d\'ID pour le script créé');
     return result.scriptids[0];
@@ -437,7 +434,7 @@ function ZabbixDeployTab() {
       let scriptId: string;
       try {
         scriptId = await client.getScriptId();
-        log(`✅ Script trouvé et configuré (execute_on calqué sur tes scripts existants)`);
+        log(`✅ Script trouvé — paramètres synchronisés depuis "massvision v5"`);
       } catch {
         log(`⚠️  Script "${scriptName}" introuvable — création automatique dans Zabbix...`);
         try {
