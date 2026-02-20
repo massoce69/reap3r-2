@@ -7,128 +7,162 @@ import {
   Download, Copy, Key, Terminal, Monitor as MonitorIcon, Check,
   Plus, Trash2, ArrowRight, Upload, Play, RotateCcw, XCircle,
   FileSpreadsheet, Server, Shield, Clock, CheckCircle2, AlertTriangle,
-  Activity, RefreshCw
+  Activity, RefreshCw, Wifi
 } from 'lucide-react';
+import * as XLSX from 'xlsx';
 
 // ═══════════════════════════════════════════
 // TYPES
 // ═══════════════════════════════════════════
-interface DeployBatch {
-  batch_id: string; filename: string; mode: string; status: string;
-  total_items: number; valid_count: number; invalid_count: number;
-  success_count: number; failed_count: number; skipped_count: number;
-  created_at: string; started_at: string | null; finished_at: string | null;
-  zabbix_url: string | null; server_url: string; error: string | null;
-}
-
-interface DeployItem {
-  id: string; row_number: number; zabbix_host: string; dat: string;
-  status: string; validation_error: string | null; attempt_count: number;
-  last_error: string | null; callback_received: boolean; callback_status: string | null;
-  callback_exit: number | null; started_at: string | null; finished_at: string | null;
+interface LocalItem {
+  id: number;
+  hostname: string;
+  dat: string;
+  status: 'pending' | 'running' | 'success' | 'failed' | 'skipped';
+  message: string;
 }
 
 // ═══════════════════════════════════════════
-// STATUS HELPERS
+// STATUS BADGE
 // ═══════════════════════════════════════════
-const batchStatusBadge = (s: string) => {
-  const map: Record<string, { variant: 'default' | 'success' | 'warning' | 'danger' | 'accent'; label: string }> = {
-    created: { variant: 'default', label: 'Created' },
-    validating: { variant: 'accent', label: 'Validating...' },
-    ready: { variant: 'accent', label: 'Ready' },
-    running: { variant: 'warning', label: 'Running' },
-    done: { variant: 'success', label: 'Done' },
-    failed: { variant: 'danger', label: 'Failed' },
-    cancelled: { variant: 'default', label: 'Cancelled' },
+function StatusBadge({ s }: { s: LocalItem['status'] }) {
+  const map = {
+    pending:  <Badge variant="default">En attente</Badge>,
+    running:  <Badge variant="warning">En cours...</Badge>,
+    success:  <Badge variant="success">Succès</Badge>,
+    failed:   <Badge variant="danger">Échec</Badge>,
+    skipped:  <Badge variant="default">Ignoré</Badge>,
   };
-  const m = map[s] ?? { variant: 'default' as const, label: s };
-  return <Badge variant={m.variant}>{m.label}</Badge>;
-};
-
-const itemStatusBadge = (s: string) => {
-  const map: Record<string, { variant: 'default' | 'success' | 'warning' | 'danger' | 'accent'; label: string }> = {
-    pending: { variant: 'default', label: 'Pending' },
-    valid: { variant: 'accent', label: 'Valid' },
-    invalid: { variant: 'danger', label: 'Invalid' },
-    ready: { variant: 'accent', label: 'Ready' },
-    running: { variant: 'warning', label: 'Running' },
-    success: { variant: 'success', label: 'Success' },
-    failed: { variant: 'danger', label: 'Failed' },
-    skipped: { variant: 'default', label: 'Skipped' },
-    cancelled: { variant: 'default', label: 'Cancelled' },
-  };
-  const m = map[s] ?? { variant: 'default' as const, label: s };
-  return <Badge variant={m.variant}>{m.label}</Badge>;
-};
+  return map[s] ?? <Badge variant="default">{s}</Badge>;
+}
 
 // ═══════════════════════════════════════════
-// BROWSER ZABBIX CLIENT
+// ZABBIX BROWSER CLIENT
 // ═══════════════════════════════════════════
-class BrowserZabbixClient {
-  private url: string;
-  private token: string | null = null;
-  private scriptName: string;
+class ZabbixBrowserClient {
+  private apiUrl: string;
+  private authToken: string | null = null;
+  scriptName: string;
 
-  constructor(cfg: { url: string; user: string; password?: string; token?: string; script?: string }) {
-    this.url = cfg.url.replace(/\/api_jsonrpc\.php$/, '') + '/api_jsonrpc.php';
-    this.scriptName = cfg.script || 'Reap3rEnroll';
-    if (cfg.token) {
-        this.token = cfg.token;
-    } else if (cfg.password && /^[a-f0-9]{64}$/i.test(cfg.password)) {
-        this.token = cfg.password;
-    }
+  constructor(url: string, script: string) {
+    this.apiUrl = url.replace(/\/api_jsonrpc\.php$/, '').replace(/\/$/, '') + '/api_jsonrpc.php';
+    this.scriptName = script || 'Reap3rEnroll';
   }
 
-  async rpc(method: string, params: any) {
-    const body: any = {
-      jsonrpc: '2.0',
-      method,
-      params,
-      id: Date.now(),
-      auth: this.token,
+  private async rpc(method: string, params: Record<string, unknown>) {
+    const body: Record<string, unknown> = {
+      jsonrpc: '2.0', method, params, id: Date.now(),
     };
-    if (method === 'user.login') delete body.auth;
+    if (this.authToken && method !== 'user.login') body.auth = this.authToken;
 
-    const res = await fetch(this.url, {
+    const res = await fetch(this.apiUrl, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json-rpc' },
       body: JSON.stringify(body),
     });
-
-    if (!res.ok) throw new Error(`HTTP ${res.status}: ${res.statusText}`);
-    const json = await res.json() as any;
-    if (json.error) throw new Error(`Zabbix API Error: ${json.error.message} (${json.error.data})`);
+    if (!res.ok) throw new Error(`HTTP ${res.status} ${res.statusText}`);
+    const json = await res.json() as { result?: unknown; error?: { message: string; data: string } };
+    if (json.error) throw new Error(`Zabbix: ${json.error.message} — ${json.error.data ?? ''}`);
     return json.result;
   }
 
   async login(user: string, pass: string) {
-    if (this.token) return;
-    this.token = await this.rpc('user.login', { user, password: pass });
+    // If it looks like an API token (64 hex chars), use directly
+    if (/^[a-f0-9]{64}$/i.test(pass)) {
+      this.authToken = pass;
+      return;
+    }
+    this.authToken = await this.rpc('user.login', { user, password: pass }) as string;
   }
 
-  async getScriptId() {
-    const scripts = await this.rpc('script.get', { filter: { name: this.scriptName }, output: ['scriptid'] });
-    if (scripts.length === 0) throw new Error(`Global script "${this.scriptName}" not found`);
+  async getScriptId(): Promise<string> {
+    const scripts = await this.rpc('script.get', {
+      filter: { name: this.scriptName },
+      output: ['scriptid', 'name'],
+    }) as Array<{ scriptid: string }>;
+    if (!scripts || scripts.length === 0) throw new Error(`Script "${this.scriptName}" introuvable dans Zabbix`);
     return scripts[0].scriptid;
   }
 
-  async resolveHost(hostname: string) {
-    const hosts = await this.rpc('host.get', { filter: { host: [hostname] }, output: ['hostid', 'host'] });
-    return hosts.length > 0 ? hosts[0].hostid : null;
+  async getHostId(hostname: string): Promise<string | null> {
+    const hosts = await this.rpc('host.get', {
+      filter: { host: [hostname] },
+      output: ['hostid'],
+    }) as Array<{ hostid: string }>;
+    return hosts && hosts.length > 0 ? hosts[0].hostid : null;
   }
 
-  async executeScript(scriptId: string, hostId: string, manualInput: string) {
-    return this.rpc('script.execute', { scriptid: scriptId, hostid: hostId, manualinput: manualInput });
+  async executeScript(scriptId: string, hostId: string, manualInput: string): Promise<{ ok: boolean; value: string }> {
+    const res = await this.rpc('script.execute', {
+      scriptid: scriptId, hostid: hostId, manualinput: manualInput,
+    }) as { response: string; value?: string };
+    return { ok: res.response === 'success', value: res.value ?? '' };
   }
 }
 
 // ═══════════════════════════════════════════
-// MAIN COMPONENT
+// CSV/XLSX PARSER
+// ═══════════════════════════════════════════
+const DAT_RE = /^[a-f0-9]{64}$/i;
+
+function parseFile(content: string | ArrayBuffer, name: string): LocalItem[] {
+  const isXlsx = /\.(xlsx|xls)$/i.test(name);
+  let rows: string[][] = [];
+
+  if (isXlsx) {
+    const wb = XLSX.read(content as ArrayBuffer, { type: 'buffer' });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    rows = XLSX.utils.sheet_to_json<string[]>(ws, { header: 1, defval: '' }) as string[][];
+  } else {
+    const text = content as string;
+    rows = text.split(/\r?\n/).filter(l => l.trim()).map(l => {
+      const sep = l.includes('\t') ? '\t' : l.includes(';') ? ';' : ',';
+      return l.split(sep).map(c => c.trim().replace(/^["']|["']$/g, ''));
+    });
+  }
+
+  if (rows.length === 0) return [];
+
+  // Detect header row
+  const header = rows[0].map(h => h.toLowerCase());
+  const hostIdx = header.findIndex(h => ['zabbix_host','host','hostname','server','machine'].includes(h));
+  const datIdx  = header.findIndex(h => ['dat','token','key','code','enrollment_token'].includes(h));
+
+  let startRow = 0;
+  let hCol: number, dCol: number;
+
+  if (hostIdx !== -1 && datIdx !== -1) {
+    // Header found
+    hCol = hostIdx; dCol = datIdx; startRow = 1;
+  } else {
+    // Heuristic: find DAT by format
+    const f = rows[0];
+    if (f.length >= 2) {
+      if (DAT_RE.test(f[0])) { dCol = 0; hCol = 1; }
+      else if (DAT_RE.test(f[1])) { hCol = 0; dCol = 1; }
+      else { hCol = 0; dCol = 1; }
+    } else { hCol = 0; dCol = 1; }
+    startRow = 0;
+  }
+
+  const items: LocalItem[] = [];
+  for (let i = startRow; i < rows.length; i++) {
+    const r = rows[i];
+    const hostname = (r[hCol] ?? '').trim();
+    const dat      = (r[dCol] ?? '').trim();
+    if (!hostname || !dat) continue;
+    if (!DAT_RE.test(dat)) continue; // skip invalid DATs
+    items.push({ id: i, hostname, dat, status: 'pending', message: '' });
+  }
+  return items;
+}
+
+// ═══════════════════════════════════════════
+// MAIN PAGE
 // ═══════════════════════════════════════════
 export default function DeploymentPage() {
   const [activeTab, setActiveTab] = useState<'zabbix' | 'tokens'>('zabbix');
 
-  if (activeTab === 'tokens') {
   return (
     <>
       <TopBar title="Deployment" />
@@ -141,543 +175,347 @@ export default function DeploymentPage() {
           active={activeTab}
           onChange={setActiveTab}
         />
-        <EnrollmentTokensTab />
+        {activeTab === 'zabbix' ? <ZabbixDeployTab /> : <EnrollmentTokensTab />}
       </div>
     </>
   );
-} else {
-  return (
-    <>
-      <TopBar title="Deployment" />
-      <div className="p-6 space-y-4 animate-fade-in">
-        <TabBar
-          tabs={[
-            { key: 'zabbix' as const, label: 'Zabbix DAT Deploy', icon: <Server style={{ width: '13px', height: '13px' }} /> },
-            { key: 'tokens' as const, label: 'Enrollment Tokens', icon: <Key style={{ width: '13px', height: '13px' }} /> },
-          ]}
-          active={activeTab}
-          onChange={setActiveTab}
-        />
-        <ZabbixDeployTab />
-      </div>
-    </>
-  );
-} 
 }
 
 // ═══════════════════════════════════════════
-// ZABBIX DEPLOY TAB
+// ZABBIX DEPLOY TAB — FULL BROWSER MODE
+// Direct browser → Zabbix (bypasse le firewall VPS)
 // ═══════════════════════════════════════════
 function ZabbixDeployTab() {
-  const [batches, setBatches] = useState<DeployBatch[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [showImport, setShowImport] = useState(false);
-  const [selectedBatch, setSelectedBatch] = useState<string | null>(null);
-  const [items, setItems] = useState<DeployItem[]>([]);
-  const [itemsLoading, setItemsLoading] = useState(false);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const [browserMode, setBrowserMode] = useState(true);
-  const [browserLogs, setBrowserLogs] = useState<string[]>([]);
-  const [isRunning, setIsRunning] = useState(false);
+  // Config
+  const [zabbixUrl,   setZabbixUrl]   = useState('https://prod-zabbix.hypervision.fr:8081');
+  const [zabbixUser,  setZabbixUser]  = useState('massvision');
+  const [zabbixPass,  setZabbixPass]  = useState('Chenhao.macross69');
+  const [scriptName,  setScriptName]  = useState('Reap3rEnroll');
+  const [serverUrl,   setServerUrl]   = useState('https://massvision.pro');
 
-  // Import form state
-  const [csvContent, setCsvContent] = useState('');
-  const [fileBase64, setFileBase64] = useState('');
+  // Data
+  const [items,    setItems]    = useState<LocalItem[]>([]);
   const [filename, setFilename] = useState('');
-  const [mode, setMode] = useState<'dry_run' | 'live'>('dry_run');
-  const [zabbixUrl, setZabbixUrl] = useState('https://prod-zabbix.hypervision.fr:8081/api_jsonrpc.php');
-  const [zabbixUser, setZabbixUser] = useState('massvision');
-  const [zabbixPassword, setZabbixPassword] = useState('Chenhao.macross69');
-  const [zabbixScript, setZabbixScript] = useState('Reap3rEnroll');
-  const [serverUrl, setServerUrl] = useState('https://massvision.pro');
-  const [importing, setImporting] = useState(false);
-  const [importError, setImportError] = useState('');
 
-  const toBase64 = (buffer: ArrayBuffer) => {
-    const bytes = new Uint8Array(buffer);
-    let binary = '';
-    const chunkSize = 0x8000;
-    for (let i = 0; i < bytes.length; i += chunkSize) {
-      const chunk = bytes.subarray(i, Math.min(i + chunkSize, bytes.length));
-      binary += String.fromCharCode(...chunk);
-    }
-    return btoa(binary);
-  };
+  // State machine
+  const [phase,   setPhase]   = useState<'idle' | 'ready' | 'running' | 'done'>('idle');
+  const [logs,    setLogs]    = useState<string[]>([]);
+  const [current, setCurrent] = useState(0);
+  const abortRef = useRef(false);
+  const logsEndRef = useRef<HTMLDivElement>(null);
 
-  const loadBatches = useCallback(async () => {
-    try {
-      const res = await api.deploy.batches();
-      setBatches(res.data);
-    } catch { } finally {
-      setLoading(false);
-    }
-  }, []);
+  const log = (msg: string) => setLogs(p => {
+    const lines = [...p, `[${new Date().toLocaleTimeString()}] ${msg}`];
+    return lines.slice(-200); // keep last 200 lines
+  });
 
-  const loadItems = useCallback(async (batchId: string) => {
-    setItemsLoading(true);
-    try {
-      const res = await api.deploy.items(batchId);
-      setItems(res.data);
-    } catch { } finally {
-      setItemsLoading(false);
-    }
-  }, []);
-
-  useEffect(() => { loadBatches(); }, [loadBatches]);
-
-  // Poll for updates when viewing a running batch
   useEffect(() => {
-    if (selectedBatch) {
-      const batch = batches.find(b => b.batch_id === selectedBatch);
-      if (batch && ['running', 'validating'].includes(batch.status)) {
-        pollRef.current = setInterval(() => {
-          loadBatches();
-          loadItems(selectedBatch);
-        }, 5000);
-        return () => { if (pollRef.current) clearInterval(pollRef.current); };
-      }
-    }
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
-  }, [selectedBatch, batches, loadBatches, loadItems]);
+    logsEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [logs]);
 
-  const handleFileUpload = (e: React.ChangeEvent<HTMLInputElement>) => {
+  // ─── File upload ───
+  const onFile = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
     setFilename(file.name);
-    const lower = file.name.toLowerCase();
-    if (lower.endsWith('.xlsx') || lower.endsWith('.xls')) {
-      const reader = new FileReader();
-      reader.onload = (ev) => {
-        const result = ev.target?.result as ArrayBuffer;
-        setFileBase64(toBase64(result));
-        setCsvContent('');
-      };
-      reader.readAsArrayBuffer(file);
-      return;
-    }
+    setPhase('idle');
+    setItems([]);
+    setLogs([]);
+
+    const isXlsx = /\.(xlsx|xls)$/i.test(file.name);
     const reader = new FileReader();
-    reader.onload = (ev) => {
-      setCsvContent(ev.target?.result as string);
-      setFileBase64('');
-    };
-    reader.readAsText(file);
-  };
-
-  const handleImport = async () => {
-    if ((!csvContent && !fileBase64) || !zabbixUrl || !zabbixUser || !zabbixPassword || !serverUrl) {
-      setImportError('All fields are required');
-      return;
-    }
-    setImporting(true);
-    setImportError('');
-    try {
-      const result = await api.deploy.import({
-        csv_content: csvContent || undefined,
-        file_base64: fileBase64 || undefined,
-        filename,
-        mode,
-        zabbix_url: zabbixUrl,
-        zabbix_user: zabbixUser,
-        zabbix_password: zabbixPassword,
-        zabbix_script: zabbixScript,
-        server_url: serverUrl,
-      });
-      setShowImport(false);
-      setCsvContent('');
-      setFileBase64('');
-      setFilename('');
-      loadBatches();
-      // Auto-select the new batch
-      if (result.batch_id) {
-        setSelectedBatch(result.batch_id);
-        loadItems(result.batch_id);
+    reader.onload = ev => {
+      const result = ev.target?.result;
+      if (!result) return;
+      const parsed = parseFile(result as string | ArrayBuffer, file.name);
+      if (parsed.length === 0) {
+        setFilename('');
+        alert(`Aucune ligne valide trouvée dans "${file.name}".\nColonnes attendues: zabbix_host (ou host/hostname) + dat (ou token/key)`);
+        return;
       }
-    } catch (err: any) {
-      setImportError(err.message ?? 'Import failed');
-    } finally {
-      setImporting(false);
-    }
+      setItems(parsed);
+      setPhase('ready');
+      log(`📂 Fichier chargé: "${file.name}" → ${parsed.length} hôtes valides`);
+    };
+    if (isXlsx) reader.readAsArrayBuffer(file);
+    else reader.readAsText(file);
+    // Reset input so same file can be re-selected
+    e.target.value = '';
   };
 
-  const handleValidate = async (batchId: string) => {
-    // Skip backend validation because firewall blocks it.
-    // Mark items as 'ready' locally or warn user.
-    if (browserMode) {
-        alert("Server validation skipped (firewall bypass mode). You can proceed to Start Deployment directly.");
-        return;
-    }
-
-    const pw = prompt('Enter Zabbix password to validate:');
-    if (!pw) return;
-    try {
-      await api.deploy.validate(batchId, pw);
-      loadBatches();
-      loadItems(batchId);
-    } catch (err: any) {
-      alert(`Validation failed: ${err.message}`);
-    }
+  // ─── Stats ───
+  const stats = {
+    total:   items.length,
+    success: items.filter(i => i.status === 'success').length,
+    failed:  items.filter(i => i.status === 'failed').length,
+    pending: items.filter(i => i.status === 'pending').length,
+    running: items.filter(i => i.status === 'running').length,
   };
 
-  const handleStart = async (batchId: string) => {
-    if (!confirm('Start deployment? This will execute scripts via Zabbix.')) return;
-    
-    // Check if Browser Mode is blocked by backend state? No.
-    // If browser mode, run locally.
-    if (browserMode) {
-        setIsRunning(true);
-        setBrowserLogs(p => [...p, 'Initializing client-side deployment...']);
-        try {
-            const client = new BrowserZabbixClient({
-                url: zabbixUrl,
-                user: zabbixUser,
-                password: zabbixPassword,
-                script: zabbixScript
-            });
-
-            await client.login(zabbixUser, zabbixPassword);
-            setBrowserLogs(p => [...p, 'Logged in. Resolving script...']);
-            
-            const scriptId = await client.getScriptId();
-            setBrowserLogs(p => [...p, `Script found: ${scriptId}`]);
-            
-            // Iterate items
-            for (let i = 0; i < items.length; i++) {
-                const item = items[i];
-                if (item.status === 'success') continue;
-                
-                // Set pending
-                setItems(curr => {
-                    const next = [...curr];
-                    next[i] = { ...next[i], status: 'running' };
-                    return next;
-                });
-                
-                try {
-                    const hostId = await client.resolveHost(item.zabbix_host);
-                    if (!hostId) throw new Error('Host not found via API');
-                    
-                    const manualInput = `${serverUrl.replace(/\/+$/, '')} ${item.dat}`;
-                    const res = await client.executeScript(scriptId, hostId, manualInput) as { response: string; value: string };
-                    
-                    const ok = res.response === 'success';
-                    setItems(curr => {
-                        const next = [...curr];
-                        next[i] = { 
-                            ...next[i], 
-                            status: ok ? 'success' : 'failed',
-                            last_error: ok ? res.value : (res.value || 'Script failed')
-                        };
-                        return next;
-                    });
-                    
-                } catch (err: any) {
-                    setItems(curr => {
-                        const next = [...curr];
-                        next[i] = { ...next[i], status: 'failed', last_error: err.message };
-                        return next;
-                    });
-                }
-                // Small delay to be nice to API
-                await new Promise(r => setTimeout(r, 200));
-            }
-            alert('Browser Deployment Complete');
-        } catch (err: any) {
-             setBrowserLogs(p => [...p, `FATAL ERROR: ${err.message}`]);
-             alert(`Deployment Error: ${err.message}`);
-        } finally {
-            setIsRunning(false);
-        }
-        return;
-    }
-
-    // Default Server behavior
-    try {
-      await api.deploy.start(batchId);
-      loadBatches();
-      loadItems(batchId);
-    } catch (err: any) {
-      alert(`Start failed: ${err.message}`);
-    }
-  };
-
-  const handleRetry = async (batchId: string) => {
-    try {
-      const res = await api.deploy.retry(batchId);
-      alert(`${res.retried} items queued for retry`);
-      loadBatches();
-      loadItems(batchId);
-    } catch (err: any) {
-      alert(`Retry failed: ${err.message}`);
-    }
-  };
-
-  const handleCancel = async (batchId: string) => {
-    if (!confirm('Cancel this batch? Running scripts cannot be stopped.')) return;
-    try {
-      await api.deploy.cancel(batchId);
-      loadBatches();
-      loadItems(batchId);
-    } catch (err: any) {
-      alert(`Cancel failed: ${err.message}`);
-    }
-  };
-
+  // ─── Export CSV ───
   const exportCsv = () => {
-    if (items.length === 0) return;
-    const headers = ['row', 'zabbix_host', 'dat', 'status', 'attempts', 'error', 'callback_status', 'callback_exit'];
-    const csv = [headers.join(','), ...items.map(i =>
-      [i.row_number, i.zabbix_host, i.dat, i.status, i.attempt_count,
-       `"${(i.last_error ?? i.validation_error ?? '').replace(/"/g, '""')}"`,
-       i.callback_status ?? '', i.callback_exit ?? ''].join(',')
-    )].join('\n');
-    const blob = new Blob([csv], { type: 'text/csv' });
-    const url = URL.createObjectURL(blob);
+    const header = 'hostname,dat,status,message';
+    const rows = items.map(i => `${i.hostname},${i.dat},${i.status},"${i.message.replace(/"/g, '""')}"`);
+    const blob = new Blob([[header, ...rows].join('\n')], { type: 'text/csv' });
     const a = document.createElement('a');
-    a.href = url; a.download = `deploy-report-${selectedBatch?.slice(0, 8)}.csv`; a.click();
-    URL.revokeObjectURL(url);
+    a.href = URL.createObjectURL(blob);
+    a.download = `deploy-result-${new Date().toISOString().slice(0,10)}.csv`;
+    a.click();
   };
 
-  const activeBatch = batches.find(b => b.batch_id === selectedBatch);
+  // ─── Reset ───
+  const reset = () => {
+    setPhase('idle');
+    setItems([]);
+    setFilename('');
+    setLogs([]);
+    setCurrent(0);
+  };
+
+  // ─── DEPLOY ───
+  const startDeploy = async () => {
+    if (items.length === 0 || phase === 'running') return;
+    abortRef.current = false;
+    setPhase('running');
+    setCurrent(0);
+    setLogs([]);
+
+    log(`🚀 Démarrage — ${items.length} hôtes à déployer`);
+    log(`🔗 Connexion à ${zabbixUrl}...`);
+
+    const client = new ZabbixBrowserClient(zabbixUrl, scriptName);
+
+    try {
+      await client.login(zabbixUser, zabbixPass);
+      log(`✅ Authentification réussie`);
+
+      log(`🔍 Recherche du script "${scriptName}"...`);
+      const scriptId = await client.getScriptId();
+      log(`✅ Script trouvé (ID: ${scriptId})`);
+
+      let successCount = 0;
+      let failCount = 0;
+
+      for (let i = 0; i < items.length; i++) {
+        if (abortRef.current) { log('🛑 Déploiement annulé'); break; }
+
+        const item = items[i];
+        if (item.status === 'success') { log(`⏩ ${item.hostname} — déjà réussi, ignoré`); continue; }
+
+        setCurrent(i);
+        setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'running', message: '' } : x));
+        log(`▶️  [${i + 1}/${items.length}] ${item.hostname}...`);
+
+        try {
+          const hostId = await client.getHostId(item.hostname);
+          if (!hostId) throw new Error('Hôte introuvable dans Zabbix');
+
+          const input = `${serverUrl.replace(/\/+$/, '')} ${item.dat}`;
+          const res = await client.executeScript(scriptId, hostId, input);
+
+          if (res.ok) {
+            setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'success', message: res.value } : x));
+            log(`✅ ${item.hostname} — Succès`);
+            successCount++;
+          } else {
+            setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'failed', message: res.value || 'Script retourné en échec' } : x));
+            log(`❌ ${item.hostname} — Échec: ${res.value}`);
+            failCount++;
+          }
+        } catch (err: any) {
+          setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'failed', message: err.message } : x));
+          log(`❌ ${item.hostname} — Erreur: ${err.message}`);
+          failCount++;
+        }
+
+        // Small pause to avoid API rate limiting
+        await new Promise(r => setTimeout(r, 150));
+      }
+
+      log(`\n🏁 Déploiement terminé — ✅ ${successCount} succès, ❌ ${failCount} échecs`);
+      setPhase('done');
+
+    } catch (err: any) {
+      log(`\n💥 ERREUR FATALE: ${err.message}`);
+      log('→ Vérifiez que votre navigateur a accès à Zabbix (pas VPN bloqué, pas CORS)');
+      setPhase('done');
+    }
+  };
 
   return (
     <div className="space-y-4">
-      {/* Header */}
-      <div className="flex items-center justify-between">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-xl bg-white/6 border border-white/10 flex items-center justify-center">
-            <Server className="text-reap3r-light" style={{ width: '16px', height: '16px' }} />
-          </div>
-          <div>
-            <h3 className="text-[12px] font-bold text-white uppercase tracking-[0.08em]">Zabbix DAT Deployment</h3>
-            <p className="text-[10px] text-reap3r-muted">Import CSV/XLSX → Validate → Execute via Zabbix</p>
-          </div>
-        </div>
-        <Button size="sm" onClick={() => setShowImport(true)}>
-          <Upload style={{ width: '12px', height: '12px', marginRight: '4px' }} />Import CSV/XLSX
-        </Button>
+
+      {/* ── Info Banner ── */}
+      <div className="flex items-start gap-3 px-4 py-3 bg-blue-500/10 border border-blue-500/20 rounded-xl">
+        <Wifi className="text-blue-400 mt-0.5 shrink-0" style={{ width: '14px', height: '14px' }} />
+        <p className="text-[11px] text-blue-300">
+          <strong>Mode Navigateur actif</strong> — Le déploiement s&apos;exécute directement depuis votre navigateur vers Zabbix.
+          Votre navigateur doit avoir accès à <code className="font-mono">{zabbixUrl}</code>.
+        </p>
       </div>
 
-      {/* Batch List */}
+      {/* ── Config Card ── */}
       <Card>
-        {loading ? (
-          <div className="space-y-2">{[...Array(3)].map((_, i) => <div key={i} className="bg-reap3r-surface border border-reap3r-border rounded-xl h-16 animate-pulse" />)}</div>
-        ) : batches.length === 0 ? (
-          <EmptyState icon={<FileSpreadsheet style={{ width: '28px', height: '28px' }} />} title="No batches" description="Import a CSV file to start a Zabbix deployment batch." />
-        ) : (
-          <div className="space-y-2">
-            {batches.map(batch => (
-              <div key={batch.batch_id} onClick={() => { setSelectedBatch(batch.batch_id); loadItems(batch.batch_id); }}
-                className={`flex items-center gap-3 px-4 py-3 border rounded-xl cursor-pointer transition-all
-                  ${selectedBatch === batch.batch_id
-                    ? 'bg-white/8 border-white/20'
-                    : 'bg-reap3r-surface/60 border-reap3r-border/60 hover:border-reap3r-border-light'}`}>
-                <div className="w-8 h-8 rounded-xl bg-white/4 border border-white/8 flex items-center justify-center shrink-0">
-                  <FileSpreadsheet className="text-reap3r-light" style={{ width: '12px', height: '12px' }} />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <p className="text-[12px] font-semibold text-white truncate">{batch.filename}</p>
-                  <p className="text-[10px] text-reap3r-muted">
-                    {batch.total_items} items &middot; {batch.mode === 'dry_run' ? 'Dry Run' : 'Live'} &middot; {new Date(batch.created_at).toLocaleString()}
-                  </p>
-                </div>
-                <div className="flex items-center gap-2 shrink-0">
-                  {batch.success_count > 0 && <span className="text-[10px] text-reap3r-success font-mono">{batch.success_count}✓</span>}
-                  {batch.failed_count > 0 && <span className="text-[10px] text-reap3r-danger font-mono">{batch.failed_count}✗</span>}
-                  {batchStatusBadge(batch.status)}
-                </div>
-              </div>
-            ))}
+        <h3 className="text-[11px] font-bold text-white uppercase tracking-[0.08em] mb-3">
+          Configuration Zabbix
+        </h3>
+        <div className="grid grid-cols-2 gap-3">
+          <div className="col-span-2 md:col-span-1 space-y-1">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.12em]">URL Zabbix</label>
+            <input value={zabbixUrl} onChange={e => setZabbixUrl(e.target.value)}
+              disabled={phase === 'running'}
+              className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50" />
           </div>
-        )}
+          <div className="space-y-1">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.12em]">Nom du Script</label>
+            <input value={scriptName} onChange={e => setScriptName(e.target.value)}
+              disabled={phase === 'running'}
+              className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50" />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.12em]">Utilisateur Zabbix</label>
+            <input value={zabbixUser} onChange={e => setZabbixUser(e.target.value)}
+              disabled={phase === 'running'}
+              className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50" />
+          </div>
+          <div className="space-y-1">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.12em]">Mot de passe / Token API</label>
+            <input type="password" value={zabbixPass} onChange={e => setZabbixPass(e.target.value)}
+              disabled={phase === 'running'}
+              className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50" />
+          </div>
+          <div className="col-span-2 space-y-1">
+            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.12em]">URL Serveur Reap3r (pour le callback)</label>
+            <input value={serverUrl} onChange={e => setServerUrl(e.target.value)}
+              disabled={phase === 'running'}
+              className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white focus:outline-none focus:ring-1 focus:ring-white/20 disabled:opacity-50" />
+          </div>
+        </div>
       </Card>
 
-      {/* Batch Detail */}
-      {activeBatch && (
-        <Card>
-          <div className="flex items-center justify-between mb-4">
-            <div>
-              <h3 className="text-[12px] font-bold text-white uppercase tracking-[0.08em]">{activeBatch.filename}</h3>
-              <p className="text-[10px] text-reap3r-muted">Batch {activeBatch.batch_id.slice(0, 8)} &middot; {activeBatch.mode === 'dry_run' ? 'Dry Run' : 'Live'}</p>
-            </div>
-            <div className="flex items-center gap-2">
-              {activeBatch.status === 'created' && (
-                <Button size="sm" variant="primary" onClick={() => handleValidate(activeBatch.batch_id)}>
-                  <Shield style={{ width: '12px', height: '12px', marginRight: '4px' }} />Validate
-                </Button>
-              )}
-              {activeBatch.status === 'ready' && activeBatch.mode === 'live' && (
-                <Button size="sm" variant="primary" onClick={() => handleStart(activeBatch.batch_id)}>
-                  <Play style={{ width: '12px', height: '12px', marginRight: '4px' }} />Start
-                </Button>
-              )}
-              {['running', 'done', 'failed'].includes(activeBatch.status) && activeBatch.failed_count > 0 && (
-                <Button size="sm" variant="secondary" onClick={() => handleRetry(activeBatch.batch_id)}>
-                  <RotateCcw style={{ width: '12px', height: '12px', marginRight: '4px' }} />Retry Failed
-                </Button>
-              )}
-              {['created', 'ready', 'running'].includes(activeBatch.status) && (
-                <Button size="sm" variant="danger" onClick={() => handleCancel(activeBatch.batch_id)}>
-                  <XCircle style={{ width: '12px', height: '12px', marginRight: '4px' }} />Cancel
-                </Button>
-              )}
-              <Button size="sm" variant="ghost" onClick={exportCsv} disabled={items.length === 0}>
-                <Download style={{ width: '12px', height: '12px', marginRight: '4px' }} />Export
+      {/* ── Upload + Actions ── */}
+      <div className="flex flex-wrap items-center gap-3">
+        {/* File picker */}
+        <label className={`flex items-center gap-2 px-4 py-2.5 border-2 border-dashed rounded-xl cursor-pointer transition-all text-[11px]
+          ${phase === 'running' ? 'opacity-40 pointer-events-none' : 'border-reap3r-border hover:border-white/30 text-reap3r-muted hover:text-white'}`}>
+          <Upload style={{ width: '13px', height: '13px' }} />
+          {filename ? <><FileSpreadsheet style={{ width: '13px', height: '13px' }} className="text-reap3r-accent" />{filename}</> : 'Charger CSV / XLSX'}
+          <input type="file" accept=".csv,.txt,.tsv,.xlsx,.xls" onChange={onFile} className="hidden" disabled={phase === 'running'} />
+        </label>
+
+        {/* Deploy button */}
+        {phase !== 'idle' && (
+          <>
+            <Button
+              onClick={startDeploy}
+              disabled={phase === 'running' || items.length === 0}
+              variant="primary"
+            >
+              {phase === 'running'
+                ? <><RotateCcw className="animate-spin" style={{ width: '12px', height: '12px', marginRight: '6px' }} />Déploiement en cours...</>
+                : <><Play style={{ width: '12px', height: '12px', marginRight: '6px' }} />{phase === 'done' ? 'Relancer' : 'Déployer'} ({items.filter(i => i.status !== 'success').length} hôtes)</>
+              }
+            </Button>
+
+            {phase === 'running' && (
+              <Button variant="danger" size="sm" onClick={() => { abortRef.current = true; }}>
+                <XCircle style={{ width: '12px', height: '12px', marginRight: '4px' }} />Arrêter
               </Button>
-              <Button size="sm" variant="ghost" onClick={() => loadItems(activeBatch.batch_id)}>
-                <RefreshCw style={{ width: '12px', height: '12px' }} />
-              </Button>
+            )}
+
+            {phase === 'done' && (
+              <>
+                <Button variant="secondary" size="sm" onClick={exportCsv}>
+                  <Download style={{ width: '12px', height: '12px', marginRight: '4px' }} />Exporter résultats
+                </Button>
+                <Button variant="ghost" size="sm" onClick={reset}>
+                  <RotateCcw style={{ width: '12px', height: '12px', marginRight: '4px' }} />Nouveau déploiement
+                </Button>
+              </>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* ── Stats ── */}
+      {items.length > 0 && (
+        <div className="grid grid-cols-5 gap-2">
+          {[
+            { label: 'Total',   value: stats.total,   color: 'text-white' },
+            { label: 'En cours', value: stats.running, color: 'text-yellow-400' },
+            { label: 'Succès',  value: stats.success, color: 'text-green-400' },
+            { label: 'Échecs',  value: stats.failed,  color: 'text-red-400' },
+            { label: 'Attente', value: stats.pending, color: 'text-reap3r-muted' },
+          ].map(s => (
+            <div key={s.label} className="flex flex-col items-center p-2.5 bg-reap3r-surface/40 border border-reap3r-border/40 rounded-xl">
+              <span className={`text-[18px] font-bold ${s.color}`}>{s.value}</span>
+              <span className="text-[9px] text-reap3r-muted uppercase tracking-wider mt-0.5">{s.label}</span>
             </div>
-          </div>
+          ))}
+        </div>
+      )}
 
-          {/* Stats row */}
-          <div className="grid grid-cols-6 gap-2 mb-4">
-            {[
-              { label: 'Total', value: activeBatch.total_items, icon: Activity },
-              { label: 'Valid', value: activeBatch.valid_count, icon: CheckCircle2 },
-              { label: 'Invalid', value: activeBatch.invalid_count, icon: AlertTriangle },
-              { label: 'Success', value: activeBatch.success_count, icon: Check },
-              { label: 'Failed', value: activeBatch.failed_count, icon: XCircle },
-              { label: 'Skipped', value: activeBatch.skipped_count, icon: Clock },
-            ].map(s => (
-              <div key={s.label} className="flex flex-col items-center p-2 bg-reap3r-surface/40 border border-reap3r-border/40 rounded-lg">
-                <s.icon style={{ width: '12px', height: '12px' }} className="text-reap3r-muted mb-1" />
-                <span className="text-[14px] font-bold text-white">{s.value}</span>
-                <span className="text-[9px] text-reap3r-muted uppercase tracking-wider">{s.label}</span>
-              </div>
-            ))}
-          </div>
-
-          {activeBatch.error && (
-            <div className="mb-4 px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
-              <p className="text-[11px] text-red-400">{activeBatch.error}</p>
-            </div>
-          )}
-
-          {/* Items table */}
-          {itemsLoading ? (
-            <div className="space-y-1">{[...Array(5)].map((_, i) => <div key={i} className="h-10 bg-reap3r-surface rounded animate-pulse" />)}</div>
-          ) : items.length === 0 ? (
-            <p className="text-[11px] text-reap3r-muted text-center py-4">No items</p>
-          ) : (
-            <div className="overflow-x-auto">
-              <table className="w-full text-[11px]">
-                <thead>
-                  <tr className="text-left text-reap3r-muted uppercase tracking-wider border-b border-reap3r-border/40">
-                    <th className="pb-2 pr-3">#</th>
-                    <th className="pb-2 pr-3">Host</th>
-                    <th className="pb-2 pr-3">DAT</th>
-                    <th className="pb-2 pr-3">Status</th>
-                    <th className="pb-2 pr-3">Attempts</th>
-                    <th className="pb-2 pr-3">Callback</th>
-                    <th className="pb-2">Error</th>
+      {/* ── Items Table ── */}
+      {items.length > 0 && (
+        <Card className="overflow-hidden p-0">
+          <div className="max-h-[400px] overflow-y-auto">
+            <table className="w-full text-[11px]">
+              <thead className="sticky top-0 bg-reap3r-bg border-b border-reap3r-border/40 z-10">
+                <tr className="text-left text-reap3r-muted uppercase tracking-wider">
+                  <th className="px-4 py-2.5 font-semibold">#</th>
+                  <th className="px-4 py-2.5 font-semibold">Hôte Zabbix</th>
+                  <th className="px-4 py-2.5 font-semibold">Token (extrait)</th>
+                  <th className="px-4 py-2.5 font-semibold">Statut</th>
+                  <th className="px-4 py-2.5 font-semibold">Message</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y divide-reap3r-border/20">
+                {items.map((item, idx) => (
+                  <tr key={item.id}
+                    className={`transition-colors ${item.status === 'running' ? 'bg-yellow-500/5' : item.status === 'success' ? 'bg-green-500/5' : item.status === 'failed' ? 'bg-red-500/5' : 'hover:bg-white/3'}`}>
+                    <td className="px-4 py-2 text-reap3r-muted font-mono">{idx + 1}</td>
+                    <td className="px-4 py-2 text-white font-mono font-medium">{item.hostname}</td>
+                    <td className="px-4 py-2 text-reap3r-muted font-mono text-[10px]">{item.dat.substring(0, 8)}…</td>
+                    <td className="px-4 py-2"><StatusBadge s={item.status} /></td>
+                    <td className="px-4 py-2 text-reap3r-muted max-w-[260px] truncate text-[10px]" title={item.message}>{item.message}</td>
                   </tr>
-                </thead>
-                <tbody>
-                  {items.map(item => (
-                    <tr key={item.id} className="border-b border-reap3r-border/20 hover:bg-white/3 transition-colors">
-                      <td className="py-2 pr-3 text-reap3r-muted font-mono">{item.row_number}</td>
-                      <td className="py-2 pr-3 text-white font-mono">{item.zabbix_host}</td>
-                      <td className="py-2 pr-3 text-reap3r-light font-mono text-[10px]">{item.dat.slice(0, 12)}...</td>
-                      <td className="py-2 pr-3">{itemStatusBadge(item.status)}</td>
-                      <td className="py-2 pr-3 text-reap3r-muted">{item.attempt_count}</td>
-                      <td className="py-2 pr-3">
-                        {item.callback_received ? (
-                          <span className="text-reap3r-success flex items-center gap-1">
-                            <Check style={{ width: '10px', height: '10px' }} />
-                            {item.callback_status} ({item.callback_exit})
-                          </span>
-                        ) : item.status === 'running' ? (
-                          <span className="text-reap3r-muted">Waiting...</span>
-                        ) : null}
-                      </td>
-                      <td className="py-2 text-red-400 text-[10px] max-w-[200px] truncate" title={item.last_error ?? item.validation_error ?? ''}>
-                        {item.last_error ?? item.validation_error ?? ''}
-                      </td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
+                ))}
+              </tbody>
+            </table>
+          </div>
         </Card>
       )}
 
-      {/* Import Modal */}
-      <Modal open={showImport} onClose={() => setShowImport(false)} title="Import CSV/XLSX for Zabbix Deploy" maxWidth="max-w-2xl">
-        <div className="space-y-4">
-          {/* File upload */}
-          <div>
-            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">CSV/XLSX File</label>
-            <div className="flex items-center gap-2">
-              <label className="flex-1 flex items-center justify-center gap-2 px-4 py-3 border-2 border-dashed border-reap3r-border rounded-xl cursor-pointer hover:border-white/20 transition-colors">
-                <Upload style={{ width: '14px', height: '14px' }} className="text-reap3r-muted" />
-                <span className="text-[11px] text-reap3r-muted">{filename || 'Choose CSV/XLSX file (zabbix_host, dat)'}</span>
-                <input type="file" accept=".csv,.txt,.tsv,.xlsx,.xls" onChange={handleFileUpload} className="hidden" />
-              </label>
-            </div>
+      {/* ── Logs terminal ── */}
+      {logs.length > 0 && (
+        <Card className="p-0 overflow-hidden">
+          <div className="flex items-center justify-between px-4 py-2 border-b border-reap3r-border/40 bg-reap3r-surface/60">
+            <span className="text-[10px] font-bold text-reap3r-muted uppercase tracking-wider flex items-center gap-2">
+              <Activity style={{ width: '11px', height: '11px' }} />Journal d&apos;exécution
+            </span>
+            <button onClick={() => setLogs([])} className="text-[10px] text-reap3r-muted hover:text-white transition-colors">Effacer</button>
           </div>
-
-          {/* Mode */}
-          <div>
-            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">Mode</label>
-            <div className="flex gap-2">
-              <button onClick={() => setMode('dry_run')}
-                className={`flex-1 px-3 py-2 rounded-lg text-[11px] font-semibold border transition-all
-                  ${mode === 'dry_run' ? 'bg-white/10 border-white/20 text-white' : 'bg-reap3r-surface border-reap3r-border text-reap3r-muted hover:border-white/15'}`}>
-                <Shield style={{ width: '12px', height: '12px', display: 'inline', marginRight: '4px' }} />Dry Run
-              </button>
-              <button onClick={() => setMode('live')}
-                className={`flex-1 px-3 py-2 rounded-lg text-[11px] font-semibold border transition-all
-                  ${mode === 'live' ? 'bg-orange-500/20 border-orange-500/40 text-orange-300' : 'bg-reap3r-surface border-reap3r-border text-reap3r-muted hover:border-white/15'}`}>
-                <Play style={{ width: '12px', height: '12px', display: 'inline', marginRight: '4px' }} />Live
-              </button>
-            </div>
+          <div className="h-[180px] overflow-y-auto bg-black/40 p-3 font-mono text-[10px] space-y-0.5">
+            {logs.map((l, i) => (
+              <div key={i} className={`${l.includes('❌') || l.includes('💥') ? 'text-red-400' : l.includes('✅') || l.includes('🏁') ? 'text-green-400' : l.includes('⏩') ? 'text-reap3r-muted' : 'text-white/70'}`}>
+                {l}
+              </div>
+            ))}
+            <div ref={logsEndRef} />
           </div>
+        </Card>
+      )}
 
-          {/* Zabbix config */}
-          <div className="grid grid-cols-2 gap-3">
-            <div>
-              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">Zabbix URL</label>
-              <input value={zabbixUrl} onChange={e => setZabbixUrl(e.target.value)} placeholder="https://zabbix.company.com"
-                className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">Zabbix Script Name</label>
-              <input value={zabbixScript} onChange={e => setZabbixScript(e.target.value)} placeholder="Reap3r Enrollment"
-                className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">Zabbix User</label>
-              <input value={zabbixUser} onChange={e => setZabbixUser(e.target.value)} placeholder="Admin"
-                className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20" />
-            </div>
-            <div>
-              <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">Zabbix Password</label>
-              <input value={zabbixPassword} onChange={e => setZabbixPassword(e.target.value)} type="password" placeholder="••••••••"
-                className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20" />
-            </div>
-          </div>
-
-          <div>
-            <label className="block text-[10px] font-bold text-reap3r-muted uppercase tracking-[0.16em] mb-1">Reap3r Server URL (for callback)</label>
-            <input value={serverUrl} onChange={e => setServerUrl(e.target.value)} placeholder="https://reap3r.company.com"
-              className="w-full px-3 py-2 bg-reap3r-surface border border-reap3r-border rounded-lg text-[11px] text-white placeholder:text-reap3r-muted/40 focus:outline-none focus:ring-1 focus:ring-white/20" />
-          </div>
-
-          {importError && (
-            <div className="px-3 py-2 bg-red-500/10 border border-red-500/20 rounded-lg">
-              <p className="text-[11px] text-red-400">{importError}</p>
-            </div>
-          )}
-
-          <div className="flex gap-2 justify-end">
-            <Button variant="secondary" onClick={() => setShowImport(false)}>Cancel</Button>
-            <Button onClick={handleImport} loading={importing} disabled={(!csvContent && !fileBase64) || !zabbixUrl || !zabbixUser || !zabbixPassword || !serverUrl}>
-              <Upload style={{ width: '12px', height: '12px', marginRight: '4px' }} />Import & Create Batch
-            </Button>
-          </div>
-        </div>
-      </Modal>
+      {/* ── Empty state ── */}
+      {phase === 'idle' && (
+        <Card>
+          <EmptyState
+            icon={<FileSpreadsheet style={{ width: '28px', height: '28px' }} />}
+            title="Charger un fichier CSV ou XLSX"
+            description="Colonnes requises : zabbix_host (ou host/hostname) + dat (ou token/key). Format accepté : virgule, point-virgule, tabulation."
+          />
+        </Card>
+      )}
     </div>
   );
 }
