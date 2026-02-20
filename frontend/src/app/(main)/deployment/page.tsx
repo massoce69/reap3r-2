@@ -76,10 +76,9 @@ class ZabbixBrowserClient {
   }
 
   async getScriptId(): Promise<string> {
-    // Fetch all scripts then match case-insensitively
     const all = await this.rpc('script.get', {
-      output: ['scriptid', 'name'],
-    }) as Array<{ scriptid: string; name: string }>;
+      output: ['scriptid', 'name', 'scope'],
+    }) as Array<{ scriptid: string; name: string; scope: number }>;
 
     const target = this.scriptName.trim().toLowerCase();
     const match = (all || []).find(s => s.name.trim().toLowerCase() === target)
@@ -92,6 +91,13 @@ class ZabbixBrowserClient {
         `Script "${this.scriptName}" introuvable.\nScripts disponibles dans Zabbix : ${available}`
       );
     }
+
+    // scope:4 = Manual host action (requis pour script.execute).
+    // Si le script existant a scope:1 (Action), on le corrige automatiquement.
+    if (String(match.scope) !== '4') {
+      await this.rpc('script.update', { scriptid: match.scriptid, scope: 4 });
+    }
+
     return match.scriptid;
   }
 
@@ -197,7 +203,7 @@ class ZabbixBrowserClient {
       type: 0,       // Script (shell)
       execute_on: 0, // Sur l'agent Zabbix de l'hôte supervisé
       command,
-      scope: 1,      // Action/manual operation
+      scope: 4,      // Manual host action — REQUIS pour script.execute via API
     }) as { scriptids: string[] };
 
     if (!result?.scriptids?.[0]) throw new Error('Zabbix n\'a pas retourné d\'ID pour le script créé');
