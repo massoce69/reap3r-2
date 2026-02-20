@@ -103,24 +103,38 @@ class ZabbixBrowserClient {
     return hosts && hosts.length > 0 ? hosts[0].hostid : null;
   }
 
-  async executeScript(scriptId: string, hostId: string, manualInput: string): Promise<{ ok: boolean; value: string }> {
+  // Pose la macro {$REAP3R_TOKEN} sur un hôte (crée ou met à jour)
+  async setHostToken(hostId: string, token: string): Promise<void> {
+    const existing = await this.rpc('usermacro.get', {
+      hostids: [hostId],
+      filter: { macro: '{$REAP3R_TOKEN}' },
+      output: ['hostmacroid'],
+    }) as Array<{ hostmacroid: string }>;
+    if (existing.length > 0) {
+      await this.rpc('usermacro.update', { hostmacroid: existing[0].hostmacroid, value: token });
+    } else {
+      await this.rpc('usermacro.create', { hostid: hostId, macro: '{$REAP3R_TOKEN}', value: token });
+    }
+  }
+
+  async executeScript(scriptId: string, hostId: string): Promise<{ ok: boolean; value: string }> {
     const res = await this.rpc('script.execute', {
-      scriptid: scriptId, hostid: hostId, manualinput: manualInput,
+      scriptid: scriptId, hostid: hostId,
     }) as { response: string; value?: string };
     return { ok: res.response === 'success', value: res.value ?? '' };
   }
 
-  async createEnrollScript(name: string): Promise<string> {
-    // Script complet : télécharge reap3r-agent depuis le serveur Massvision,
-    // l'installe dans /opt/reap3r/, l'enrôle, puis crée un service systemd.
-    // Exécuté par l'agent Zabbix déjà en place sur la machine (pas de prérequis binaire).
+  // Crée le script dans Zabbix. Token injecté via macro {$REAP3R_TOKEN}.
+  // Compatible Zabbix 5.x et 6.x — aucun paramètre manualinput.
+  async createEnrollScript(name: string, serverUrl: string): Promise<string> {
+    const server = serverUrl.replace(/\/+$/, '');
     const command = [
       '#!/bin/bash',
       'set -e',
-      'SERVER=$(echo "{MANUALINPUT}" | awk \'{print $1}\')',
-      'TOKEN=$(echo "{MANUALINPUT}" | awk \'{print $2}\')',
-      'if [ -z "$SERVER" ] || [ -z "$TOKEN" ]; then',
-      '  echo "ERREUR: MANUALINPUT doit contenir SERVER_URL TOKEN"; exit 1',
+      `SERVER='${server}'`,
+      "TOKEN='{$REAP3R_TOKEN}'",
+      'if [ -z "$TOKEN" ] || [ "$TOKEN" = "{$REAP3R_TOKEN}" ]; then',
+      '  echo "ERREUR: macro {$REAP3R_TOKEN} non definie sur cet hote"; exit 1',
       'fi',
       '',
       'INSTALL_DIR="/opt/reap3r"',
@@ -180,14 +194,10 @@ class ZabbixBrowserClient {
 
     const result = await this.rpc('script.create', {
       name,
-      type: 0,           // Script (shell)
-      execute_on: 0,     // Zabbix agent (s'exécute SUR l'hôte supervisé)
+      type: 0,       // Script (shell)
+      execute_on: 0, // Sur l'agent Zabbix de l'hôte supervisé
       command,
-      scope: 1,          // Action operation
-      manualinput: 1,
-      manualinput_prompt: 'URL Serveur + Token DAT (séparés par un espace) : ex. https://massvision.pro abc123...',
-      manualinput_validator: '',
-      manualinput_default_value: '',
+      scope: 1,      // Action/manual operation
     }) as { scriptids: string[] };
 
     if (!result?.scriptids?.[0]) throw new Error('Zabbix n\'a pas retourné d\'ID pour le script créé');
@@ -396,7 +406,7 @@ function ZabbixDeployTab() {
       } catch {
         log(`⚠️  Script "${scriptName}" introuvable — création automatique dans Zabbix...`);
         try {
-          scriptId = await client.createEnrollScript(scriptName);
+          scriptId = await client.createEnrollScript(scriptName, serverUrl);
           log(`✅ Script "${scriptName}" créé automatiquement (ID: ${scriptId})`);
         } catch (createErr: any) {
           throw new Error(`Script introuvable et création impossible : ${createErr.message}`);
@@ -420,8 +430,10 @@ function ZabbixDeployTab() {
           const hostId = await client.getHostId(item.hostname);
           if (!hostId) throw new Error('Hôte introuvable dans Zabbix');
 
-          const input = `${serverUrl.replace(/\/+$/, '')} ${item.dat}`;
-          const res = await client.executeScript(scriptId, hostId, input);
+          // Injecter le token DAT comme macro {$REAP3R_TOKEN} sur l'hôte
+          await client.setHostToken(hostId, item.dat);
+
+          const res = await client.executeScript(scriptId, hostId);
 
           if (res.ok) {
             setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'success', message: res.value } : x));
@@ -514,7 +526,7 @@ function ZabbixDeployTab() {
               try {
                 const client = new ZabbixBrowserClient(zabbixUrl, scriptName);
                 await client.login(zabbixUser, zabbixPass);
-                const id = await client.createEnrollScript(scriptName);
+                const id = await client.createEnrollScript(scriptName, serverUrl);
                 setCreateState('done');
                 setCreateMsg(`✅ Script "${scriptName}" créé dans Zabbix (ID: ${id}). Vous pouvez maintenant lancer le déploiement.`);
               } catch (err: any) {
