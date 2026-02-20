@@ -389,8 +389,19 @@ function ZabbixDeployTab() {
       log(`✅ Authentification réussie`);
 
       log(`🔍 Recherche du script "${scriptName}"...`);
-      const scriptId = await client.getScriptId();
-      log(`✅ Script trouvé (ID: ${scriptId})`);
+      let scriptId: string;
+      try {
+        scriptId = await client.getScriptId();
+        log(`✅ Script trouvé (ID: ${scriptId})`);
+      } catch {
+        log(`⚠️  Script "${scriptName}" introuvable — création automatique dans Zabbix...`);
+        try {
+          scriptId = await client.createEnrollScript(scriptName);
+          log(`✅ Script "${scriptName}" créé automatiquement (ID: ${scriptId})`);
+        } catch (createErr: any) {
+          throw new Error(`Script introuvable et création impossible : ${createErr.message}`);
+        }
+      }
 
       let successCount = 0;
       let failCount = 0;
