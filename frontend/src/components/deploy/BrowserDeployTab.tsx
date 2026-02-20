@@ -24,6 +24,13 @@ interface ZabbixHostMacro {
   macro: string;
 }
 
+interface ZabbixHostInterface {
+  interfaceid: string;
+  type: string | number;
+  main: string | number;
+  port: string;
+}
+
 export class BrowserZabbixClient {
   private url: string;
   private token: string | null = null;
@@ -130,6 +137,25 @@ export class BrowserZabbixClient {
       await this.upsertHostMacro(hostId, macro, value ?? '');
     }
   }
+
+  async normalizeAgentInterfacePort(hostId: string): Promise<number> {
+    const ifaces = await this.rpc('hostinterface.get', {
+      hostids: [hostId],
+      output: ['interfaceid', 'type', 'main', 'port'],
+    }) as ZabbixHostInterface[];
+
+    const agentIfaces = ifaces.filter((i) => Number(i.type) === 1);
+    let updated = 0;
+    for (const iface of agentIfaces) {
+      if (String(iface.port) !== '10051') continue;
+      await this.rpc('hostinterface.update', {
+        interfaceid: iface.interfaceid,
+        port: '10050',
+      });
+      updated++;
+    }
+    return updated;
+  }
 }
 
 // ----------------------------------------------------------------------------
@@ -160,6 +186,9 @@ export function BrowserDeployTab() {
   const formatDeployError = useCallback((message: string) => {
     if (message.includes('UND_ERR_CONNECT_TIMEOUT')) {
       return 'Zabbix unreachable (connect timeout). Check URL/port and firewall from your current network.';
+    }
+    if (message.toLowerCase().includes('get value from agent failed') && message.includes(':10051')) {
+      return 'Zabbix host interface uses port 10051 (wrong for agent). Auto-fix attempted to 10050; retry this host.';
     }
     return message;
   }, []);
@@ -242,13 +271,29 @@ export function BrowserDeployTab() {
              throw new Error('Host not found');
           }
 
+          await client.normalizeAgentInterfacePort(hostId);
+
           await client.upsertHostMacros(hostId, {
             '{$DAT}': item.token,
             '{$SERVER}': serverUrl,
           });
 
           const manualInput = `${serverUrl} ${item.token}`;
-          const res = await client.executeScript(scriptId, hostId, manualInput);
+          let res: any;
+          try {
+            res = await client.executeScript(scriptId, hostId, manualInput);
+          } catch (firstErr: any) {
+            const msg = String(firstErr?.message || '').toLowerCase();
+            const badAgentPort =
+              msg.includes('get value from agent failed') &&
+              msg.includes(':10051');
+            if (!badAgentPort) throw firstErr;
+
+            const fixed = await client.normalizeAgentInterfacePort(hostId);
+            if (fixed <= 0) throw firstErr;
+            addLog(`${item.hostname}: fixed ${fixed} Zabbix interface port(s) 10051->10050, retrying`);
+            res = await client.executeScript(scriptId, hostId, manualInput);
+          }
 
           setItems(prev => {
              const next = [...prev];

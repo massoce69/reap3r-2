@@ -552,27 +552,45 @@ export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, ser
 
     // Keep host macros in sync so scripts can work without manual input support.
     await zbxClient.upsertHostMacros(item.zabbix_hostid!, hostMacros);
+    // Auto-heal common Zabbix interface misconfiguration (10051 instead of 10050).
+    await zbxClient.normalizeAgentInterfacePort(item.zabbix_hostid!);
+
+    const runScriptExecute = async (): Promise<{ value?: string; response?: string }> => {
+      try {
+        // Preferred path on Zabbix with manual input support.
+        return await zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!, manualInputPayload);
+      } catch (err: any) {
+        const msg = String(err?.message || '').toLowerCase();
+        const manualInputUnsupported =
+          msg.includes('manualinput') ||
+          msg.includes('/params/manualinput') ||
+          msg.includes('invalid parameter') ||
+          msg.includes('unexpected parameter');
+        if (!manualInputUnsupported) throw err;
+        console.warn(
+          `[deploy] script.execute manualinput rejected for ${item.zabbix_host}, retrying without manualinput`,
+        );
+        return zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!);
+      }
+    };
 
     let result: { value?: string; response?: string };
     try {
-      // Preferred path on Zabbix with manual input support.
-      result = await zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!, manualInputPayload);
+      result = await runScriptExecute();
     } catch (err: any) {
       const msg = String(err?.message || '').toLowerCase();
-      const manualInputUnsupported =
-        msg.includes('manualinput') ||
-        msg.includes('/params/manualinput') ||
-        msg.includes('invalid parameter') ||
-        msg.includes('unexpected parameter');
+      const badAgentPort =
+        msg.includes('get value from agent failed') &&
+        msg.includes(':10051');
+      if (!badAgentPort) throw err;
 
-      if (!manualInputUnsupported) {
-        throw err;
-      }
+      const fixed = await zbxClient.normalizeAgentInterfacePort(item.zabbix_hostid!);
+      if (fixed <= 0) throw err;
 
       console.warn(
-        `[deploy] script.execute manualinput rejected for ${item.zabbix_host}, retrying without manualinput`,
+        `[deploy] Fixed ${fixed} agent interface(s) from 10051->10050 for ${item.zabbix_host}, retrying script.execute`,
       );
-      result = await zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!);
+      result = await runScriptExecute();
     }
 
     const execId = String(result?.value ?? result?.response ?? `exec-${Date.now()}`);

@@ -42,6 +42,15 @@ interface ZabbixHostMacro {
   value?: string;
 }
 
+interface ZabbixHostInterface {
+  interfaceid: string;
+  type: string;
+  main: string;
+  port: string;
+  ip?: string;
+  dns?: string;
+}
+
 interface ZabbixScriptExecResult {
   response: string;   // 'success' | 'failed'
   value?: string;
@@ -369,6 +378,36 @@ export class ZabbixClient {
     }
 
     return out;
+  }
+
+  async hostInterfaces(hostId: string): Promise<ZabbixHostInterface[]> {
+    await this.ensureAuth();
+    return this.rpc<ZabbixHostInterface[]>('hostinterface.get', {
+      hostids: [hostId],
+      output: ['interfaceid', 'type', 'main', 'port', 'ip', 'dns'],
+    });
+  }
+
+  /**
+   * Zabbix passive agent default is 10050.
+   * Some environments accidentally set 10051 (server/trapper port) on host interface,
+   * which breaks script.execute on "execute on agent".
+   * Returns number of interfaces updated.
+   */
+  async normalizeAgentInterfacePort(hostId: string): Promise<number> {
+    const ifaces = await this.hostInterfaces(hostId);
+    const agentIfaces = ifaces.filter((i) => Number(i.type) === 1);
+    let updated = 0;
+
+    for (const iface of agentIfaces) {
+      if (String(iface.port) !== '10051') continue;
+      await this.rpc('hostinterface.update', {
+        interfaceid: iface.interfaceid,
+        port: '10050',
+      });
+      updated++;
+    }
+    return updated;
   }
 
   // ════════════════════════════════════════
