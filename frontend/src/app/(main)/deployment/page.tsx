@@ -361,11 +361,12 @@ function ZabbixDeployTab() {
 
   // ─── Stats ───
   const stats = {
-    total:   items.length,
-    success: items.filter(i => i.status === 'success').length,
-    failed:  items.filter(i => i.status === 'failed').length,
-    pending: items.filter(i => i.status === 'pending').length,
-    running: items.filter(i => i.status === 'running').length,
+    total:    items.length,
+    success:  items.filter(i => i.status === 'success').length,
+    failed:   items.filter(i => i.status === 'failed').length,
+    skipped:  items.filter(i => i.status === 'skipped').length,
+    pending:  items.filter(i => i.status === 'pending').length,
+    running:  items.filter(i => i.status === 'running').length,
   };
 
   // ─── Export CSV ───
@@ -422,6 +423,13 @@ function ZabbixDeployTab() {
 
       let successCount = 0;
       let failCount = 0;
+      let skipCount = 0;
+
+      // Patterns indiquant que l'agent est simplement inaccessible (pas une erreur de script)
+      const UNREACHABLE = [
+        'cannot connect', 'connection refused', 'timed out', 'interrupted system call',
+        'no route to host', 'network unreachable', 'host unreachable', 'connection reset',
+      ];
 
       for (let i = 0; i < items.length; i++) {
         if (abortRef.current) { log('🛑 Déploiement annulé'); break; }
@@ -452,16 +460,24 @@ function ZabbixDeployTab() {
             failCount++;
           }
         } catch (err: any) {
-          setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'failed', message: err.message } : x));
-          log(`❌ ${item.hostname} — Erreur: ${err.message}`);
-          failCount++;
+          const msg: string = err.message || '';
+          const isUnreachable = UNREACHABLE.some(p => msg.toLowerCase().includes(p));
+          if (isUnreachable) {
+            setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'skipped', message: 'Agent inaccessible: ' + msg } : x));
+            log(`⚠️  ${item.hostname} — Agent inaccessible (hors ligne / firewall)`);
+            skipCount++;
+          } else {
+            setItems(prev => prev.map((x, idx) => idx === i ? { ...x, status: 'failed', message: msg } : x));
+            log(`❌ ${item.hostname} — Erreur: ${msg}`);
+            failCount++;
+          }
         }
 
         // Small pause to avoid API rate limiting
         await new Promise(r => setTimeout(r, 150));
       }
 
-      log(`\n🏁 Déploiement terminé — ✅ ${successCount} succès, ❌ ${failCount} échecs`);
+      log(`\n🏁 Déploiement terminé — ✅ ${successCount} succès, ❌ ${failCount} échecs, ⚠️ ${skipCount} inaccessibles`);
       setPhase('done');
 
     } catch (err: any) {
@@ -601,13 +617,14 @@ function ZabbixDeployTab() {
 
       {/* ── Stats ── */}
       {items.length > 0 && (
-        <div className="grid grid-cols-5 gap-2">
+        <div className="grid grid-cols-6 gap-2">
           {[
-            { label: 'Total',   value: stats.total,   color: 'text-white' },
-            { label: 'En cours', value: stats.running, color: 'text-yellow-400' },
-            { label: 'Succès',  value: stats.success, color: 'text-green-400' },
-            { label: 'Échecs',  value: stats.failed,  color: 'text-red-400' },
-            { label: 'Attente', value: stats.pending, color: 'text-reap3r-muted' },
+            { label: 'Total',        value: stats.total,   color: 'text-white' },
+            { label: 'En cours',     value: stats.running, color: 'text-yellow-400' },
+            { label: 'Succès',       value: stats.success, color: 'text-green-400' },
+            { label: 'Échecs',       value: stats.failed,  color: 'text-red-400' },
+            { label: 'Inaccessible', value: stats.skipped, color: 'text-orange-400' },
+            { label: 'Attente',      value: stats.pending, color: 'text-reap3r-muted' },
           ].map(s => (
             <div key={s.label} className="flex flex-col items-center p-2.5 bg-reap3r-surface/40 border border-reap3r-border/40 rounded-xl">
               <span className={`text-[18px] font-bold ${s.color}`}>{s.value}</span>
