@@ -90,7 +90,11 @@ function toBase64(file: File): Promise<string> {
   });
 }
 
-export function ZabbixBatchDeployTab() {
+export function ZabbixBatchDeployTab({
+  onSwitchToBrowserMode,
+}: {
+  onSwitchToBrowserMode?: () => void;
+}) {
   const [mode, setMode] = useState<'dry_run' | 'live'>('live');
   const [zabbixUrl, setZabbixUrl] = useState('https://prod-zabbix.hypervision.fr:8081');
   const [zabbixUser, setZabbixUser] = useState('massvision');
@@ -111,6 +115,11 @@ export function ZabbixBatchDeployTab() {
   const [batch, setBatch] = useState<DeployBatch | null>(null);
   const [items, setItems] = useState<DeployItem[]>([]);
   const [importResult, setImportResult] = useState<ImportResult | null>(null);
+
+  const backendCannotReachZabbix = useMemo(() => {
+    const msg = (errorMsg || '').toLowerCase();
+    return msg.includes('und_err_connect_timeout') || msg.includes('cannot reach zabbix endpoint');
+  }, [errorMsg]);
 
   useEffect(() => {
     if (typeof window !== 'undefined' && !serverUrl) {
@@ -418,6 +427,17 @@ export function ZabbixBatchDeployTab() {
             <AlertTriangle className="w-3 h-3" />
             {errorMsg}
           </div>
+          {backendCannotReachZabbix && (
+            <div className="mt-3">
+              <Button
+                size="sm"
+                onClick={() => onSwitchToBrowserMode?.()}
+                className="text-[11px]"
+              >
+                Basculer en Browser Direct (fonctionne sans accès VPS vers Zabbix)
+              </Button>
+            </div>
+          )}
         </Card>
       )}
 
@@ -503,4 +523,3 @@ export function ZabbixBatchDeployTab() {
     </div>
   );
 }
-

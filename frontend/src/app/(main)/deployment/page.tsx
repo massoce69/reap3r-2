@@ -5,6 +5,7 @@ import { TopBar } from '@/components/layout/sidebar';
 import { Card, Button, Badge, EmptyState, Modal, TabBar } from '@/components/ui';
 import { api } from '@/lib/api';
 import { ZabbixBatchDeployTab } from '@/components/deploy/ZabbixBatchDeployTab';
+import { BrowserDeployTab } from '@/components/deploy/BrowserDeployTab';
 import {
   Download,
   Copy,
@@ -19,7 +20,7 @@ import {
 } from 'lucide-react';
 
 export default function DeploymentPage() {
-  const [activeTab, setActiveTab] = useState<'zabbix' | 'tokens'>('zabbix');
+  const [activeTab, setActiveTab] = useState<'zabbix' | 'browser' | 'tokens'>('zabbix');
 
   return (
     <>
@@ -28,12 +29,19 @@ export default function DeploymentPage() {
         <TabBar
           tabs={[
             { key: 'zabbix' as const, label: 'Zabbix DAT Deploy', icon: <Server style={{ width: '13px', height: '13px' }} /> },
+            { key: 'browser' as const, label: 'Browser Direct', icon: <MonitorIcon style={{ width: '13px', height: '13px' }} /> },
             { key: 'tokens' as const, label: 'Enrollment Tokens', icon: <Key style={{ width: '13px', height: '13px' }} /> },
           ]}
           active={activeTab}
           onChange={setActiveTab}
         />
-        {activeTab === 'zabbix' ? <ZabbixBatchDeployTab /> : <EnrollmentTokensTab />}
+        {activeTab === 'zabbix' ? (
+          <ZabbixBatchDeployTab onSwitchToBrowserMode={() => setActiveTab('browser')} />
+        ) : activeTab === 'browser' ? (
+          <BrowserDeployTab />
+        ) : (
+          <EnrollmentTokensTab />
+        )}
       </div>
     </>
   );
@@ -305,4 +313,3 @@ function CommandBlock({
     </div>
   );
 }
-
