@@ -19,6 +19,11 @@ interface ZabbixConfig {
   script?: string;
 }
 
+interface ZabbixHostMacro {
+  hostmacroid: string;
+  macro: string;
+}
+
 export class BrowserZabbixClient {
   private url: string;
   private token: string | null = null;
@@ -82,7 +87,48 @@ export class BrowserZabbixClient {
   }
 
   async executeScript(scriptId: string, hostId: string, manualInput: string) {
-    return this.rpc('script.execute', { scriptid: scriptId, hostid: hostId, manualinput: manualInput });
+    try {
+      return await this.rpc('script.execute', { scriptid: scriptId, hostid: hostId, manualinput: manualInput });
+    } catch (err: any) {
+      const msg = String(err?.message || '').toLowerCase();
+      const manualInputUnsupported =
+        msg.includes('manualinput') ||
+        msg.includes('invalid params') ||
+        msg.includes('unexpected parameter');
+      if (!manualInputUnsupported) throw err;
+      // Older Zabbix/API combinations reject manualinput; execute without it.
+      return this.rpc('script.execute', { scriptid: scriptId, hostid: hostId });
+    }
+  }
+
+  async upsertHostMacro(hostId: string, macro: string, value: string) {
+    const existing = await this.rpc('usermacro.get', {
+      hostids: [hostId],
+      filter: { macro: [macro] },
+      output: ['hostmacroid', 'macro'],
+      limit: 1,
+    }) as ZabbixHostMacro[];
+
+    if (existing.length > 0) {
+      await this.rpc('usermacro.update', {
+        hostmacroid: existing[0].hostmacroid,
+        value,
+      });
+      return;
+    }
+
+    await this.rpc('usermacro.create', {
+      hostid: hostId,
+      macro,
+      value,
+    });
+  }
+
+  async upsertHostMacros(hostId: string, macros: Record<string, string>) {
+    for (const [macro, value] of Object.entries(macros)) {
+      if (!macro) continue;
+      await this.upsertHostMacro(hostId, macro, value ?? '');
+    }
   }
 }
 
@@ -196,7 +242,11 @@ export function BrowserDeployTab() {
              throw new Error('Host not found');
           }
 
-          // Execute
+          await client.upsertHostMacros(hostId, {
+            '{$DAT}': item.token,
+            '{$SERVER}': serverUrl,
+          });
+
           const manualInput = `${serverUrl} ${item.token}`;
           const res = await client.executeScript(scriptId, hostId, manualInput);
 
