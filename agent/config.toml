@@ -1,0 +1,49 @@
+# ─────────────────────────────────────────────────────────────
+# MassVision Agent – default configuration
+# Paths left empty are auto-detected per platform.
+# ─────────────────────────────────────────────────────────────
+
+[server]
+url         = "https://massvision.example.com"
+ws_url      = "wss://massvision.example.com/ws/agents"
+api_version = "v2"
+
+[agent]
+data_dir       = ""          # auto: C:\ProgramData\MassVision | /var/lib/massvision
+log_level      = "info"
+machine_id     = ""          # auto-generated on first run
+
+[heartbeat]
+interval_secs    = 60
+jitter_secs      = 10
+max_backoff_secs = 300
+
+[update]
+staging_dir          = ""    # auto: <data_dir>/staging
+auto_update          = true
+rollback_on_failure  = true
+
+[security]
+verify_signatures = true
+hmac_algorithm    = "sha256"
+enrollment_token  = ""
+
+[modules]
+metrics_enabled         = true
+metrics_interval_secs   = 60
+script_runner_enabled   = true
+inventory_enabled       = true
+inventory_interval_secs = 3600
+remote_shell_enabled    = true
+webcam_enabled          = false
+webcam_interval_secs    = 0      # disabled — only on-demand via job
+webcam_default_camera   = 0
+webcam_width            = 1280
+webcam_height           = 720
+webcam_quality          = 85
+
+[storage]
+db_path              = ""    # auto: <data_dir>/agent.db
+encrypt_at_rest      = true
+max_queue_size       = 10000
+queue_retention_hours = 72

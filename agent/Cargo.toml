@@ -1,52 +1,69 @@
-﻿[package]
-name = "xefi-agent-2"
-version = "1.2.0"
+[package]
+name = "massvision-agent"
+version = "2.1.0"
 edition = "2021"
-description = "XEFI Agent 2 - Remote management agent (Windows 7 to Server 2025)"
+description = "MassVision Enterprise Agent – resilient, self-repairable, enterprise-grade endpoint agent"
+authors = ["MassVision Team"]
 license = "Proprietary"
-build = "build.rs"
+rust-version = "1.75"
 
 [[bin]]
-name = "xefi-agent-2"
+name = "massvision-agent"
 path = "src/main.rs"
 
+# ── dependencies ──────────────────────────────────────────────
 [dependencies]
-tokio = { version = "1", features = ["full"] }
-# TLS: use rustls (pure-Rust) instead of native-tls.
-# This removes dependency on Windows SChannel/OpenSSL.
-tokio-tungstenite = { version = "0.24", default-features = false, features = ["connect", "rustls-tls-webpki-roots"] }
-rustls = { version = "0.23", default-features = false, features = ["ring", "logging", "std", "tls12"] }
-webpki-roots = "0.26"
-serde = { version = "1", features = ["derive"] }
-serde_json = "1"
-hmac = "0.12"
-sha2 = "0.10"
-hex = "0.4"
-base64 = "0.22"
-uuid = { version = "1", features = ["v4"] }
-chrono = { version = "0.4", features = ["clock", "serde"] }
-sysinfo = "0.31"
-hostname = "0.4"
-rand = "0.8"
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
-tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["json"] }
-clap = { version = "4", features = ["derive", "env"] }
-dirs = "5"
+tokio       = { version = "1", features = ["full"] }
+serde       = { version = "1", features = ["derive"] }
+serde_json  = "1"
+rusqlite    = { version = "0.31", features = ["bundled"] }
+reqwest     = { version = "0.12", features = ["json", "rustls-tls", "stream"], default-features = false }
+sha2        = "0.10"
+hmac        = "0.12"
+aes-gcm     = "0.10"
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand        = "0.8"
+uuid        = { version = "1", features = ["v4"] }
+chrono      = { version = "0.4", features = ["serde"] }
+tracing     = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "json"] }
+tracing-appender   = "0.2"
+sysinfo     = "0.30"
+tokio-tungstenite = { version = "0.21", features = ["rustls-tls-webpki-roots"] }
 futures-util = "0.3"
-url = "2"
-ed25519-dalek = { version = "2.1", default-features = false, features = ["std"] }
+toml        = "0.8"
+base64      = "0.22"
+hex         = "0.4"
+dirs        = "5"
+flate2      = "1"
+clap        = { version = "4", features = ["derive"] }
+thiserror   = "1"
+anyhow      = "1"
+hostname    = "0.4"
 
+# ── platform-specific ────────────────────────────────────────
 [target.'cfg(windows)'.dependencies]
 windows-service = "0.7"
-winreg = "0.52"
+winreg          = "0.52"
 
+[target.'cfg(unix)'.dependencies]
+nix = { version = "0.28", features = ["signal", "process", "fs"] }
+
+# ── build (Windows PE metadata to avoid AV false positives) ──
 [build-dependencies]
-winres = "0.1"
+winresource = "0.1"
 
+# ── dev / test ────────────────────────────────────────────────
+[dev-dependencies]
+tempfile   = "3"
+tokio-test = "0.4"
+
+# ── release profile ──────────────────────────────────────────
+# Note: opt-level "z" + strip + LTO can trigger AV heuristics
+# (resembles packed/obfuscated malware). Use "2" for normal optimisation.
 [profile.release]
-opt-level = 2
-lto = true
-strip = false
-# Keep panic=abort for deterministic runtime behavior.
-panic = "abort"
+opt-level     = 2
+lto           = "thin"
+strip         = "none"
+codegen-units = 1
+panic         = "abort"
