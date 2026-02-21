@@ -31,6 +31,7 @@ import apiKeyRoutes from './routes/api-keys.js';
 import agentBinaryRoutes from './routes/agent-binary.js';
 import installRoutes from './routes/install.js';
 import deployRoutes from './routes/deploy.js';
+import agentV2Routes from './routes/agents-v2.js';
 
 // WebSocket
 import { setupAgentGateway } from './ws/agent-gateway.js';
@@ -87,6 +88,7 @@ export async function buildApp(opts?: { logger?: boolean | FastifyBaseLogger }) 
   await fastify.register(agentBinaryRoutes);
   await fastify.register(installRoutes);
   await fastify.register(deployRoutes);
+  await fastify.register(agentV2Routes);
 
   // Agent gateway (WS)
   setupAgentGateway(fastify);

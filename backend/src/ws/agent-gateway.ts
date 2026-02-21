@@ -64,6 +64,26 @@ function safeTimingEqualHex(aHex: string, bHex: string): boolean {
   }
 }
 
+// ── Agent Protocol v2 (Rust) — minimal WS auth ─────────────────────────────
+// SignedEnvelope: { payload: string, timestamp: number, nonce: string, hmac: string }
+function computeV2HmacHex(agentToken: string, payload: string, timestamp: number, nonce: string): string {
+  const mac = crypto.createHmac('sha256', Buffer.from(agentToken, 'utf8'));
+  mac.update(Buffer.from(payload, 'utf8'));
+  const tsBuf = Buffer.alloc(8);
+  tsBuf.writeBigInt64LE(BigInt(timestamp));
+  mac.update(tsBuf);
+  mac.update(Buffer.from(nonce, 'utf8'));
+  return mac.digest('hex');
+}
+
+function safeParseJson(text: string): any | null {
+  try {
+    return JSON.parse(text);
+  } catch {
+    return null;
+  }
+}
+
 function computeSig(envelopeWithoutSig: any, secret: string): string {
   const canonical = canonicalJsonStringify(envelopeWithoutSig);
   return crypto.createHmac('sha256', secret).update(canonical).digest('hex');
@@ -181,6 +201,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
   // Unified WS on the main Fastify HTTP server.
   const wss = new WebSocketServer({ noServer: true });
+  const wssV2 = new WebSocketServer({ noServer: true });
   const uiWss = new WebSocketServer({ noServer: true });
   const messagingWss = new WebSocketServer({ noServer: true });
 
@@ -189,7 +210,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     const addr = fastify.server.address();
     const port = typeof addr === 'object' && addr ? Number(addr.port) : config.port;
     fastify.agentWsPort = port;
-    fastify.log.info(`Unified WS gateway listening on port ${port} (/ws/agent, /ws/ui, /ws/messaging)`);
+    fastify.log.info(`Unified WS gateway listening on port ${port} (/ws/agent, /ws/agents, /ws/ui, /ws/messaging)`);
   });
 
   const upgradeHandler = (request: IncomingMessage, socket: any, head: Buffer) => {
@@ -208,11 +229,74 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     };
 
     if (pathname === '/ws/agent') return handle(wss);
+    if (pathname === '/ws/agents') return handle(wssV2);
     if (pathname === '/ws/ui') return handle(uiWss);
     if (pathname === '/ws/messaging') return handle(messagingWss);
     socket.destroy();
   };
   fastify.server.on('upgrade', upgradeHandler);
+
+  // ── v2 agent WS: accept auth envelope, then keep socket open ─────────────
+  const v2Authed = new Map<WS, { agentId: string }>();
+
+  wssV2.on('connection', async (ws, request) => {
+    const url = new URL(request.url ?? '/', `http://${request.headers.host || 'localhost'}`);
+    const agentId = url.searchParams.get('agent_id') || '';
+    const machineId = url.searchParams.get('machine_id') || '';
+    const ip = remoteIp(ws);
+
+    if (!agentId) {
+      try { ws.close(1008, 'missing agent_id'); } catch {}
+      return;
+    }
+
+    // Lookup secret
+    let agentSecret = '';
+    try {
+      const { rows } = await fastify.pg.query(`SELECT agent_secret FROM agents WHERE id = $1`, [agentId]);
+      agentSecret = rows?.[0]?.agent_secret ? String(rows[0].agent_secret) : '';
+    } catch {
+      agentSecret = '';
+    }
+    if (!agentSecret) {
+      try { ws.close(1008, 'unknown agent'); } catch {}
+      return;
+    }
+
+    // First message must be auth envelope
+    const onMessage = (data: RawData) => {
+      try {
+        const text = data.toString('utf8');
+        const env = safeParseJson(text);
+        if (!env || typeof env !== 'object') return ws.close(1008, 'invalid envelope');
+        const payload = typeof (env as any).payload === 'string' ? (env as any).payload : '';
+        const timestamp = typeof (env as any).timestamp === 'number' ? (env as any).timestamp : NaN;
+        const nonce = typeof (env as any).nonce === 'string' ? (env as any).nonce : '';
+        const hmac = typeof (env as any).hmac === 'string' ? (env as any).hmac : '';
+        if (!payload || !Number.isFinite(timestamp) || !nonce || !hmac) return ws.close(1008, 'invalid envelope');
+
+        const ageMs = Math.abs(Date.now() - timestamp);
+        if (ageMs > 300_000) return ws.close(1008, 'stale');
+
+        const expected = computeV2HmacHex(agentSecret, payload, timestamp, nonce);
+        if (!safeTimingEqualHex(expected, hmac)) return ws.close(1008, 'bad signature');
+
+        const p = safeParseJson(payload);
+        if (!p || p.type !== 'auth' || String(p.agent_id || '') !== agentId) return ws.close(1008, 'bad auth');
+
+        v2Authed.set(ws, { agentId });
+        ws.off('message', onMessage);
+        fastify.log.info({ agentId, machineId, ip }, '[agents-v2] WS authenticated');
+      } catch {
+        try { ws.close(1008, 'error'); } catch {}
+      }
+    };
+
+    ws.on('message', onMessage);
+    ws.on('close', () => {
+      v2Authed.delete(ws);
+    });
+  });
 
   // Ping/pong keepalive.
   const pingInterval = setInterval(() => {
