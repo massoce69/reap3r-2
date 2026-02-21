@@ -1,87 +1,86 @@
 #Requires -RunAsAdministrator
 <#
 .SYNOPSIS
-    MASSVISION Reap3r Agent — PowerShell installer (fallback / CI use)
+    MASSVISION Reap3r Agent - Windows installer (fallback / CI use)
+
 .DESCRIPTION
     Installs reap3r-agent.exe as a Windows service.
-    Run as Administrator.
-.PARAMETER Server
-    WebSocket server URL, e.g. wss://reap3r.example.com/ws/agent
-.PARAMETER Token
-    One-time enrollment token
-.PARAMETER ExeSource
-    Path to local reap3r-agent.exe, OR a URL to download it from.
-    Default: looks for reap3r-agent.exe next to this script.
-.PARAMETER Uninstall
-    Remove the service and files.
-.EXAMPLE
-    .\install-windows.ps1 -Server wss://reap3r.example.com/ws/agent -Token abc123
-.EXAMPLE
-    .\install-windows.ps1 -Server wss://... -Token abc123 -ExeSource https://releases.example.com/reap3r-agent.exe
-.EXAMPLE
-    .\install-windows.ps1 -Uninstall
+    Prefers native agent install flow (--install), with fallback for older binaries.
 #>
 param(
-    [string]$Server   = "",
-    [string]$Token    = "",
+    [string]$Server = "",
+    [string]$Token = "",
     [string]$ExeSource = "",
     [switch]$Uninstall
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Stop'
+$ErrorActionPreference = "Stop"
 
-$ServiceName   = "Reap3rAgent"
-$LegacyServiceNames = @("MASSVISION-Reap3r-Agent", "ReaP3rAgent")
-$DisplayName   = "Reap3r Agent (MASSVISION)"
-$Description   = "MASSVISION Reap3r remote-management agent"
-$InstallDir    = "C:\Program Files\Reap3r Agent"
-$DataDir       = "C:\ProgramData\Reap3r"
-$LogDir        = "$DataDir\logs"
-$ConfigFile    = "$DataDir\agent.conf"
-$ExeDest       = "$InstallDir\reap3r-agent.exe"
+$ServiceName = "XEFI-Agent-2"
+$LegacyServiceNames = @("MASSVISION-Reap3r-Agent", "Reap3rAgent", "ReaP3rAgent", "xefi-agent-2")
+$ServiceCandidates = (@($ServiceName) + $LegacyServiceNames | Select-Object -Unique)
+$DisplayName = "Reap3r Agent (MASSVISION)"
+$Description = "MASSVISION Reap3r remote-management agent"
+$InstallDir = "C:\Program Files\Reap3r Agent"
+$DataDir = "C:\ProgramData\XefiAgent2"
+$LegacyDataDir = "C:\ProgramData\Reap3r"
+$ExeDest = "$InstallDir\reap3r-agent.exe"
+$LogCandidates = @(
+    "$DataDir\logs\agent.log",
+    "$LegacyDataDir\logs\agent.log"
+)
 
-function Write-Step([string]$msg) {
-    Write-Host "`n[+] $msg" -ForegroundColor Cyan
-}
-function Write-OK([string]$msg) {
-    Write-Host "    [OK] $msg" -ForegroundColor Green
-}
-function Write-Warn([string]$msg) {
-    Write-Host "    [WARN] $msg" -ForegroundColor Yellow
-}
-function Write-Fail([string]$msg) {
-    Write-Host "    [FAIL] $msg" -ForegroundColor Red
+function Write-Step([string]$msg) { Write-Host "`n[+] $msg" -ForegroundColor Cyan }
+function Write-OK([string]$msg) { Write-Host "    [OK] $msg" -ForegroundColor Green }
+function Write-Warn([string]$msg) { Write-Host "    [WARN] $msg" -ForegroundColor Yellow }
+function Write-Fail([string]$msg) { Write-Host "    [FAIL] $msg" -ForegroundColor Red }
+
+function Resolve-AgentLogPath {
+    foreach ($path in $LogCandidates) {
+        if (Test-Path $path) { return $path }
+    }
+    return $LogCandidates[0]
 }
 
-# ─── UNINSTALL ────────────────────────────────────────────────────────────────
+function Resolve-AgentConfigPath {
+    $candidates = @("$DataDir\agent.conf", "$LegacyDataDir\agent.conf")
+    foreach ($path in $candidates) {
+        if (Test-Path $path) { return $path }
+    }
+    return $candidates[0]
+}
+
+function Resolve-ActiveServiceName {
+    foreach ($svcName in $ServiceCandidates) {
+        $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
+        if ($svc) { return $svcName }
+    }
+    return $ServiceName
+}
+
 if ($Uninstall) {
     Write-Step "Uninstalling Reap3r Agent..."
-    foreach ($svcName in (@($ServiceName) + $LegacyServiceNames | Select-Object -Unique)) {
+    foreach ($svcName in $ServiceCandidates) {
         try { Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue } catch {}
         try { sc.exe delete $svcName | Out-Null } catch {}
     }
 
-    if (Test-Path $ExeDest)  { Remove-Item $ExeDest -Force }
+    if (Test-Path $ExeDest) { Remove-Item $ExeDest -Force }
     if (Test-Path $InstallDir) { Remove-Item $InstallDir -Recurse -Force -ErrorAction SilentlyContinue }
 
     Write-OK "Service removed."
-    Write-Warn "Config/logs in $DataDir were kept. Remove manually if desired."
+    Write-Warn "Config/logs in $DataDir (and legacy $LegacyDataDir) were kept."
     exit 0
 }
 
-# ─── VALIDATION ───────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Magenta
-Write-Host "  MASSVISION Reap3r Agent — Windows Installer"           -ForegroundColor Magenta
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Magenta
+Write-Host "=======================================================" -ForegroundColor Magenta
+Write-Host "  MASSVISION Reap3r Agent - Windows Installer" -ForegroundColor Magenta
+Write-Host "=======================================================" -ForegroundColor Magenta
 
-if (-not $Server) {
-    $Server = Read-Host "  Enter Server URL (e.g. wss://YOUR_SERVER/ws/agent)"
-}
-if (-not $Token) {
-    $Token = Read-Host "  Enter Enrollment Token"
-}
+if (-not $Server) { $Server = Read-Host "  Enter Server URL (e.g. wss://YOUR_SERVER/ws/agent)" }
+if (-not $Token) { $Token = Read-Host "  Enter Enrollment Token" }
 
 if (-not ($Server -match '^wss?://')) {
     Write-Fail "Server URL must start with ws:// or wss://. Got: $Server"
@@ -92,133 +91,154 @@ if (-not $Token) {
     exit 1
 }
 
-# ─── LOCATE / DOWNLOAD EXE ───────────────────────────────────────────────────
-Write-Step "Locating reap3r-agent.exe..."
-
+Write-Step "Locating agent executable..."
 $ExeLocal = ""
 if ($ExeSource -match '^https?://') {
-    # Download from URL
-    $TmpExe = "$env:TEMP\reap3r-agent.exe"
-    Write-Host "    Downloading from $ExeSource ..."
+    $tmpExe = "$env:TEMP\reap3r-agent.exe"
     try {
-        Invoke-WebRequest -Uri $ExeSource -OutFile $TmpExe -UseBasicParsing
-        $ExeLocal = $TmpExe
-        Write-OK "Downloaded to $TmpExe"
+        Invoke-WebRequest -Uri $ExeSource -OutFile $tmpExe -UseBasicParsing
+        $ExeLocal = $tmpExe
+        Write-OK "Downloaded to $tmpExe"
     } catch {
         Write-Fail "Download failed: $_"
         exit 1
     }
 } elseif ($ExeSource -and (Test-Path $ExeSource)) {
-    $ExeLocal = $ExeSource
-    Write-OK "Using provided path: $ExeSource"
+    $ExeLocal = (Resolve-Path $ExeSource).Path
+    Write-OK "Using provided path: $ExeLocal"
 } else {
-    # Look next to script
-    $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+    $scriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
     $candidates = @(
-        "$ScriptDir\reap3r-agent.exe",
-        "$ScriptDir\..\target\release\reap3r-agent.exe",
-        "$ScriptDir\..\target\x86_64-pc-windows-msvc\release\reap3r-agent.exe"
+        "$scriptDir\xefi-agent-2.exe",
+        "$scriptDir\reap3r-agent.exe",
+        "$scriptDir\..\target\release\reap3r-agent.exe",
+        "$scriptDir\..\target\release\xefi-agent-2.exe",
+        "$scriptDir\..\target\x86_64-pc-windows-msvc\release\reap3r-agent.exe",
+        "$scriptDir\..\target\x86_64-pc-windows-msvc\release\xefi-agent-2.exe"
     )
     foreach ($c in $candidates) {
-        if (Test-Path $c) { $ExeLocal = (Resolve-Path $c).Path; break }
+        if (Test-Path $c) {
+            $ExeLocal = (Resolve-Path $c).Path
+            break
+        }
     }
     if (-not $ExeLocal) {
-        Write-Fail "Cannot find reap3r-agent.exe. Pass -ExeSource <path> or <url>."
+        Write-Fail "Cannot find agent executable. Pass -ExeSource <path> or <url>."
         exit 1
     }
     Write-OK "Found: $ExeLocal"
 }
 
-# ─── STOP EXISTING SERVICE ───────────────────────────────────────────────────
 Write-Step "Stopping existing service (if any)..."
 $removedAny = $false
-foreach ($svcName in (@($ServiceName) + $LegacyServiceNames | Select-Object -Unique)) {
+foreach ($svcName in $ServiceCandidates) {
     $svc = Get-Service -Name $svcName -ErrorAction SilentlyContinue
     if (-not $svc) { continue }
-    if ($svc.Status -ne 'Stopped') {
+    if ($svc.Status -ne "Stopped") {
         Stop-Service -Name $svcName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+        Start-Sleep -Seconds 1
     }
     sc.exe delete $svcName | Out-Null
-    Start-Sleep -Seconds 1
+    Start-Sleep -Milliseconds 500
     Write-OK "Old service removed: $svcName"
     $removedAny = $true
 }
-if (-not $removedAny) {
-    Write-OK "No existing service"
-}
+if (-not $removedAny) { Write-OK "No existing service" }
 
-# ─── CREATE DIRECTORIES ──────────────────────────────────────────────────────
 Write-Step "Creating directories..."
-foreach ($d in @($InstallDir, $DataDir, $LogDir)) {
+foreach ($d in @($InstallDir, $DataDir, "$DataDir\logs")) {
     New-Item -ItemType Directory -Path $d -Force | Out-Null
     Write-OK $d
 }
+if (-not (Test-Path $LegacyDataDir)) {
+    New-Item -ItemType Directory -Path $LegacyDataDir -Force | Out-Null
+}
 
-# ─── COPY BINARY ───────────────────────────────────────────────────────────────
 Write-Step "Copying binary..."
 Copy-Item -Path $ExeLocal -Destination $ExeDest -Force
 Write-OK "Installed: $ExeDest"
 
-# ─── INSTALL SERVICE ─────────────────────────────────────────────────────────
-Write-Step "Running one-shot enrollment..."
-& $ExeDest --enroll --server $Server --token $Token
-if ($LASTEXITCODE -ne 0) {
-    Write-Fail "Enrollment failed (exit code: $LASTEXITCODE)"
-    exit 1
+Write-Step "Installing service + enrollment..."
+$supportsInstall = $false
+$supportsEnroll = $false
+$supportsRun = $false
+try {
+    $helpText = (& $ExeDest --help 2>&1 | Out-String)
+    if ($helpText -match '--install') { $supportsInstall = $true }
+    if ($helpText -match '--enroll') { $supportsEnroll = $true }
+    if ($helpText -match '--run') { $supportsRun = $true }
+} catch {}
+
+$activeServiceName = $ServiceName
+if ($supportsInstall) {
+    $proc = Start-Process -FilePath $ExeDest -ArgumentList @("--install", "--server", $Server, "--token", $Token) -Wait -PassThru -NoNewWindow
+    if ($proc.ExitCode -ne 0) {
+        Write-Fail "Agent --install failed (exit code: $($proc.ExitCode))"
+        exit 1
+    }
+    $activeServiceName = Resolve-ActiveServiceName
+    Write-OK "Native install completed (service: $activeServiceName)"
+} else {
+    if (-not $supportsEnroll) {
+        Write-Fail "This binary does not support --install or --enroll."
+        exit 1
+    }
+
+    & $ExeDest --enroll --server $Server --token $Token
+    if ($LASTEXITCODE -ne 0) {
+        Write-Fail "Enrollment failed (exit code: $LASTEXITCODE)"
+        exit 1
+    }
+    Write-OK "Enrollment successful"
+
+    $binPath = if ($supportsRun) { "`"$ExeDest`" --run" } else { "`"$ExeDest`"" }
+    New-Service `
+        -Name $ServiceName `
+        -BinaryPathName $binPath `
+        -DisplayName $DisplayName `
+        -StartupType Automatic `
+        -Description $Description
+    $activeServiceName = $ServiceName
+    Write-OK "Service '$activeServiceName' registered (fallback mode)"
 }
-Write-OK "Enrollment successful"
 
-if (Test-Path $ConfigFile) {
-    & icacls $ConfigFile /inheritance:r | Out-Null
-    & icacls $ConfigFile /grant:r "SYSTEM:F" "Administrators:F" | Out-Null
-    Write-OK "Applied ACL to $ConfigFile"
+$resolvedConfig = Resolve-AgentConfigPath
+if (Test-Path $resolvedConfig) {
+    & icacls $resolvedConfig /inheritance:r | Out-Null
+    & icacls $resolvedConfig /grant:r "SYSTEM:F" "Administrators:F" | Out-Null
+    Write-OK "Applied ACL to $resolvedConfig"
 }
 
-Write-Step "Installing Windows service..."
-$BinPath = "`"$ExeDest`" --run"
+sc.exe failure $activeServiceName reset= 0 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+sc.exe failureflag $activeServiceName 1 | Out-Null
 
-New-Service `
-    -Name        $ServiceName `
-    -BinaryPathName $BinPath `
-    -DisplayName $DisplayName `
-    -StartupType Automatic `
-    -Description $Description
-
-# Recovery: restart on failure
-sc.exe failure $ServiceName reset= 0 actions= restart/5000/restart/5000/restart/5000 | Out-Null
-
-Write-OK "Service '$ServiceName' registered"
-
-# ─── START SERVICE ───────────────────────────────────────────────────────────
 Write-Step "Starting service..."
-Start-Service -Name $ServiceName
+Start-Service -Name $activeServiceName -ErrorAction SilentlyContinue
 Start-Sleep -Seconds 3
 
-$svc = Get-Service -Name $ServiceName
-if ($svc.Status -eq 'Running') {
-    Write-OK "Service is RUNNING (PID: $(
-        (Get-WmiObject Win32_Service -Filter "Name='$ServiceName'").ProcessId
-    ))"
+$svc = Get-Service -Name $activeServiceName -ErrorAction SilentlyContinue
+if ($svc -and $svc.Status -eq "Running") {
+    $pid = (Get-WmiObject Win32_Service -Filter "Name='$activeServiceName'").ProcessId
+    Write-OK "Service is RUNNING (PID: $pid)"
 } else {
-    Write-Fail "Service status: $($svc.Status)"
-    Write-Warn "Check logs at: $LogDir\agent.log"
+    $status = if ($svc) { $svc.Status } else { "NOT FOUND" }
+    Write-Fail "Service status: $status"
+    Write-Warn "Check logs at: $(Resolve-AgentLogPath)"
     exit 1
 }
 
-# ─── SUMMARY ─────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "=======================================================" -ForegroundColor Green
 Write-Host "  Installation complete!" -ForegroundColor Green
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Green
+Write-Host "=======================================================" -ForegroundColor Green
 Write-Host ""
-Write-Host "  Service   : $ServiceName" -ForegroundColor White
-Write-Host "  Status    : $($(Get-Service $ServiceName).Status)" -ForegroundColor White
+Write-Host "  Service   : $activeServiceName" -ForegroundColor White
+Write-Host "  Status    : $($(Get-Service $activeServiceName).Status)" -ForegroundColor White
 Write-Host "  Server    : $Server" -ForegroundColor White
-Write-Host "  Log file  : $LogDir\agent.log" -ForegroundColor White
+Write-Host "  Log file  : $(Resolve-AgentLogPath)" -ForegroundColor White
 Write-Host ""
 Write-Host "  Verify with:" -ForegroundColor Yellow
-Write-Host "    Get-Service $ServiceName" -ForegroundColor DarkYellow
-Write-Host "    Get-Content '$LogDir\agent.log' -Wait" -ForegroundColor DarkYellow
+Write-Host "    Get-Service $activeServiceName" -ForegroundColor DarkYellow
+Write-Host "    Get-Content '$(Resolve-AgentLogPath)' -Wait" -ForegroundColor DarkYellow
 Write-Host "    & '$ExeDest' --diagnose" -ForegroundColor DarkYellow
 Write-Host ""

@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
+import { fileURLToPath } from 'node:url';
 
 export type AgentOs = 'linux' | 'windows' | 'darwin';
 export type AgentArch = 'x86_64' | 'aarch64' | 'x86';
@@ -45,10 +46,50 @@ export function publicBaseUrl(request: any): string {
 
 export function normalizeArch(arch: string): AgentArch {
   const raw = String(arch || '').toLowerCase();
-  if (raw === 'amd64' || raw === 'x64') return 'x86_64';
-  if (raw === 'i686' || raw === 'i386') return 'x86';
-  if (raw === 'arm64') return 'aarch64';
-  return (raw as AgentArch) || 'x86_64';
+  if (raw === 'amd64' || raw === 'x64' || raw === 'x86_64' || raw === 'x86-64') return 'x86_64';
+  if (raw === 'i686' || raw === 'i386' || raw === 'x86' || raw === 'ia32') return 'x86';
+  if (raw === 'arm64' || raw === 'arm64e' || raw === 'aarch64' || raw === 'armv8' || raw === 'armv8l') return 'aarch64';
+  if (raw.startsWith('arm')) return 'aarch64';
+  return 'x86_64';
+}
+
+function uniq(values: string[]): string[] {
+  return Array.from(new Set(values.filter((v) => v && v.trim().length > 0)));
+}
+
+function agentRootCandidates(): string[] {
+  const moduleDir = path.dirname(fileURLToPath(import.meta.url));
+  return uniq([
+    process.env.AGENT_BINARY_ROOT || '',
+    path.resolve(process.cwd(), '../agent'),
+    path.resolve(process.cwd(), 'agent'),
+    path.resolve(moduleDir, '../../../agent'),
+  ]);
+}
+
+function resolveCandidatePaths(relDir: string, fileNames: string[]): string[] {
+  const roots = agentRootCandidates();
+  const out: string[] = [];
+  for (const root of roots) {
+    for (const fileName of fileNames) {
+      out.push(path.join(root, relDir, fileName));
+    }
+  }
+  return out;
+}
+
+function pickBinary(candidates: string[]): { filePath: string; fileName: string } | null {
+  if (candidates.length === 0) return null;
+  const existing = candidates.filter((p) => fs.existsSync(p));
+  const chosen = existing.length > 0
+    ? existing
+        .map((filePath) => {
+          const stat = fs.statSync(filePath);
+          return { filePath, mtime: stat.mtimeMs };
+        })
+        .sort((a, b) => b.mtime - a.mtime)[0].filePath
+    : candidates[0];
+  return { filePath: chosen, fileName: path.basename(chosen) };
 }
 
 export function resolveBinaryPath(os: AgentOs, arch: AgentArch): { filePath: string; fileName: string } | null {
@@ -59,28 +100,45 @@ export function resolveBinaryPath(os: AgentOs, arch: AgentArch): { filePath: str
   }
 
   if (os === 'linux' && arch === 'x86_64') {
-    const filePath = path.resolve(process.cwd(), '../agent/target/release/reap3r-agent');
-    return { filePath, fileName: 'reap3r-agent' };
+    return pickBinary(resolveCandidatePaths('target/release', ['reap3r-agent', 'xefi-agent-2']));
+  }
+
+  if (os === 'linux' && arch === 'aarch64') {
+    return pickBinary(resolveCandidatePaths('target/aarch64-unknown-linux-gnu/release', ['reap3r-agent', 'xefi-agent-2']));
+  }
+
+  if (os === 'linux' && arch === 'x86') {
+    return pickBinary(resolveCandidatePaths('target/i686-unknown-linux-gnu/release', ['reap3r-agent', 'xefi-agent-2']));
   }
 
   if (os === 'windows' && arch === 'x86_64') {
-    const filePath = path.resolve(process.cwd(), '../agent/target/x86_64-pc-windows-msvc/release/reap3r-agent.exe');
-    return { filePath, fileName: 'reap3r-agent.exe' };
+    return pickBinary(
+      [
+        ...resolveCandidatePaths('dist', ['agent-x64.exe', 'reap3r-agent-x64.exe']),
+        ...resolveCandidatePaths('target/x86_64-pc-windows-msvc/release', ['reap3r-agent.exe', 'xefi-agent-2.exe']),
+      ],
+    );
   }
 
   if (os === 'windows' && arch === 'x86') {
-    const filePath = path.resolve(process.cwd(), '../agent/target/i686-pc-windows-msvc/release/reap3r-agent.exe');
-    return { filePath, fileName: 'reap3r-agent.exe' };
+    return pickBinary(
+      [
+        ...resolveCandidatePaths('dist', ['agent-x86.exe', 'reap3r-agent-x86.exe']),
+        ...resolveCandidatePaths('target/i686-pc-windows-msvc/release', ['reap3r-agent.exe', 'xefi-agent-2.exe']),
+      ],
+    );
   }
 
   if (os === 'darwin' && arch === 'x86_64') {
-    const filePath = path.resolve(process.cwd(), '../agent/target/x86_64-apple-darwin/release/reap3r-agent');
-    return { filePath, fileName: 'reap3r-agent' };
+    return pickBinary(
+      resolveCandidatePaths('target/x86_64-apple-darwin/release', ['reap3r-agent', 'xefi-agent-2']),
+    );
   }
 
   if (os === 'darwin' && arch === 'aarch64') {
-    const filePath = path.resolve(process.cwd(), '../agent/target/aarch64-apple-darwin/release/reap3r-agent');
-    return { filePath, fileName: 'reap3r-agent' };
+    return pickBinary(
+      resolveCandidatePaths('target/aarch64-apple-darwin/release', ['reap3r-agent', 'xefi-agent-2']),
+    );
   }
 
   return null;

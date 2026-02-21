@@ -1,69 +1,233 @@
-# ─────────────────────────────────────────────────────────────
-# MASSVISION Reap3r — Agent Enrollment Script (Zabbix Deploy)
-# Idempotent: checks if agent is already installed + running
-# Called via Zabbix global script (script.execute)
-# Exit codes: 0=OK, 10=ALREADY, 20=DL_FAIL, 30=INST_FAIL, 40=SVC_FAIL, 50=CB_FAIL
-# ─────────────────────────────────────────────────────────────
-
 param(
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$Dat,
 
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$Server,
 
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$BatchId,
 
-    [Parameter(Mandatory=$true)]
+    [Parameter(Mandatory = $true)]
     [string]$CallbackKey,
 
-    [string]$LogPath = "C:\ProgramData\Reap3r\deploy-enroll.log"
+    [string]$LogPath = "C:\ProgramData\Reap3r\deploy-enroll.log",
+
+    [int]$DownloadRetryCount = 2,
+    [int]$DownloadRetryBackoffSec = 2,
+    [int]$DownloadTimeoutSec = 120
 )
 
-# ═══════════════════════════════════════════
-# CONFIG
-# ═══════════════════════════════════════════
+# Exit codes:
+# 0=OK, 10=ALREADY, 20=DL_FAIL, 30=INST_FAIL, 40=SVC_FAIL, 50=CB_FAIL
+
 $ErrorActionPreference = "Stop"
-$ServiceName = "Reap3rAgent"
+$PrimaryServiceName = "XEFI-Agent-2"
+$LegacyServiceNames = @("MASSVISION-Reap3r-Agent", "Reap3rAgent", "ReaP3rAgent", "xefi-agent-2")
 $InstallDir = "C:\Program Files\Reap3r"
 $AgentExe = Join-Path $InstallDir "reap3r-agent.exe"
 $MaxLogSize = 10MB
 $MaxLogFiles = 5
+$DownloadRetryCount = [Math]::Max(0, [Math]::Min($DownloadRetryCount, 10))
+$DownloadRetryBackoffSec = [Math]::Max(0, [Math]::Min($DownloadRetryBackoffSec, 30))
+$DownloadTimeoutSec = [Math]::Max(10, [Math]::Min($DownloadTimeoutSec, 300))
 
-# TLS 1.2 for older Windows
+# TLS 1.2 for older Windows.
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 
-# ═══════════════════════════════════════════
-# LOGGING
-# ═══════════════════════════════════════════
-function Write-Log {
-    param([string]$Message, [string]$Level = "INFO")
-    $dir = Split-Path $LogPath -Parent
-    if (-not (Test-Path $dir)) { New-Item -ItemType Directory -Path $dir -Force | Out-Null }
+function Get-ServiceCandidates {
+    return @($PrimaryServiceName) + $LegacyServiceNames | Select-Object -Unique
+}
 
-    # Rotate if needed
+function Write-Log {
+    param(
+        [string]$Message,
+        [string]$Level = "INFO"
+    )
+
+    $dir = Split-Path $LogPath -Parent
+    if (-not (Test-Path $dir)) {
+        New-Item -ItemType Directory -Path $dir -Force | Out-Null
+    }
+
     if (Test-Path $LogPath) {
         $size = (Get-Item $LogPath).Length
         if ($size -gt $MaxLogSize) {
             for ($i = $MaxLogFiles; $i -ge 1; $i--) {
                 $old = "${LogPath}.${i}"
-                $new = "${LogPath}.$($i+1)"
-                if ($i -eq $MaxLogFiles -and (Test-Path $old)) { Remove-Item $old -Force }
-                elseif (Test-Path $old) { Rename-Item $old $new -Force }
+                $new = "${LogPath}.$($i + 1)"
+                if ($i -eq $MaxLogFiles -and (Test-Path $old)) {
+                    Remove-Item $old -Force
+                } elseif (Test-Path $old) {
+                    Rename-Item $old $new -Force
+                }
             }
             Rename-Item $LogPath "${LogPath}.1" -Force
         }
     }
 
     $ts = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
-    $line = "[$ts] [$Level] $Message"
-    Add-Content -Path $LogPath -Value $line -Encoding UTF8
+    Add-Content -Path $LogPath -Value "[$ts] [$Level] $Message" -Encoding UTF8
 }
 
-# ═══════════════════════════════════════════
-# CALLBACK
-# ═══════════════════════════════════════════
+function Convert-ToWsServer {
+    param([string]$RawServer)
+
+    $value = if ($null -eq $RawServer) { "" } else { [string]$RawServer }
+    $value = $value.Trim().TrimEnd("/")
+    if (-not $value) {
+        throw "Server URL is empty"
+    }
+
+    if ($value -match '^wss?://') {
+        if ($value -match '/ws/agent$') {
+            return $value
+        }
+        return "$value/ws/agent"
+    }
+
+    if ($value -match '^https?://') {
+        $ws = $value -replace '^http://', 'ws://' -replace '^https://', 'wss://'
+        if ($ws -notmatch '/ws/agent$') {
+            $ws = "$ws/ws/agent"
+        }
+        return $ws
+    }
+
+    throw "Unsupported server URL scheme: $value"
+}
+
+function Get-ExistingService {
+    foreach ($name in Get-ServiceCandidates) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($svc) {
+            return $svc
+        }
+    }
+    return $null
+}
+
+function Find-RunningService {
+    foreach ($name in Get-ServiceCandidates) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -eq "Running") {
+            return $svc
+        }
+    }
+    return $null
+}
+
+function Get-PreferredAgentArch {
+    try {
+        $osArch = (Get-CimInstance Win32_OperatingSystem -ErrorAction Stop).OSArchitecture
+        if ($osArch -match "64") { return "x86_64" }
+    } catch {}
+
+    if ($env:PROCESSOR_ARCHITECTURE -match "64") { return "x86_64" }
+    return "x86"
+}
+
+function Get-DownloadCandidates {
+    param(
+        [string]$BaseServer,
+        [string]$DeployDat,
+        [string[]]$Architectures
+    )
+
+    $serverBase = $BaseServer.Trim().TrimEnd("/")
+    $candidates = @()
+    $seen = New-Object System.Collections.Generic.HashSet[string]
+
+    foreach ($arch in $Architectures) {
+        $urls = @(
+            "$serverBase/api/agent-binary/download?os=windows&arch=$arch&dat=$DeployDat",
+            "$serverBase/api/agent-binary/download?os=windows&arch=$arch"
+        )
+        foreach ($url in $urls) {
+            if ($seen.Add($url)) {
+                $candidates += [PSCustomObject]@{
+                    Url  = $url
+                    Arch = $arch
+                }
+            }
+        }
+    }
+
+    return $candidates
+}
+
+function Invoke-AgentDownload {
+    param(
+        [array]$Candidates,
+        [string]$OutFile,
+        [string]$DeployDat,
+        [int]$RetryCount,
+        [int]$RetryBackoffSec,
+        [int]$TimeoutSec
+    )
+
+    if (-not $Candidates -or $Candidates.Count -eq 0) {
+        throw "No download candidates available"
+    }
+
+    $headers = @{ "X-Deploy-DAT" = $DeployDat }
+    $attemptsPerUrl = $RetryCount + 1
+    $errors = @()
+
+    foreach ($candidate in $Candidates) {
+        for ($attempt = 1; $attempt -le $attemptsPerUrl; $attempt++) {
+            Write-Log "Download attempt $attempt/$attemptsPerUrl (arch=$($candidate.Arch)) from $($candidate.Url)"
+            try {
+                Invoke-WebRequest -Uri $candidate.Url -OutFile $OutFile -Headers $headers -UseBasicParsing -TimeoutSec $TimeoutSec
+                if (-not (Test-Path $OutFile)) {
+                    throw "Output file not created"
+                }
+                $size = (Get-Item $OutFile).Length
+                if ($size -le 0) {
+                    throw "Downloaded file is empty"
+                }
+                return [PSCustomObject]@{
+                    Url       = $candidate.Url
+                    Arch      = $candidate.Arch
+                    SizeBytes = $size
+                }
+            } catch {
+                $errors += "arch=$($candidate.Arch) url=$($candidate.Url) attempt=$attempt error=$($_.Exception.Message)"
+                Remove-Item $OutFile -Force -ErrorAction SilentlyContinue
+                if ($attempt -lt $attemptsPerUrl -and $RetryBackoffSec -gt 0) {
+                    Start-Sleep -Seconds ($RetryBackoffSec * $attempt)
+                }
+            }
+        }
+    }
+
+    $summary = ($errors | Select-Object -First 6) -join " | "
+    throw "All download attempts failed. $summary"
+}
+
+function Test-AgentSupportsFlag {
+    param(
+        [string]$ExePath,
+        [string]$Flag
+    )
+
+    if (-not (Test-Path $ExePath)) { return $false }
+
+    try {
+        $helpText = (& $ExePath --help 2>&1 | Out-String)
+        return $helpText -match [Regex]::Escape($Flag)
+    } catch {
+        return $false
+    }
+}
+
+function Invoke-AgentProcess {
+    param([string[]]$Arguments)
+
+    $proc = Start-Process -FilePath $AgentExe -ArgumentList $Arguments -Wait -PassThru -NoNewWindow
+    return $proc.ExitCode
+}
+
 function Send-Callback {
     param(
         [int]$ExitCode,
@@ -74,12 +238,13 @@ function Send-Callback {
     )
 
     $body = @{
-        batch_id    = $BatchId
-        zabbix_host = $env:COMPUTERNAME
-        exit_code   = $ExitCode
-        status      = $Status
-        message     = $Message
-        hostname    = $env:COMPUTERNAME
+        batch_id     = $BatchId
+        zabbix_host  = $env:COMPUTERNAME
+        computername = $env:COMPUTERNAME
+        hostname     = $env:COMPUTERNAME
+        exit_code    = $ExitCode
+        status       = $Status
+        message      = $Message
     }
     if ($AgentId) { $body["agent_id"] = $AgentId }
     if ($Version) { $body["version"] = $Version }
@@ -96,41 +261,51 @@ function Send-Callback {
         Write-Log "Callback sent: $Status (exit=$ExitCode)"
     } catch {
         Write-Log "Callback FAILED: $_" "ERROR"
-        # Don't change exit code for callback failure — report original status
     }
 }
 
-# ═══════════════════════════════════════════
-# MAIN
-# ═══════════════════════════════════════════
 $exitCode = 0
+$tempExe = $null
 
 try {
-    Write-Log "═══ Reap3r Enrollment Start ═══"
-    Write-Log "Host: $env:COMPUTERNAME | DAT: $($Dat.Substring(0, [Math]::Min(8, $Dat.Length)))*** | Batch: $BatchId"
-    Write-Log "Server: $Server"
+    if ($Dat.Length -ne 64 -or $Dat -notmatch '^[a-fA-F0-9]{64}$') {
+        throw "DAT must be a 64-char hex string"
+    }
 
-    # ── 1. Idempotence check ──
-    $svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-    if ($svc -and $svc.Status -eq "Running") {
-        Write-Log "Agent already installed and running — skipping"
+    $wsServer = Convert-ToWsServer -RawServer $Server
+
+    Write-Log "=== Reap3r enrollment start ==="
+    Write-Log "Host: $env:COMPUTERNAME | Batch: $BatchId | DAT: $($Dat.Substring(0, 8))***"
+    Write-Log "Server HTTP: $Server"
+    Write-Log "Server WS  : $wsServer"
+
+    $alreadySvc = Find-RunningService
+    if ($alreadySvc -and (Test-Path $AgentExe)) {
+        Write-Log "Agent already installed and running ($($alreadySvc.Name)); skipping"
         $exitCode = 10
-        Send-Callback -ExitCode 10 -Status "ALREADY_INSTALLED" -Message "Service $ServiceName is already running"
+        Send-Callback -ExitCode 10 -Status "ALREADY_INSTALLED" -Message "Service $($alreadySvc.Name) is already running"
         exit 10
     }
 
-    # ── 2. Download agent ──
-    Write-Log "Downloading agent binary..."
-    if (-not (Test-Path $InstallDir)) { New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null }
+    $preferredArch = Get-PreferredAgentArch
+    $archCandidates = if ($preferredArch -eq "x86_64") { @("x86_64", "x86") } else { @("x86") }
 
-    $downloadUrl = "$Server/api/agent-binary/download?os=windows&arch=x86_64&dat=$Dat"
-    $tempExe = Join-Path $env:TEMP "reap3r-agent-download.exe"
+    Write-Log "Downloading agent binary... preferred_arch=$preferredArch candidates=$($archCandidates -join ',')"
+    if (-not (Test-Path $InstallDir)) {
+        New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
+    }
+    $downloadCandidates = Get-DownloadCandidates -BaseServer $Server -DeployDat $Dat -Architectures $archCandidates
+    $tempExe = Join-Path $env:TEMP ("reap3r-agent-download-{0}.exe" -f ([Guid]::NewGuid().ToString("N")))
 
     try {
-        $wc = New-Object System.Net.WebClient
-        $wc.Headers.Add("X-Deploy-DAT", $Dat)
-        $wc.DownloadFile($downloadUrl, $tempExe)
-        Write-Log "Download complete: $(((Get-Item $tempExe).Length / 1MB).ToString('F2')) MB"
+        $dl = Invoke-AgentDownload `
+            -Candidates $downloadCandidates `
+            -OutFile $tempExe `
+            -DeployDat $Dat `
+            -RetryCount $DownloadRetryCount `
+            -RetryBackoffSec $DownloadRetryBackoffSec `
+            -TimeoutSec $DownloadTimeoutSec
+        Write-Log "Download complete: arch=$($dl.Arch) size=$(([double]$dl.SizeBytes / 1MB).ToString('F2')) MB source=$($dl.Url)"
     } catch {
         Write-Log "Download FAILED: $_" "ERROR"
         $exitCode = 20
@@ -138,29 +313,59 @@ try {
         exit 20
     }
 
-    # ── 3. Stop existing service if present ──
-    if ($svc) {
-        Write-Log "Stopping existing service..."
-        Stop-Service -Name $ServiceName -Force -ErrorAction SilentlyContinue
-        Start-Sleep -Seconds 2
+    foreach ($name in Get-ServiceCandidates) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($svc -and $svc.Status -ne "Stopped") {
+            Write-Log "Stopping existing service: $name"
+            Stop-Service -Name $name -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    # ── 4. Install / copy binary ──
     Write-Log "Installing agent to $InstallDir..."
     try {
         Copy-Item -Path $tempExe -Destination $AgentExe -Force
         Remove-Item $tempExe -Force -ErrorAction SilentlyContinue
+        $tempExe = $null
 
-        # Write config if not exists
-        $configPath = Join-Path $InstallDir "config.json"
-        if (-not (Test-Path $configPath)) {
-            $config = @{
-                server_url = $Server
-                dat        = $Dat
-                log_level  = "info"
-            } | ConvertTo-Json
-            Set-Content -Path $configPath -Value $config -Encoding UTF8
-            Write-Log "Config written to $configPath"
+        $supportsInstall = Test-AgentSupportsFlag -ExePath $AgentExe -Flag "--install"
+        $supportsEnroll = Test-AgentSupportsFlag -ExePath $AgentExe -Flag "--enroll"
+        $supportsRun = Test-AgentSupportsFlag -ExePath $AgentExe -Flag "--run"
+
+        if ($supportsInstall) {
+            Write-Log "Using native installer (--install)..."
+            $installCode = Invoke-AgentProcess -Arguments @("--install", "--server", $wsServer, "--token", $Dat)
+            if ($installCode -ne 0) {
+                throw "Agent --install failed with exit code $installCode"
+            }
+        } else {
+            if (-not $supportsEnroll) {
+                throw "Agent binary too old: missing --install and --enroll support"
+            }
+
+            Write-Log "Fallback mode: --enroll + service registration"
+            $enrollCode = Invoke-AgentProcess -Arguments @("--enroll", "--server", $wsServer, "--token", $Dat)
+            if ($enrollCode -ne 0) {
+                throw "Agent --enroll failed with exit code $enrollCode"
+            }
+
+            $existingSvc = Get-ExistingService
+            $serviceName = if ($existingSvc) { $existingSvc.Name } else { $PrimaryServiceName }
+            $binPath = if ($supportsRun) { "`"$AgentExe`" --run" } else { "`"$AgentExe`"" }
+
+            if ($existingSvc) {
+                & sc.exe config $serviceName binPath= $binPath start= auto | Out-Null
+            } else {
+                New-Service -Name $serviceName `
+                    -BinaryPathName $binPath `
+                    -DisplayName "Reap3r Agent" `
+                    -Description "MASSVISION Reap3r endpoint agent" `
+                    -StartupType Automatic | Out-Null
+            }
+
+            & sc.exe description $serviceName "MASSVISION Reap3r endpoint agent" | Out-Null
+            & sc.exe failure $serviceName reset= 0 actions= restart/5000/restart/5000/restart/5000 | Out-Null
+            & sc.exe failureflag $serviceName 1 | Out-Null
+            Start-Service -Name $serviceName
         }
     } catch {
         Write-Log "Install FAILED: $_" "ERROR"
@@ -169,48 +374,38 @@ try {
         exit 30
     }
 
-    # ── 5. Create/start Windows service ──
-    Write-Log "Configuring Windows service..."
-    try {
-        $existingSvc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if (-not $existingSvc) {
-            # Create service
-            $binPath = "`"$AgentExe`" service"
-            New-Service -Name $ServiceName -BinaryPathName $binPath `
-                -DisplayName "Reap3r Agent" `
-                -Description "MASSVISION Reap3r endpoint agent" `
-                -StartupType Automatic | Out-Null
-            Write-Log "Service created"
-        }
+    Write-Log "Waiting for service to reach Running state..."
+    $running = $null
+    for ($i = 0; $i -lt 30; $i++) {
+        $running = Find-RunningService
+        if ($running) { break }
+        Start-Sleep -Seconds 1
+    }
 
-        Start-Service -Name $ServiceName
-        Start-Sleep -Seconds 3
-
-        $svcCheck = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-        if ($svcCheck.Status -ne "Running") {
-            throw "Service did not start (status: $($svcCheck.Status))"
-        }
-        Write-Log "Service started successfully"
-    } catch {
-        Write-Log "Service start FAILED: $_" "ERROR"
+    if (-not $running) {
         $exitCode = 40
-        Send-Callback -ExitCode 40 -Status "SERVICE_START_FAILED" -Message "$_"
+        Write-Log "Service start FAILED: no running service found in candidates" "ERROR"
+        Send-Callback -ExitCode 40 -Status "SERVICE_START_FAILED" -Message "No running service found after install"
         exit 40
     }
 
-    # ── 6. Success ──
-    Write-Log "═══ Enrollment SUCCESS ═══"
-    $exitCode = 0
-    Send-Callback -ExitCode 0 -Status "INSTALLED" -Message "Agent installed and running on $env:COMPUTERNAME"
+    $version = ""
+    try {
+        $version = (& $AgentExe --version 2>$null | Select-Object -First 1).Trim()
+    } catch {}
 
-} catch {
+    Write-Log "Enrollment SUCCESS - service $($running.Name) running"
+    Send-Callback -ExitCode 0 -Status "INSTALLED" -Message "Agent installed and running on $env:COMPUTERNAME ($($running.Name))" -Version $version
+}
+catch {
     Write-Log "UNEXPECTED ERROR: $_" "ERROR"
     if ($exitCode -eq 0) { $exitCode = 30 }
     Send-Callback -ExitCode $exitCode -Status "UNEXPECTED_ERROR" -Message "$_"
-} finally {
-    # Cleanup temp files
-    $tempExe = Join-Path $env:TEMP "reap3r-agent-download.exe"
-    if (Test-Path $tempExe) { Remove-Item $tempExe -Force -ErrorAction SilentlyContinue }
+}
+finally {
+    if ($tempExe -and (Test-Path $tempExe)) {
+        Remove-Item $tempExe -Force -ErrorAction SilentlyContinue
+    }
 }
 
 exit $exitCode

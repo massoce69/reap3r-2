@@ -1,7 +1,7 @@
-; ════════════════════════════════════════════════════════════════════════════════
-; MASSVISION Reap3r Agent — Inno Setup Installer (Universal)
+﻿; â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+; MASSVISION Reap3r Agent â€” Inno Setup Installer (Universal)
 ;
-; Compatible: Windows 7 SP1 → Windows Server 2025 (x86 + x64)
+; Compatible: Windows 7 SP1 â†’ Windows Server 2025 (x86 + x64)
 ; Build:      "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" reap3r-agent.iss
 ;
 ; Silent install (GPO/Intune/Zabbix/SCCM):
@@ -9,14 +9,14 @@
 ;
 ; Unattended uninstall:
 ;   "C:\Program Files\MASSVISION\Reap3r Agent\unins000.exe" /VERYSILENT
-; ════════════════════════════════════════════════════════════════════════════════
+; â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
 
 #define AppName      "MASSVISION Reap3r Agent"
 #define AppVersion   "1.2.0"
 #define AppPublisher "MASSVISION"
 #define AppURL       "https://massvision.io"
 #define ExeName      "reap3r-agent.exe"
-#define ServiceName  "MASSVISION-Reap3r-Agent"
+#define ServiceName  "XEFI-Agent-2"
 #define ServiceDisp  "MASSVISION Reap3r Agent"
 
 [Setup]
@@ -60,12 +60,12 @@ Source: "..\dist\reap3r-agent-x64.exe"; DestDir: "{app}"; DestName: "{#ExeName}"
 Source: "..\dist\reap3r-agent-x86.exe"; DestDir: "{app}"; DestName: "{#ExeName}"; Check: not Is64BitInstallMode; Flags: ignoreversion
 
 [Dirs]
-Name: "{commonappdata}\Reap3r"; Permissions: admins-full system-full
-Name: "{commonappdata}\Reap3r\logs"; Permissions: admins-full system-full
+Name: "{commonappdata}\XefiAgent2"; Permissions: admins-full system-full
+Name: "{commonappdata}\XefiAgent2\logs"; Permissions: admins-full system-full
 
 [Icons]
-Name: "{group}\{#AppName} — Diagnostics"; Filename: "{app}\{#ExeName}"; Parameters: "--diagnose"; WorkingDir: "{app}"
-Name: "{group}\{#AppName} — View Logs"; Filename: "notepad.exe"; Parameters: "{commonappdata}\Reap3r\logs\agent.log"
+Name: "{group}\{#AppName} â€” Diagnostics"; Filename: "{app}\{#ExeName}"; Parameters: "--diagnose"; WorkingDir: "{app}"
+Name: "{group}\{#AppName} â€” View Logs"; Filename: "notepad.exe"; Parameters: "{commonappdata}\XefiAgent2\logs\agent.log"
 Name: "{group}\Uninstall {#AppName}"; Filename: "{uninstallexe}"
 
 [Run]

@@ -110,10 +110,18 @@ export const WakeOnLanPayload = z.object({
 export const UpdateAgentPayload = z.object({
   version: z.string(),
   download_url: z.string().url(),
+  download_urls: z.array(z.string().url()).min(1).optional(),
   sha256: z.string().length(64),
-  sig_ed25519: z.string().min(64),
+  sig_ed25519: z.string().min(64).optional(),
   signer_thumbprint: z.string().min(40).max(64).optional(),
   require_authenticode: z.boolean().optional(),
+  retry_count: z.number().int().min(0).max(10).optional(),
+  retry_backoff_ms: z.number().int().min(0).max(60000).optional(),
+  defer_seconds: z.number().int().min(0).max(86400).optional(),
+  jitter_max_seconds: z.number().int().min(0).max(86400).optional(),
+  service_name: z.string().min(1).max(128).optional(),
+  launchd_label: z.string().min(1).max(255).optional(),
+  self_restart_delay_seconds: z.number().int().min(1).max(120).optional(),
   force: z.boolean().default(false),
 });
 

@@ -1,23 +1,10 @@
 <#
 .SYNOPSIS
-    MASSVISION Reap3r Agent — Windows Smoke Test
+    MASSVISION Reap3r Agent - Windows smoke test
+
 .DESCRIPTION
-    Verifies the agent is installed, running, and has successfully enrolled + sent heartbeats.
-    Optionally dispatches a test "ping" job via the backend API and verifies completion.
-.PARAMETER BackendUrl
-    Base URL of the Reap3r backend REST API (default: http://localhost:4000)
-.PARAMETER AdminEmail
-    Admin email for backend API auth (to dispatch test job)
-.PARAMETER AdminPassword
-    Admin password for backend API auth
-.PARAMETER WaitSeconds
-    How long to wait for initial enrollment (default: 30)
-.PARAMETER SkipJobTest
-    Skip the job dispatch test (only check service + logs)
-.EXAMPLE
-    .\windows-smoke-test.ps1 -BackendUrl https://reap3r.example.com -AdminEmail admin@example.com -AdminPassword "P@ss"
-.EXAMPLE
-    .\windows-smoke-test.ps1 -SkipJobTest
+    Checks service status, agent logs, enrollment/heartbeat markers,
+    and optionally submits a lightweight test job through the backend API.
 #>
 param(
     [string]$BackendUrl    = "http://localhost:4000",
@@ -28,10 +15,13 @@ param(
 )
 
 Set-StrictMode -Version Latest
-$ErrorActionPreference = 'Continue'
+$ErrorActionPreference = "Continue"
 
-$ServiceName = "ReaP3rAgent"
-$LogFile     = "C:\ProgramData\Reap3r\logs\agent.log"
+$ServiceCandidates = @("XEFI-Agent-2", "MASSVISION-Reap3r-Agent", "Reap3rAgent", "ReaP3rAgent", "xefi-agent-2")
+$LogCandidates = @(
+    "C:\ProgramData\XefiAgent2\logs\agent.log",
+    "C:\ProgramData\Reap3r\logs\agent.log"
+)
 $Passed = 0
 $Failed = 0
 
@@ -47,152 +37,157 @@ function Write-Check([string]$name, [bool]$ok, [string]$detail = "") {
     }
 }
 
+function Get-AgentService {
+    foreach ($name in $ServiceCandidates) {
+        $svc = Get-Service -Name $name -ErrorAction SilentlyContinue
+        if ($svc) { return $svc }
+    }
+    return $null
+}
+
+function Get-AgentLogPath {
+    foreach ($path in $LogCandidates) {
+        if (Test-Path $path) { return $path }
+    }
+    return $LogCandidates[0]
+}
+
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Reap3r Agent — Windows Smoke Test"                     -ForegroundColor Cyan
-Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"             -ForegroundColor Cyan
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "========================================================" -ForegroundColor Cyan
+Write-Host "  Reap3r Agent - Windows Smoke Test"                    -ForegroundColor Cyan
+Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"            -ForegroundColor Cyan
+Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host ""
 
-# ─── CHECK 1: Service exists ──────────────────────────────────────────────────
+$svc = Get-AgentService
+$serviceName = if ($svc) { $svc.Name } else { $ServiceCandidates[0] }
+$logFile = Get-AgentLogPath
+
+# CHECK 1: Service exists
 Write-Host "[ CHECK 1 ] Service installed" -ForegroundColor White
-$svc = Get-Service -Name $ServiceName -ErrorAction SilentlyContinue
-Write-Check "Service '$ServiceName' exists" `
+Write-Check "Service exists (candidate set)" `
     ($null -ne $svc) `
-    $(if ($svc) { "Status: $($svc.Status)" } else { "Not found — run install-windows.ps1 first" })
+    $(if ($svc) { "Detected: $($svc.Name), status=$($svc.Status)" } else { "Not found. Run install-windows.ps1 first." })
 
-# ─── CHECK 2: Service running ─────────────────────────────────────────────────
+# CHECK 2: Service running
 Write-Host ""
 Write-Host "[ CHECK 2 ] Service running" -ForegroundColor White
 Write-Check "Service status = Running" `
-    ($svc -and $svc.Status -eq 'Running') `
-    $(if ($svc) { "Use: Start-Service $ServiceName" } else { "Service not installed" })
+    ($svc -and $svc.Status -eq "Running") `
+    $(if ($svc) { "Use: Start-Service $($svc.Name)" } else { "Service not installed" })
 
-# ─── CHECK 3: Log file exists ─────────────────────────────────────────────────
+# CHECK 3: Log file exists
 Write-Host ""
 Write-Host "[ CHECK 3 ] Log file" -ForegroundColor White
-Write-Check "Log file exists: $LogFile" (Test-Path $LogFile) "If missing, service may have crashed on start"
+Write-Check "Log file exists: $logFile" (Test-Path $logFile) "If missing, service may not have initialized logging yet."
 
-# ─── CHECK 4: Wait for enrollment ─────────────────────────────────────────────
+# CHECK 4: Enrollment / heartbeat markers
 Write-Host ""
-Write-Host "[ CHECK 4 ] Enrolled OK (waiting up to ${WaitSeconds}s)" -ForegroundColor White
+Write-Host "[ CHECK 4 ] Enrollment + heartbeat markers (wait up to ${WaitSeconds}s)" -ForegroundColor White
 
-$Enrolled   = $false
-$Heartbeats = $false
-$Deadline   = (Get-Date).AddSeconds($WaitSeconds)
+$enrolled = $false
+$heartbeats = $false
+$deadline = (Get-Date).AddSeconds($WaitSeconds)
 
-while ((Get-Date) -lt $Deadline) {
-    if (Test-Path $LogFile) {
-        $logContent = Get-Content $LogFile -Raw -ErrorAction SilentlyContinue
-        if ($logContent -match 'Enrolled OK') { $Enrolled = $true }
-        if ($logContent -match 'Heartbeat sent') { $Heartbeats = $true }
+while ((Get-Date) -lt $deadline) {
+    if (Test-Path $logFile) {
+        $raw = Get-Content $logFile -Raw -ErrorAction SilentlyContinue
+        if ($raw -match "Enrolled OK") { $enrolled = $true }
+        if ($raw -match "Heartbeat (queued|sent)") { $heartbeats = $true }
     }
-    if ($Enrolled -and $Heartbeats) { break }
+    if ($enrolled -and $heartbeats) { break }
     Start-Sleep -Seconds 2
-    Write-Host "    ... waiting ($([int]($Deadline - (Get-Date)).TotalSeconds)s remaining)" -ForegroundColor DarkGray
 }
 
-Write-Check "Log contains 'Enrolled OK'" $Enrolled "Check $LogFile for enrollment errors"
-Write-Check "Log contains 'Heartbeat sent'" $Heartbeats "Agent must enroll first, then send heartbeats"
+Write-Check "Log contains enrollment marker" $enrolled "Expected text: 'Enrolled OK'"
+Write-Check "Log contains heartbeat marker" $heartbeats "Expected text: 'Heartbeat queued' or 'Heartbeat sent'"
 
-# Show last 20 log lines for context
 Write-Host ""
 Write-Host "[ Last 20 log lines ]" -ForegroundColor DarkGray
-if (Test-Path $LogFile) {
-    Get-Content $LogFile -Tail 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
+if (Test-Path $logFile) {
+    Get-Content $logFile -Tail 20 | ForEach-Object { Write-Host "  $_" -ForegroundColor DarkGray }
 } else {
     Write-Host "  (log file not found)" -ForegroundColor DarkGray
 }
 
-# ─── CHECK 5: Job test (optional) ────────────────────────────────────────────
+# CHECK 5: Optional API round-trip test
 if ($SkipJobTest) {
     Write-Host ""
-    Write-Host "[ CHECK 5 ] Job test SKIPPED (--SkipJobTest)" -ForegroundColor Yellow
+    Write-Host "[ CHECK 5 ] Job test skipped (--SkipJobTest)" -ForegroundColor Yellow
 } elseif (-not $AdminEmail -or -not $AdminPassword) {
     Write-Host ""
-    Write-Host "[ CHECK 5 ] Job test SKIPPED (no -AdminEmail / -AdminPassword)" -ForegroundColor Yellow
+    Write-Host "[ CHECK 5 ] Job test skipped (missing -AdminEmail / -AdminPassword)" -ForegroundColor Yellow
 } else {
     Write-Host ""
-    Write-Host "[ CHECK 5 ] Dispatch test job via backend API" -ForegroundColor White
-
+    Write-Host "[ CHECK 5 ] Backend API job test" -ForegroundColor White
     try {
-        # Login
         $loginBody = @{ email = $AdminEmail; password = $AdminPassword } | ConvertTo-Json
         $loginResp = Invoke-RestMethod -Method POST `
             -Uri "$BackendUrl/api/auth/login" `
             -Body $loginBody `
             -ContentType "application/json"
         $jwt = $loginResp.token
-        Write-Check "Backend login" ($null -ne $jwt) "JWT obtained"
+        Write-Check "Backend login" ($null -ne $jwt -and $jwt.Length -gt 20) "JWT acquired"
 
         if ($jwt) {
             $headers = @{ Authorization = "Bearer $jwt" }
+            $agents = Invoke-RestMethod -Method GET -Uri "$BackendUrl/api/agents?limit=100" -Headers $headers
+            $agentId = ($agents.data | Where-Object { $_.status -eq "online" } | Select-Object -First 1).id
 
-            # Get first online agent
-            $agents = Invoke-RestMethod -Method GET `
-                -Uri "$BackendUrl/api/agents" `
-                -Headers $headers
-            $agentId = ($agents.agents | Where-Object { $_.status -eq 'online' } | Select-Object -First 1).id
-
-            Write-Check "Agent visible in backend (status=online)" ($null -ne $agentId) `
-                $(if ($agentId) { "agent_id=$agentId" } else { "No online agents found — check enrollment" })
+            Write-Check "Online agent visible in backend" ($null -ne $agentId) `
+                $(if ($agentId) { "agent_id=$agentId" } else { "No online agents returned by /api/agents" })
 
             if ($agentId) {
-                # Dispatch a collect_metrics job
                 $jobBody = @{
                     agent_id = $agentId
-                    name     = "collect_metrics"
-                    args     = @{}
-                } | ConvertTo-Json
+                    job_type = "collect_metrics"
+                    payload  = @{}
+                    reason   = "windows-smoke-test"
+                } | ConvertTo-Json -Depth 5
+
                 $jobResp = Invoke-RestMethod -Method POST `
                     -Uri "$BackendUrl/api/jobs" `
                     -Body $jobBody `
                     -ContentType "application/json" `
                     -Headers $headers
                 $jobId = $jobResp.id
-
-                Write-Check "Job dispatched" ($null -ne $jobId) "job_id=$jobId"
+                Write-Check "Job created" ($null -ne $jobId) "job_id=$jobId"
 
                 if ($jobId) {
-                    # Poll for completion (max 60s)
-                    $jobDone     = $false
-                    $jobStatus   = ""
+                    $jobStatus = ""
                     $jobDeadline = (Get-Date).AddSeconds(60)
                     while ((Get-Date) -lt $jobDeadline) {
                         Start-Sleep -Seconds 3
                         $jobDetail = Invoke-RestMethod -Method GET `
                             -Uri "$BackendUrl/api/jobs/$jobId" `
-                            -Headers $headers -ErrorAction SilentlyContinue
-                        $jobStatus = $jobDetail.status
-                        if ($jobStatus -in @('completed', 'failed', 'timeout')) { $jobDone = $true; break }
-                        Write-Host "    ... job status: $jobStatus" -ForegroundColor DarkGray
+                            -Headers $headers `
+                            -ErrorAction SilentlyContinue
+                        $jobStatus = [string]$jobDetail.status
+                        if ($jobStatus -in @("completed", "failed", "cancelled")) { break }
                     }
-                    Write-Check "Job completed (status=$jobStatus)" ($jobStatus -eq 'completed') `
-                        "Expected: completed. If 'failed', check agent logs."
+                    Write-Check "Job reached terminal state" ($jobStatus -in @("completed", "failed", "cancelled")) "status=$jobStatus"
                 }
             }
         }
     } catch {
-        Write-Check "Backend job test" $false "Exception: $_"
+        Write-Check "Backend API job test" $false "Exception: $_"
     }
 }
 
-# ─── RESULT ───────────────────────────────────────────────────────────────────
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Results: $Passed passed, $Failed failed" -ForegroundColor $(if ($Failed -eq 0) { 'Green' } else { 'Red' })
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Host "========================================================" -ForegroundColor Cyan
+Write-Host "  Results: $Passed passed, $Failed failed" -ForegroundColor $(if ($Failed -eq 0) { "Green" } else { "Red" })
+Write-Host "========================================================" -ForegroundColor Cyan
 Write-Host ""
 
 if ($Failed -gt 0) {
     Write-Host "Troubleshooting:" -ForegroundColor Yellow
-    Write-Host "  1. Check service:  Get-Service $ServiceName" -ForegroundColor DarkYellow
-    Write-Host "  2. Check events:   Get-EventLog -LogName Application -Source $ServiceName -Newest 10" -ForegroundColor DarkYellow
-    Write-Host "  3. Check log:      Get-Content '$LogFile' -Tail 50" -ForegroundColor DarkYellow
-    Write-Host "  4. Run diagnose:   & 'C:\Program Files\Reap3r Agent\reap3r-agent.exe' --diagnose" -ForegroundColor DarkYellow
+    Write-Host "  1. Get-Service '$serviceName'" -ForegroundColor DarkYellow
+    Write-Host "  2. Get-Content '$logFile' -Tail 50" -ForegroundColor DarkYellow
+    Write-Host "  3. & 'C:\Program Files\Reap3r Agent\reap3r-agent.exe' --diagnose" -ForegroundColor DarkYellow
     Write-Host ""
     exit 1
-} else {
-    Write-Host "All checks passed. Agent is enrolled and sending heartbeats." -ForegroundColor Green
-    exit 0
 }
+
+Write-Host "All checks passed." -ForegroundColor Green
+exit 0

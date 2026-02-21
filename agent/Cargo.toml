@@ -1,13 +1,13 @@
 ﻿[package]
-name = "reap3r-agent"
+name = "xefi-agent-2"
 version = "1.2.0"
 edition = "2021"
-description = "MASSVISION Reap3r Agent - Remote management agent (Windows 7 to Server 2025)"
+description = "XEFI Agent 2 - Remote management agent (Windows 7 to Server 2025)"
 license = "Proprietary"
 build = "build.rs"
 
 [[bin]]
-name = "reap3r-agent"
+name = "xefi-agent-2"
 path = "src/main.rs"
 
 [dependencies]

@@ -175,8 +175,30 @@ export const api = {
       ),
     collectInventory: (id: string) =>
       request<any>(`/api/agents/${id}/collect-inventory`, { method: 'POST' }),
-    updateBulk: (agentIds: string[], force = false) =>
-      request<any>('/api/agents/update', { method: 'POST', body: JSON.stringify({ agent_ids: agentIds, force }) }),
+    updateBulk: (
+      agentIds: string[],
+      forceOrOptions:
+        | boolean
+        | {
+            force?: boolean;
+            download_urls?: string[];
+            retry_count?: number;
+            retry_backoff_ms?: number;
+            defer_seconds?: number;
+            jitter_max_seconds?: number;
+            service_name?: string;
+            launchd_label?: string;
+            self_restart_delay_seconds?: number;
+          } = false,
+    ) => {
+      const options = typeof forceOrOptions === 'boolean'
+        ? { force: forceOrOptions }
+        : forceOrOptions;
+      return request<any>('/api/agents/update', {
+        method: 'POST',
+        body: JSON.stringify({ agent_ids: agentIds, ...options }),
+      });
+    },
     updateManifest: () =>
       request<{ version: string; available: boolean }>('/api/agents/update/manifest'),
   },

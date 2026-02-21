@@ -13,6 +13,15 @@ let watchdogTimer: ReturnType<typeof setInterval> | null = null;
 // Active Zabbix client connections per batch
 const zabbixClients = new Map<string, ZabbixClient>();
 
+function resolveDeployCallbackKey(): string {
+  const configured = String(process.env.DEPLOY_CALLBACK_KEY || '').trim();
+  if (configured) return configured;
+  if (String(process.env.NODE_ENV || '').toLowerCase() !== 'production') {
+    return 'dev-callback-key';
+  }
+  throw new Error('DEPLOY_CALLBACK_KEY is required in production');
+}
+
 // ════════════════════════════════════════
 // MAIN TICK
 // ════════════════════════════════════════
@@ -99,7 +108,7 @@ async function processTick(): Promise<void> {
         continue;
       }
 
-      const callbackKey = process.env.DEPLOY_CALLBACK_KEY ?? 'dev-callback-key';
+      const callbackKey = resolveDeployCallbackKey();
 
       // Execute items sequentially (to respect Zabbix rate limits)
       for (const item of batchItems) {

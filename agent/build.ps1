@@ -1,17 +1,3 @@
-# ════════════════════════════════════════════════════════════════════
-#  MASSVISION Reap3r Agent — Multi-Architecture Build Script
-#  Builds x64 + x86 static binaries for Windows 7 → Server 2025
-#
-#  Prerequisites:
-#    rustup target add x86_64-pc-windows-msvc
-#    rustup target add i686-pc-windows-msvc
-#
-#  Output:  agent/dist/
-#    reap3r-agent-x64.exe   (64-bit)
-#    reap3r-agent-x86.exe   (32-bit)
-#    checksums.sha256
-# ════════════════════════════════════════════════════════════════════
-
 param(
     [switch]$SkipX86,
     [switch]$SkipX64,
@@ -19,101 +5,116 @@ param(
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 Set-Location $PSScriptRoot
 
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Reap3r Agent — Multi-Arch Build" -ForegroundColor Cyan
-Write-Host "  $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')" -ForegroundColor Gray
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host ""
-
-# Ensure Rust toolchain is available
-if (-not (Get-Command "cargo" -ErrorAction SilentlyContinue)) {
-    Write-Host "[ERROR] Rust/Cargo not found. Install from https://rustup.rs" -ForegroundColor Red
-    exit 1
+function Write-Info([string]$Message) {
+    Write-Host "[*] $Message" -ForegroundColor Yellow
 }
 
-$version = (Select-String 'version = "([^"]+)"' Cargo.toml | ForEach-Object { $_.Matches[0].Groups[1].Value })
-Write-Host "[*] Building Reap3r Agent v$version" -ForegroundColor Yellow
-Write-Host ""
-
-# Create dist directory
-$distDir = Join-Path $PSScriptRoot "dist"
-if ($Clean -and (Test-Path $distDir)) {
-    Remove-Item $distDir -Recurse -Force
+function Write-Ok([string]$Message) {
+    Write-Host "[OK] $Message" -ForegroundColor Green
 }
-New-Item -ItemType Directory -Path $distDir -Force | Out-Null
 
-# ── Install targets if not present ──
-$targets = @()
-if (-not $SkipX64) { $targets += "x86_64-pc-windows-msvc" }
-if (-not $SkipX86) { $targets += "i686-pc-windows-msvc" }
+if (-not (Get-Command cargo -ErrorAction SilentlyContinue)) {
+    throw "cargo not found. Install Rust from https://rustup.rs"
+}
 
-foreach ($target in $targets) {
-    $installed = rustup target list --installed 2>$null | Select-String $target
-    if (-not $installed) {
-        Write-Host "[*] Installing target: $target" -ForegroundColor Yellow
-        rustup target add $target
+if ($SkipX64 -and $SkipX86) {
+    throw "Nothing to build: both -SkipX64 and -SkipX86 were set."
+}
+
+function Ensure-Target([string]$Target) {
+    $installed = rustup target list --installed 2>$null
+    if ($installed -notcontains $Target) {
+        Write-Info "Installing Rust target $Target"
+        rustup target add $Target
         if ($LASTEXITCODE -ne 0) {
-            Write-Host "[ERROR] Failed to add target $target" -ForegroundColor Red
-            exit 1
+            throw "Failed to install Rust target $Target"
         }
     }
 }
 
-# ── Build x64 ──
+function Resolve-CompiledAgentBinary([string]$TargetTriple) {
+    $candidates = @(
+        "target\$TargetTriple\release\xefi-agent-2.exe",
+        "target\$TargetTriple\release\reap3r-agent.exe"
+    ) | Where-Object { Test-Path $_ }
+
+    if ($candidates.Count -eq 0) {
+        throw "No compiled binary found for target $TargetTriple"
+    }
+
+    return $candidates |
+        Sort-Object { (Get-Item $_).LastWriteTimeUtc } -Descending |
+        Select-Object -First 1
+}
+
+function Build-AgentTarget(
+    [string]$TargetTriple,
+    [string]$PrimaryOutputName,
+    [string]$LegacyOutputName,
+    [string]$DistDir
+) {
+    Ensure-Target $TargetTriple
+    Write-Info "Building $TargetTriple (static CRT)"
+    $env:RUSTFLAGS = "-C target-feature=+crt-static"
+    cargo build --release --target $TargetTriple
+    if ($LASTEXITCODE -ne 0) {
+        throw "Build failed for target $TargetTriple"
+    }
+
+    $source = Resolve-CompiledAgentBinary $TargetTriple
+    $primaryOut = Join-Path $DistDir $PrimaryOutputName
+    $legacyOut = Join-Path $DistDir $LegacyOutputName
+    Copy-Item $source $primaryOut -Force
+    Copy-Item $source $legacyOut -Force
+
+    $sizeMb = [Math]::Round((Get-Item $primaryOut).Length / 1MB, 2)
+    Write-Ok "$PrimaryOutputName ($sizeMb MB) from $source"
+}
+
+$versionMatch = Select-String -Path "Cargo.toml" -Pattern '^version\s*=\s*"([^"]+)"'
+$version = if ($versionMatch) { $versionMatch.Matches[0].Groups[1].Value } else { "unknown" }
+Write-Host "Reap3r agent build - version $version" -ForegroundColor Cyan
+
+$distDir = Join-Path $PSScriptRoot "dist"
+if ($Clean -and (Test-Path $distDir)) {
+    Remove-Item $distDir -Recurse -Force
+}
+New-Item -Path $distDir -ItemType Directory -Force | Out-Null
+
 if (-not $SkipX64) {
-    Write-Host "[*] Building x64 (x86_64-pc-windows-msvc)..." -ForegroundColor Yellow
-    $env:RUSTFLAGS = "-C target-feature=+crt-static"
-    cargo build --release --target x86_64-pc-windows-msvc 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[ERROR] x64 build failed!" -ForegroundColor Red
-        exit 1
-    }
-    $src = "target\x86_64-pc-windows-msvc\release\reap3r-agent.exe"
-    $dst = Join-Path $distDir "reap3r-agent-x64.exe"
-    Copy-Item $src $dst -Force
-    $size = [math]::Round((Get-Item $dst).Length / 1MB, 2)
-    Write-Host "[OK] x64 binary: $dst ($size MB)" -ForegroundColor Green
+    Build-AgentTarget `
+        -TargetTriple "x86_64-pc-windows-msvc" `
+        -PrimaryOutputName "agent-x64.exe" `
+        -LegacyOutputName "reap3r-agent-x64.exe" `
+        -DistDir $distDir
 }
 
-# ── Build x86 (32-bit) ──
 if (-not $SkipX86) {
-    Write-Host "[*] Building x86 (i686-pc-windows-msvc)..." -ForegroundColor Yellow
-    $env:RUSTFLAGS = "-C target-feature=+crt-static"
-    cargo build --release --target i686-pc-windows-msvc 2>&1
-    if ($LASTEXITCODE -ne 0) {
-        Write-Host "[ERROR] x86 build failed!" -ForegroundColor Red
-        exit 1
-    }
-    $src = "target\i686-pc-windows-msvc\release\reap3r-agent.exe"
-    $dst = Join-Path $distDir "reap3r-agent-x86.exe"
-    Copy-Item $src $dst -Force
-    $size = [math]::Round((Get-Item $dst).Length / 1MB, 2)
-    Write-Host "[OK] x86 binary: $dst ($size MB)" -ForegroundColor Green
+    Build-AgentTarget `
+        -TargetTriple "i686-pc-windows-msvc" `
+        -PrimaryOutputName "agent-x86.exe" `
+        -LegacyOutputName "reap3r-agent-x86.exe" `
+        -DistDir $distDir
 }
 
-# ── Generate SHA256 checksums ──
-Write-Host ""
-Write-Host "[*] Generating checksums..." -ForegroundColor Yellow
 $checksumFile = Join-Path $distDir "checksums.sha256"
-"# Reap3r Agent v$version — SHA256 Checksums" | Out-File $checksumFile
-"# Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss UTC' -AsUTC)" | Out-File $checksumFile -Append
-"" | Out-File $checksumFile -Append
+$header = @(
+    "# Reap3r Agent $version checksums"
+    "# Generated: $(Get-Date -Format 'yyyy-MM-dd HH:mm:ss')"
+    ""
+)
+$header | Set-Content -Path $checksumFile -Encoding Ascii
 
-Get-ChildItem $distDir -Filter "*.exe" | ForEach-Object {
-    $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
-    "$hash  $($_.Name)" | Out-File $checksumFile -Append
-    Write-Host "  $hash  $($_.Name)"
-}
+Get-ChildItem -Path $distDir -Filter "*.exe" |
+    Sort-Object Name |
+    ForEach-Object {
+        $hash = (Get-FileHash $_.FullName -Algorithm SHA256).Hash.ToLower()
+        "$hash  $($_.Name)" | Add-Content -Path $checksumFile -Encoding Ascii
+    }
 
-# ── Summary ──
 Write-Host ""
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
-Write-Host "  Build complete! Files in: $distDir" -ForegroundColor Green
-Write-Host ""
-Get-ChildItem $distDir | Format-Table Name, @{N="Size";E={"{0:N2} MB" -f ($_.Length/1MB)}} -AutoSize
-Write-Host "  Next steps:" -ForegroundColor Yellow
-Write-Host "    1. Copy reap3r-agent-x64.exe to the backend upload/ folder" -ForegroundColor Gray
-Write-Host "    2. Or build the installer: iscc installer\reap3r-agent.iss" -ForegroundColor Gray
-Write-Host "═══════════════════════════════════════════════════════" -ForegroundColor Cyan
+Write-Ok "Build complete. Artifacts:"
+Get-ChildItem -Path $distDir | Select-Object Name, Length, LastWriteTime | Format-Table -AutoSize

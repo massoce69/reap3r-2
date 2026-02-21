@@ -75,6 +75,9 @@ export default function AgentDetailPage() {
   const [rdMonitorsLoading, setRdMonitorsLoading] = useState(false);
   const [rdInteractive, setRdInteractive] = useState(false); // interactive control mode
   const rdImgRef = useRef<HTMLImageElement>(null);
+  const rdPressedKeysRef = useRef<Set<number>>(new Set());
+  const rdPressedMouseButtonsRef = useRef<Set<'left' | 'middle' | 'right'>>(new Set());
+  const rdLastCoordsRef = useRef<{ x: number; y: number }>({ x: 0.5, y: 0.5 });
 
   // File explorer state
   const [fePath, setFePath] = useState(agent?.os === 'windows' ? 'C:\\' : '/');
@@ -416,6 +419,7 @@ export default function AgentDetailPage() {
   const stopRdStream = async () => {
     if (!agent) return;
     console.log('[RD] Stopping stream');
+    releaseRdInputs('stream_stop');
     setRdStreaming(false);
     setRdSessionId(null);
     setRdFrame(null);
@@ -434,13 +438,14 @@ export default function AgentDetailPage() {
     if (!rdStreaming || !agent) return;
     console.log('[RD] Subscribing to rd:frame events for agent:', agent.id, 'ws connected:', realtime.connected);
     let frameRx = 0;
+    const expectedSessionId = rdSessionId;
     const unsub = realtime.on('rd:frame', (msg: any) => {
       const p = msg.payload ?? msg;
       frameRx++;
       if (frameRx <= 3 || frameRx % 30 === 0) {
         console.log(`[RD] Frame received #${frameRx}, agent_id=${p.agent_id}, match=${p.agent_id === agent.id}, dataLen=${p.data?.length || 0}`);
       }
-      if (p.agent_id === agent.id) {
+      if (p.agent_id === agent.id && (!expectedSessionId || !p.session_id || p.session_id === expectedSessionId)) {
         setRdFrame(`data:image/jpeg;base64,${p.data}`);
         setRdFrameCount(prev => prev + 1);
       }
@@ -448,14 +453,14 @@ export default function AgentDetailPage() {
     // Also listen for RD capture errors
     const unsubErr = realtime.on('rd:error', (msg: any) => {
       const p = msg.payload ?? msg;
-      if (p.agent_id === agent.id) {
+      if (p.agent_id === agent.id && (!expectedSessionId || !p.session_id || p.session_id === expectedSessionId)) {
         console.error('[RD] Capture error from agent:', p.error);
         setRdError(p.error || 'Remote desktop capture failed on agent');
         setRdStreaming(false);
       }
     });
     return () => { console.log('[RD] Unsubscribing from rd:frame'); unsub(); unsubErr(); };
-  }, [rdStreaming, agent?.id]);
+  }, [rdStreaming, agent?.id, rdSessionId]);
 
   // Stop stream when leaving tab
   useEffect(() => {
@@ -560,48 +565,79 @@ export default function AgentDetailPage() {
   };
 
   /** Compute normalized (0–1) coordinates from mouse event on the RD image. */
-  const getNormalizedCoords = (e: React.MouseEvent<HTMLImageElement>) => {
+  const getNormalizedCoordsFromClient = (clientX: number, clientY: number) => {
     const img = rdImgRef.current;
-    if (!img) return { x: 0, y: 0 };
+    if (!img) return { x: rdLastCoordsRef.current.x, y: rdLastCoordsRef.current.y, inFrame: false };
     const rect = img.getBoundingClientRect();
-    // The image is object-contain, so the displayed area may not fill the rect.
-    // We need to calculate the actual displayed image area.
     const imgNatW = img.naturalWidth;
     const imgNatH = img.naturalHeight;
-    if (!imgNatW || !imgNatH) return { x: 0, y: 0 };
+    if (!imgNatW || !imgNatH) return { x: rdLastCoordsRef.current.x, y: rdLastCoordsRef.current.y, inFrame: false };
 
     const containerAspect = rect.width / rect.height;
     const imgAspect = imgNatW / imgNatH;
 
     let displayW: number, displayH: number, offsetX: number, offsetY: number;
     if (imgAspect > containerAspect) {
-      // Width-constrained
       displayW = rect.width;
       displayH = rect.width / imgAspect;
       offsetX = 0;
       offsetY = (rect.height - displayH) / 2;
     } else {
-      // Height-constrained
       displayH = rect.height;
       displayW = rect.height * imgAspect;
       offsetX = (rect.width - displayW) / 2;
       offsetY = 0;
     }
 
-    const x = Math.max(0, Math.min(1, (e.clientX - rect.left - offsetX) / displayW));
-    const y = Math.max(0, Math.min(1, (e.clientY - rect.top - offsetY) / displayH));
-    return { x, y };
+    const relX = (clientX - rect.left - offsetX) / displayW;
+    const relY = (clientY - rect.top - offsetY) / displayH;
+    const inFrame = relX >= 0 && relX <= 1 && relY >= 0 && relY <= 1;
+    const x = Math.max(0, Math.min(1, relX));
+    const y = Math.max(0, Math.min(1, relY));
+    rdLastCoordsRef.current = { x, y };
+    return { x, y, inFrame };
   };
 
+  const getNormalizedCoords = (e: React.MouseEvent<HTMLImageElement>) =>
+    getNormalizedCoordsFromClient(e.clientX, e.clientY);
+
+  const toMouseButton = (buttonCode: number): 'left' | 'middle' | 'right' =>
+    buttonCode === 2 ? 'right' : buttonCode === 1 ? 'middle' : 'left';
+
   /** Send an RD input event via WebSocket. */
-  const sendRdInput = (input_type: string, extra: Record<string, unknown> = {}) => {
-    if (!agent || !rdStreaming || !rdInteractive) return;
+  const sendRdInput = (input_type: string, extra: Record<string, unknown> = {}, force = false) => {
+    if (!agent || !rdStreaming) return;
+    if (!force && !rdInteractive) return;
     realtime.send('rd:input', {
       agent_id: agent.id,
+      session_id: rdSessionId,
       input_type,
       monitor: rdSelectedMonitor,
       ...extra,
     });
+  };
+
+  const releaseRdInputs = (reason: string) => {
+    const canSend = Boolean(rdStreaming && agent);
+
+    if (rdPressedMouseButtonsRef.current.size > 0) {
+      const { x, y } = rdLastCoordsRef.current;
+      rdPressedMouseButtonsRef.current.forEach((button) => {
+        if (canSend) {
+          sendRdInput('mouse_up', { x, y, button, reason }, true);
+        }
+      });
+      rdPressedMouseButtonsRef.current.clear();
+    }
+
+    if (rdPressedKeysRef.current.size > 0) {
+      rdPressedKeysRef.current.forEach((vk) => {
+        if (canSend) {
+          sendRdInput('key_up', { vk, reason }, true);
+        }
+      });
+      rdPressedKeysRef.current.clear();
+    }
   };
 
   // Throttle mouse move events (send at most every 30ms)
@@ -611,25 +647,30 @@ export default function AgentDetailPage() {
     const now = Date.now();
     if (now - lastMouseMoveRef.current < 30) return;
     lastMouseMoveRef.current = now;
-    const { x, y } = getNormalizedCoords(e);
+    const { x, y, inFrame } = getNormalizedCoords(e);
+    if (!inFrame) return;
     sendRdInput('mouse_move', { x, y });
   };
 
   const rdMouseDown = (e: React.MouseEvent<HTMLImageElement>) => {
     if (!rdInteractive || !rdStreaming) return;
     e.preventDefault();
+    e.stopPropagation();
     // Focus the container div so keyboard events are captured immediately after mouse click
     rdContainerRef.current?.focus();
     const { x, y } = getNormalizedCoords(e);
-    const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+    const button = toMouseButton(e.button);
+    rdPressedMouseButtonsRef.current.add(button);
     sendRdInput('mouse_down', { x, y, button });
   };
 
   const rdMouseUp = (e: React.MouseEvent<HTMLImageElement>) => {
     if (!rdInteractive || !rdStreaming) return;
     e.preventDefault();
+    e.stopPropagation();
     const { x, y } = getNormalizedCoords(e);
-    const button = e.button === 2 ? 'right' : e.button === 1 ? 'middle' : 'left';
+    const button = toMouseButton(e.button);
+    rdPressedMouseButtonsRef.current.delete(button);
     sendRdInput('mouse_up', { x, y, button });
   };
 
@@ -653,6 +694,7 @@ export default function AgentDetailPage() {
     e.stopPropagation();
     const vk = keyToVk[e.code];
     if (vk !== undefined) {
+      if (!e.repeat) rdPressedKeysRef.current.add(vk);
       sendRdInput('key_down', { key: e.code, vk });
     }
   };
@@ -663,8 +705,13 @@ export default function AgentDetailPage() {
     e.stopPropagation();
     const vk = keyToVk[e.code];
     if (vk !== undefined) {
+      rdPressedKeysRef.current.delete(vk);
       sendRdInput('key_up', { key: e.code, vk });
     }
+  };
+
+  const rdBlur = () => {
+    releaseRdInputs('focus_lost');
   };
 
   // Auto-focus the RD container div whenever interactive control mode is activated
@@ -674,6 +721,47 @@ export default function AgentDetailPage() {
       rdContainerRef.current.focus();
     }
   }, [rdInteractive, rdStreaming]);
+
+  useEffect(() => {
+    if (!rdInteractive || !rdStreaming) return;
+    const onWindowMouseUp = (ev: MouseEvent) => {
+      if (rdPressedMouseButtonsRef.current.size === 0) return;
+      const { x, y } = getNormalizedCoordsFromClient(ev.clientX, ev.clientY);
+      const button = toMouseButton(ev.button);
+      if (rdPressedMouseButtonsRef.current.has(button)) {
+        rdPressedMouseButtonsRef.current.delete(button);
+        sendRdInput('mouse_up', { x, y, button, reason: 'window_mouseup' }, true);
+      } else {
+        releaseRdInputs('window_mouseup_any');
+      }
+    };
+    const onWindowBlur = () => releaseRdInputs('window_blur');
+    window.addEventListener('mouseup', onWindowMouseUp, true);
+    window.addEventListener('blur', onWindowBlur);
+    return () => {
+      window.removeEventListener('mouseup', onWindowMouseUp, true);
+      window.removeEventListener('blur', onWindowBlur);
+    };
+  }, [rdInteractive, rdStreaming, agent?.id, rdSessionId, rdSelectedMonitor]);
+
+  useEffect(() => {
+    if (!rdInteractive) {
+      releaseRdInputs('interactive_off');
+    }
+  }, [rdInteractive]);
+
+  useEffect(() => {
+    if (!rdStreaming) {
+      releaseRdInputs('stream_inactive');
+    }
+  }, [rdStreaming]);
+
+  useEffect(() => {
+    return () => {
+      rdPressedMouseButtonsRef.current.clear();
+      rdPressedKeysRef.current.clear();
+    };
+  }, []);
 
   const deleteAgent = async () => {
     if (!agent || !confirm('Are you sure you want to delete this agent?')) return;
@@ -1164,7 +1252,7 @@ export default function AgentDetailPage() {
         )}
 
         {tab === 'remote-desktop' && (
-          <div ref={rdContainerRef} className={rdFullscreen ? 'fixed inset-0 z-50 bg-black flex flex-col' : ''}>
+          <div className={rdFullscreen ? 'fixed inset-0 z-50 bg-black flex flex-col' : ''}>
             {/* Toolbar */}
             <div className={`flex items-center justify-between gap-2 flex-wrap ${rdFullscreen ? 'px-4 py-2 bg-gray-900 border-b border-gray-700' : 'mb-3'}`}>
               <div className="flex items-center gap-2">
@@ -1215,6 +1303,9 @@ export default function AgentDetailPage() {
                     <option value={2}>2</option>
                     <option value={3}>3</option>
                     <option value={5}>5</option>
+                    <option value={8}>8</option>
+                    <option value={10}>10</option>
+                    <option value={15}>15</option>
                   </select>
                 </label>
                 {/* Monitor selector */}
@@ -1304,6 +1395,7 @@ export default function AgentDetailPage() {
               tabIndex={rdInteractive && rdStreaming ? 0 : -1}
               onKeyDown={rdKeyDown}
               onKeyUp={rdKeyUp}
+              onBlur={rdBlur}
               onClick={() => { if (rdInteractive && rdStreaming) rdContainerRef.current?.focus(); }}
             >
               {!rdFrame && !rdLoading && !rdStreaming && (
@@ -1340,6 +1432,7 @@ export default function AgentDetailPage() {
                   onMouseMove={rdMouseMove}
                   onMouseDown={rdMouseDown}
                   onMouseUp={rdMouseUp}
+                  onMouseLeave={() => releaseRdInputs('mouse_leave')}
                   onWheel={rdWheel}
                   onContextMenu={rdContextMenu}
                 />

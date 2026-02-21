@@ -680,6 +680,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
           const env = nowEnvelopeBase(String(p.agent_id), MessageType.RdInput, {
             input_type: p.input_type,
+            session_id: p.session_id,
             x: p.x,
             y: p.y,
             button: p.button,

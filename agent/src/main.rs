@@ -1,11 +1,11 @@
-// ─────────────────────────────────────────────
-// XEFI Agent 2 — Main Entry Point
-// ─────────────────────────────────────────────
+// XEFI Agent 2 Ã¢â‚¬â€ Main Entry Point
+// Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 use clap::Parser;
 use ed25519_dalek::{Signature, Verifier, VerifyingKey};
 use futures_util::{SinkExt, StreamExt};
 use hmac::{Hmac, Mac};
+use rand::Rng;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use std::collections::HashSet;
@@ -20,7 +20,7 @@ use tokio_tungstenite::tungstenite::client::IntoClientRequest;
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
-// ── Windows Service imports ───────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Windows Service imports Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 #[cfg(windows)]
 use windows_service::{
     define_windows_service,
@@ -40,10 +40,36 @@ const UPDATE_PUBLIC_KEY_HEX: &str = match option_env!("REAP3R_UPDATE_PUBKEY_HEX"
     None => "",
 };
 
-// ── Remote Desktop global state ───────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Remote Desktop global state Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 static RD_ACTIVE: AtomicBool = AtomicBool::new(false);
 
-// ── Global file logger ────────────────────────────────────
+fn rd_session_state() -> &'static Mutex<Option<String>> {
+    static RD_SESSION: std::sync::OnceLock<Mutex<Option<String>>> = std::sync::OnceLock::new();
+    RD_SESSION.get_or_init(|| Mutex::new(None))
+}
+
+fn rd_set_session_id(session_id: Option<String>) {
+    if let Ok(mut guard) = rd_session_state().lock() {
+        *guard = session_id;
+    }
+}
+
+fn rd_session_matches(session_id: Option<&str>) -> bool {
+    match session_id {
+        None => true,
+        Some(incoming) => {
+            if let Ok(guard) = rd_session_state().lock() {
+                if let Some(active) = guard.as_ref() {
+                    return active == incoming;
+                }
+                return false;
+            }
+            false
+        }
+    }
+}
+
+// Ã¢â€â‚¬Ã¢â€â‚¬ Global file logger Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 /// A simple append-only file logger shared across threads.
 struct FileLogger {
@@ -96,7 +122,7 @@ impl FileLogger {
 /// Module-level optional file logger, set once during startup.
 static FILE_LOGGER: std::sync::OnceLock<Option<Arc<FileLogger>>> = std::sync::OnceLock::new();
 
-// ── Windows Event Log writer ──────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Windows Event Log writer Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Reports critical events (start, stop, errors, updates) to the
 // Windows Application Event Log so enterprise SIEM tools pick them up.
 
@@ -192,7 +218,7 @@ macro_rules! finfo  { ($($arg:tt)*) => {{ let s = format!($($arg)*); info!("{}",
 macro_rules! fwarn  { ($($arg:tt)*) => {{ let s = format!($($arg)*); warn!("{}", s);  flog("WARN",  &s); }} }
 macro_rules! ferror { ($($arg:tt)*) => {{ let s = format!($($arg)*); error!("{}", s); flog("ERROR", &s); }} }
 
-// ── CLI Args ──────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ CLI Args Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[derive(Parser, Debug)]
 #[command(name = "xefi-agent-2", version, about = "XEFI Agent 2")]
@@ -253,7 +279,7 @@ struct Args {
     #[arg(long)]
     print_config: bool,
 
-    /// Allow invalid/self-signed TLS certificates (DEV MODE ONLY — never use in production)
+    /// Allow invalid/self-signed TLS certificates (DEV MODE ONLY Ã¢â‚¬â€ never use in production)
     #[arg(long, env = "REAP3R_INSECURE_TLS")]
     insecure_tls: bool,
 
@@ -285,14 +311,14 @@ async fn connect_ws(
     tokio_tungstenite::WebSocketStream<tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>>,
     tokio_tungstenite::tungstenite::Error,
 > {
-    // ws:// uses plain TCP — no TLS connector needed.
+    // ws:// uses plain TCP Ã¢â‚¬â€ no TLS connector needed.
     if server_url.starts_with("ws://") {
         let req = server_url.into_client_request()?;
         let (ws, _) = connect_async_tls_with_config(req, None, false, None).await?;
         return Ok(ws);
     }
 
-    // wss:// → build a rustls connector (pure-Rust TLS 1.2+, no OS dependencies).
+    // wss:// Ã¢â€ â€™ build a rustls connector (pure-Rust TLS 1.2+, no OS dependencies).
     // This works on Windows 7 SP1 without any KB updates or OpenSSL DLLs.
     let tls_config = if insecure_tls {
         // DEV ONLY: accept any certificate
@@ -303,7 +329,7 @@ async fn connect_ws(
             .with_custom_certificate_verifier(Arc::new(InsecureCertVerifier))
             .with_no_client_auth()
     } else {
-        // Production: use Mozilla CA roots (bundled — no OS cert store dependency)
+        // Production: use Mozilla CA roots (bundled Ã¢â‚¬â€ no OS cert store dependency)
         let mut root_store = rustls::RootCertStore::empty();
         root_store.extend(webpki_roots::TLS_SERVER_ROOTS.iter().cloned());
         rustls::ClientConfig::builder()
@@ -356,7 +382,7 @@ impl rustls::client::danger::ServerCertVerifier for InsecureCertVerifier {
 }
 
 
-// ── Config persistence ──────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Config persistence Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
 struct AgentConfig {
@@ -681,10 +707,10 @@ async fn run_diagnostics(args: &Args) {
     let log_path = args.log_file.clone().unwrap_or_else(default_log_path);
     let cfg_path = config_path();
 
-    println!("═══════════════════════════════════════════");
-    println!("  XEFI Agent 2 v{} — Diagnostic Report", env!("CARGO_PKG_VERSION"));
+    println!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
+    println!("  XEFI Agent 2 v{} Ã¢â‚¬â€ Diagnostic Report", env!("CARGO_PKG_VERSION"));
     println!("  {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S %Z"));
-    println!("═══════════════════════════════════════════");
+    println!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
     println!();
     println!("[ System ]");
     println!("  Hostname  : {}", hostname);
@@ -727,7 +753,7 @@ async fn run_diagnostics(args: &Args) {
         let _ = std::fs::remove_file(&probe);
         ok
     };
-    println!("  Config writable: {}", if writable { "YES" } else { "NO — use --log-file / run as admin" });
+    println!("  Config writable: {}", if writable { "YES" } else { "NO Ã¢â‚¬â€ use --log-file / run as admin" });
     println!();
     println!("[ Saved Config ]");
     match load_config() {
@@ -743,7 +769,7 @@ async fn run_diagnostics(args: &Args) {
     }
     println!();
 
-    // ── Service status check (Windows) ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Service status check (Windows) Ã¢â€â‚¬Ã¢â€â‚¬
     #[cfg(windows)]
     {
         println!("[ Windows Service ]");
@@ -776,7 +802,7 @@ async fn run_diagnostics(args: &Args) {
                 if out.contains("RESTART") {
                     println!("  Recovery  : Auto-restart configured");
                 } else {
-                    println!("  Recovery  : WARNING — no auto-restart configured");
+                    println!("  Recovery  : WARNING Ã¢â‚¬â€ no auto-restart configured");
                 }
             }
             _ => {}
@@ -804,10 +830,10 @@ async fn run_diagnostics(args: &Args) {
             match addr.to_socket_addrs() {
                 Ok(mut addrs) => {
                     if let Some(a) = addrs.next() {
-                        println!("  DNS resolve : {} → {}", host, a.ip());
+                        println!("  DNS resolve : {} Ã¢â€ â€™ {}", host, a.ip());
                     }
                 }
-                Err(e) => println!("  DNS resolve : {} FAILED — {}", host, e),
+                Err(e) => println!("  DNS resolve : {} FAILED Ã¢â‚¬â€ {}", host, e),
             }
         }
 
@@ -825,10 +851,10 @@ async fn run_diagnostics(args: &Args) {
         match client {
             Ok(c) => match tokio::time::timeout(Duration::from_secs(6), c.get(&http_url).send()).await {
                 Ok(Ok(resp)) => println!("{} ({})", resp.status(), resp.status().as_u16()),
-                Ok(Err(e)) => println!("FAILED — {}", e),
+                Ok(Err(e)) => println!("FAILED Ã¢â‚¬â€ {}", e),
                 Err(_) => println!("TIMEOUT (5s)"),
             },
-            Err(e) => println!("Client error — {}", e),
+            Err(e) => println!("Client error Ã¢â‚¬â€ {}", e),
         }
 
         // Try WS connect
@@ -839,7 +865,7 @@ async fn run_diagnostics(args: &Args) {
             connect_ws(&server_url, args.insecure_tls),
         ).await {
             Ok(Ok(_)) => println!(" OK (rustls TLS handshake successful)"),
-            Ok(Err(e)) => println!(" FAILED — {}", e),
+            Ok(Err(e)) => println!(" FAILED Ã¢â‚¬â€ {}", e),
             Err(_) => println!(" TIMEOUT (5s)"),
         }
     }
@@ -856,7 +882,7 @@ async fn run_diagnostics(args: &Args) {
     println!("  x86 (32-bit)      : {}", if cfg!(target_arch = "x86") { "YES (this binary)" } else { "Use x86 build" });
     println!("  x64 (64-bit)      : {}", if cfg!(target_arch = "x86_64") { "YES (this binary)" } else { "Use x64 build" });
     println!();
-    println!("═══════════════════════════════════════════");
+    println!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
     flog("INFO", "Diagnostic run complete");
 }
 
@@ -892,7 +918,7 @@ fn get_windows_version_detail() -> String {
 /// Called automatically when the agent starts as a service.
 async fn run_startup_diagnostic(server: &str, insecure_tls: bool) {
     let (hostname, os, arch, os_ver) = get_system_info();
-    finfo!("═══ Startup Self-Diagnostic ═══");
+    finfo!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â Startup Self-Diagnostic Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
     finfo!("Host: {} | OS: {} {} ({}) | Agent v{}", hostname, os, os_ver, arch, env!("CARGO_PKG_VERSION"));
     finfo!("Binary arch: {}", if cfg!(target_arch = "x86_64") { "x64" } else if cfg!(target_arch = "x86") { "x86" } else { "unknown" });
     finfo!("TLS engine: rustls (pure-Rust) | Static CRT: {}", if cfg!(target_feature = "crt-static") { "yes" } else { "no" });
@@ -909,7 +935,7 @@ async fn run_startup_diagnostic(server: &str, insecure_tls: bool) {
         let win_ver = get_windows_version_detail();
         finfo!("Windows: {}", win_ver);
         eventlog_info(&format!(
-            "XEFI Agent 2 v{} starting — {} — {} ({}) — {}",
+            "XEFI Agent 2 v{} starting Ã¢â‚¬â€ {} Ã¢â‚¬â€ {} ({}) Ã¢â‚¬â€ {}",
             env!("CARGO_PKG_VERSION"), hostname, os, arch, win_ver
         ));
     }
@@ -926,12 +952,12 @@ async fn run_startup_diagnostic(server: &str, insecure_tls: bool) {
     {
         Ok(c) => match tokio::time::timeout(Duration::from_secs(6), c.get(&http_url).send()).await {
             Ok(Ok(resp)) => finfo!("Backend health: {} {}", http_url, resp.status()),
-            Ok(Err(e)) => fwarn!("Backend health: {} UNREACHABLE — {}", http_url, e),
+            Ok(Err(e)) => fwarn!("Backend health: {} UNREACHABLE Ã¢â‚¬â€ {}", http_url, e),
             Err(_) => fwarn!("Backend health: {} TIMEOUT", http_url),
         },
-        Err(e) => fwarn!("Backend health: HTTP client error — {}", e),
+        Err(e) => fwarn!("Backend health: HTTP client error Ã¢â‚¬â€ {}", e),
     }
-    finfo!("═══ Diagnostic complete ═══");
+    finfo!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â Diagnostic complete Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
 }
 
 fn load_config() -> Option<AgentConfig> {
@@ -1239,6 +1265,7 @@ async fn handle_job(
             }
             "remote_desktop_stop" => {
                 RD_ACTIVE.store(false, Ordering::SeqCst);
+                rd_set_session_id(None);
                 rd_signal_stop();
                 finfo!("Remote desktop stopped by job");
                 Ok(serde_json::json!({ "exit_code": 0, "stdout": "Remote desktop stopped", "stderr": "" }))
@@ -1314,7 +1341,7 @@ async fn handle_job(
     (ack, result_msg, side_effects)
 }
 
-// ── Inventory Collection ──────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Inventory Collection Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn collect_inventory() -> serde_json::Value {
     let mut sys = System::new_all();
@@ -1391,7 +1418,7 @@ fn collect_inventory() -> serde_json::Value {
     })
 }
 
-// ── Process Management ────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Process Management Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async fn execute_process_action(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     let action = payload["action"].as_str().unwrap_or("list");
@@ -1440,7 +1467,7 @@ async fn execute_process_action(payload: &serde_json::Value) -> Result<serde_jso
     }
 }
 
-// ── Service Management ────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Service Management Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async fn execute_service_action(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     let service_name = payload["service_name"].as_str().ok_or("Missing service_name")?;
@@ -1479,7 +1506,7 @@ async fn execute_service_action(payload: &serde_json::Value) -> Result<serde_jso
     }
 }
 
-// ── EDR Kill Process ──────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ EDR Kill Process Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async fn execute_edr_kill_process(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     let pid = payload["pid"].as_u64().ok_or("Missing pid")?;
@@ -1502,7 +1529,7 @@ async fn execute_edr_kill_process(payload: &serde_json::Value) -> Result<serde_j
     }
 }
 
-// ── EDR Network Isolation ─────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ EDR Network Isolation Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 async fn execute_edr_isolate(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
     let mode = payload["mode"].as_str().unwrap_or("soft");
@@ -1547,7 +1574,7 @@ async fn execute_edr_isolate(payload: &serde_json::Value) -> Result<serde_json::
     }
 }
 
-// ── Security Monitoring ───────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Security Monitoring Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn check_security_events() -> Vec<serde_json::Value> {
     let mut events = Vec::new();
@@ -1698,7 +1725,7 @@ async fn execute_script(payload: &serde_json::Value) -> Result<serde_json::Value
     }
 }
 
-// ── Remote Desktop (screenshot streaming) ─────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Remote Desktop (screenshot streaming) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 //
 // When running as a Windows Service (Session 0), there is no desktop to capture.
 // We solve this by:
@@ -1919,12 +1946,12 @@ $errLog = "$dir\rd_input_error.log"
 "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] XEFI Agent 2 input handler started (session $([System.Diagnostics.Process]::GetCurrentProcess().SessionId))" | Out-File $errLog
 try {
     Add-Type -AssemblyName System.Windows.Forms -ErrorAction Stop
-    # Modern SendInput API — works with Win7 through Win11 and all applications
+    # Modern SendInput API Ã¢â‚¬â€ works with Win7 through Win11 and all applications
     Add-Type @"
 using System;
 using System.Runtime.InteropServices;
 public static class RdInput {
-    // ── Structs ──────────────────────────────────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Structs Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     [StructLayout(LayoutKind.Sequential)] public struct MOUSEINPUT {
         public int dx, dy;
         public uint mouseData;
@@ -1950,7 +1977,7 @@ public static class RdInput {
         [FieldOffset(4)] public KEYBDINPUT ki;
         [FieldOffset(4)] public HARDWAREINPUT hi;
     }
-    // ── P/Invoke ─────────────────────────────────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ P/Invoke Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     [DllImport("user32.dll", SetLastError=true)] public static extern uint SendInput(uint n, INPUT[] inputs, int cb);
     [DllImport("user32.dll")] public static extern uint MapVirtualKey(uint uCode, uint uMapType);
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
@@ -1972,11 +1999,19 @@ public static class RdInput {
     public const uint KEYEVENTF_EXTENDEDKEY = 0x0001;
     public const uint KEYEVENTF_KEYUP       = 0x0002;
     public const uint KEYEVENTF_SCANCODE    = 0x0008;
-    // ── Helpers ───────────────────────────────────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Helpers Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
+    static int Clamp(int value, int min, int max) {
+        if (value < min) return min;
+        if (value > max) return max;
+        return value;
+    }
     // Mouse move + click via SendInput (absolute coords in 0-65535 virtual desktop space)
-    public static void MouseMoveAbs(int absX, int absY, int virtW, int virtH) {
-        int normX = (int)((absX * 65535L) / virtW);
-        int normY = (int)((absY * 65535L) / virtH);
+    public static void MouseMoveAbs(int absX, int absY, int virtX, int virtY, int virtW, int virtH) {
+        if (virtW <= 1 || virtH <= 1) return;
+        int relX = Clamp(absX - virtX, 0, virtW - 1);
+        int relY = Clamp(absY - virtY, 0, virtH - 1);
+        int normX = (int)Math.Round((relX * 65535.0) / (virtW - 1));
+        int normY = (int)Math.Round((relY * 65535.0) / (virtH - 1));
         INPUT[] inp = new INPUT[1];
         inp[0].type = INPUT_MOUSE;
         inp[0].mi.dx = normX;
@@ -2059,15 +2094,23 @@ while (-not (Test-Path $stop)) {
                 if (-not $line) { continue }
                 try {
                     $evt = ConvertFrom-Json $line
-                    # Convert normalized 0-1 coords to absolute screen coords
-                    $absX = [int]($bounds.X + $evt.x * $bounds.Width)
-                    $absY = [int]($bounds.Y + $evt.y * $bounds.Height)
+                    # Convert normalized 0-1 coords to absolute screen coords (clamped)
+                    $nx = [double]$evt.x
+                    $ny = [double]$evt.y
+                    if ([double]::IsNaN($nx)) { $nx = 0.0 }
+                    if ([double]::IsNaN($ny)) { $ny = 0.0 }
+                    if ($nx -lt 0) { $nx = 0.0 } elseif ($nx -gt 1) { $nx = 1.0 }
+                    if ($ny -lt 0) { $ny = 0.0 } elseif ($ny -gt 1) { $ny = 1.0 }
+                    $bw = [Math]::Max(1, [int]$bounds.Width)
+                    $bh = [Math]::Max(1, [int]$bounds.Height)
+                    $absX = [int]($bounds.X + [Math]::Round($nx * ($bw - 1)))
+                    $absY = [int]($bounds.Y + [Math]::Round($ny * ($bh - 1)))
                     switch ($evt.type) {
                         'mouse_move' {
-                            [RdInput]::MouseMoveAbs($absX, $absY, $virtW, $virtH)
+                            [RdInput]::MouseMoveAbs($absX, $absY, $virtX, $virtY, $virtW, $virtH)
                         }
                         'mouse_down' {
-                            [RdInput]::MouseMoveAbs($absX, $absY, $virtW, $virtH)
+                            [RdInput]::MouseMoveAbs($absX, $absY, $virtX, $virtY, $virtW, $virtH)
                             switch ($evt.button) {
                                 'right'  { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_RIGHTDOWN)  }
                                 'middle' { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_MIDDLEDOWN) }
@@ -2075,7 +2118,7 @@ while (-not (Test-Path $stop)) {
                             }
                         }
                         'mouse_up' {
-                            [RdInput]::MouseMoveAbs($absX, $absY, $virtW, $virtH)
+                            [RdInput]::MouseMoveAbs($absX, $absY, $virtX, $virtY, $virtW, $virtH)
                             switch ($evt.button) {
                                 'right'  { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_RIGHTUP)  }
                                 'middle' { [RdInput]::MouseButton([RdInput]::MOUSEEVENTF_MIDDLEUP) }
@@ -2101,7 +2144,7 @@ while (-not (Test-Path $stop)) {
 "[$(Get-Date -f 'yyyy-MM-dd HH:mm:ss')] Input handler stopped" | Out-File $errLog -Append
 "#;
 
-// ── Windows FFI for launching a process in the interactive user session ───
+// Ã¢â€â‚¬Ã¢â€â‚¬ Windows FFI for launching a process in the interactive user session Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 
 #[cfg(windows)]
 mod user_session {
@@ -2381,7 +2424,7 @@ async fn list_monitors() -> Result<serde_json::Value, String> {
             match user_session::launch_in_user_session(&cmd) {
                 Ok(pid) => {
                     finfo!("list_monitors: launched in user session (PID {})", pid);
-                    // Wait for output file to appear (max 10s — Add-Type can be slow)
+                    // Wait for output file to appear (max 10s Ã¢â‚¬â€ Add-Type can be slow)
                     let mut attempts = 0;
                     loop {
                         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -2452,7 +2495,7 @@ async fn list_monitors() -> Result<serde_json::Value, String> {
     }))
 }
 
-// ── Self-Update: download new binary, verify SHA256, replace, restart service ──
+// Ã¢â€â‚¬Ã¢â€â‚¬ Self-Update: download new binary, verify SHA256, replace, restart service Ã¢â€â‚¬Ã¢â€â‚¬
 
 fn decode_hex_bytes(input: &str) -> Result<Vec<u8>, String> {
     hex::decode(input.trim()).map_err(|e| format!("Invalid hex payload: {}", e))
@@ -2489,7 +2532,7 @@ fn verify_update_signature(bytes: &[u8], sig: &str) -> Result<(), String> {
     let key = match parse_update_pubkey() {
         Ok(k) => k,
         Err(_) => {
-            fwarn!("No Ed25519 public key embedded in this build — skipping signature verification. \
+            fwarn!("No Ed25519 public key embedded in this build Ã¢â‚¬â€ skipping signature verification. \
                     Set REAP3R_UPDATE_PUBKEY_HEX at compile time to enable.");
             return Ok(());
         }
@@ -2497,6 +2540,116 @@ fn verify_update_signature(bytes: &[u8], sig: &str) -> Result<(), String> {
     let signature = parse_update_signature(sig)?;
     key.verify(bytes, &signature)
         .map_err(|e| format!("Ed25519 signature verification failed: {}", e))
+}
+
+#[cfg(not(target_os = "windows"))]
+fn payload_or_env_nonempty_string(payload: &serde_json::Value, payload_key: &str, env_key: &str) -> Option<String> {
+    if let Some(v) = payload[payload_key].as_str() {
+        let s = v.trim();
+        if !s.is_empty() {
+            return Some(s.to_string());
+        }
+    }
+    match std::env::var(env_key) {
+        Ok(v) => {
+            let s = v.trim().to_string();
+            if s.is_empty() { None } else { Some(s) }
+        }
+        Err(_) => None,
+    }
+}
+
+fn payload_or_env_u64(
+    payload: &serde_json::Value,
+    payload_key: &str,
+    env_key: &str,
+    default: u64,
+    max: u64,
+) -> u64 {
+    if let Some(v) = payload[payload_key].as_u64() {
+        return v.min(max);
+    }
+    match std::env::var(env_key) {
+        Ok(v) => v.trim().parse::<u64>().map(|n| n.min(max)).unwrap_or(default),
+        Err(_) => default,
+    }
+}
+
+fn parse_update_urls(payload: &serde_json::Value, primary_url: &str) -> Vec<String> {
+    let mut urls: Vec<String> = Vec::new();
+    if !primary_url.trim().is_empty() {
+        urls.push(primary_url.trim().to_string());
+    }
+    if let Some(values) = payload["download_urls"].as_array() {
+        for value in values {
+            if let Some(url) = value.as_str() {
+                let trimmed = url.trim();
+                if !trimmed.is_empty() {
+                    urls.push(trimmed.to_string());
+                }
+            }
+        }
+    }
+
+    let mut deduped: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    for url in urls {
+        if seen.insert(url.clone()) {
+            deduped.push(url);
+        }
+    }
+    deduped
+}
+
+async fn download_update_bytes_with_fallback(
+    client: &reqwest::Client,
+    urls: &[String],
+    retry_count: u32,
+    retry_backoff_ms: u64,
+) -> Result<(Vec<u8>, String), String> {
+    if urls.is_empty() {
+        return Err("No download URL available for update".to_string());
+    }
+
+    let attempts_per_url = retry_count.saturating_add(1).max(1);
+    let mut errors: Vec<String> = Vec::new();
+
+    for (url_index, url) in urls.iter().enumerate() {
+        for attempt in 1..=attempts_per_url {
+            finfo!(
+                "Downloading candidate {}/{} attempt {}/{}: {}",
+                url_index + 1,
+                urls.len(),
+                attempt,
+                attempts_per_url,
+                url
+            );
+
+            match client.get(url).send().await {
+                Ok(response) => {
+                    if !response.status().is_success() {
+                        errors.push(format!("{} -> HTTP {}", url, response.status()));
+                    } else {
+                        match response.bytes().await {
+                            Ok(bytes) => return Ok((bytes.to_vec(), url.clone())),
+                            Err(e) => errors.push(format!("{} -> body read error: {}", url, e)),
+                        }
+                    }
+                }
+                Err(e) => errors.push(format!("{} -> network error: {}", url, e)),
+            }
+
+            if attempt < attempts_per_url && retry_backoff_ms > 0 {
+                let wait_ms = retry_backoff_ms.saturating_mul(attempt as u64);
+                tokio::time::sleep(Duration::from_millis(wait_ms)).await;
+            }
+        }
+    }
+
+    if errors.len() > 8 {
+        errors.truncate(8);
+    }
+    Err(format!("Download failed for all update URLs: {}", errors.join(" | ")))
 }
 
 #[cfg(windows)]
@@ -2568,13 +2721,200 @@ fn verify_windows_authenticode(file_path: &Path, expected_thumbprint: Option<&st
     }
 }
 
+#[cfg(not(target_os = "windows"))]
+fn unix_service_name_candidates(payload: &serde_json::Value, current_exe: &Path) -> Vec<String> {
+    let mut out: Vec<String> = Vec::new();
+    let mut seen = HashSet::new();
+    let mut push_name = |name: Option<String>| {
+        if let Some(v) = name {
+            let trimmed = v.trim().to_string();
+            if !trimmed.is_empty() && seen.insert(trimmed.clone()) {
+                out.push(trimmed);
+            }
+        }
+    };
+
+    push_name(payload["service_name"].as_str().map(|s| s.to_string()));
+    push_name(payload_or_env_nonempty_string(payload, "service_name", "REAP3R_SERVICE_NAME"));
+    push_name(current_exe.file_stem().map(|s| s.to_string_lossy().to_string()));
+    push_name(Some("xefi-agent-2".to_string()));
+    push_name(Some("reap3r-agent".to_string()));
+    push_name(Some("massvision-reap3r-agent".to_string()));
+    push_name(Some("MASSVISION-Reap3r-Agent".to_string()));
+    out
+}
+
+#[cfg(not(target_os = "windows"))]
+fn systemd_unit_exists(service_name: &str) -> bool {
+    std::process::Command::new("systemctl")
+        .args(["show", service_name, "--property=LoadState", "--value"])
+        .output()
+        .ok()
+        .map(|output| {
+            if !output.status.success() {
+                return false;
+            }
+            let state = String::from_utf8_lossy(&output.stdout).trim().to_ascii_lowercase();
+            state == "loaded"
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn launchctl_target_exists(target: &str) -> bool {
+    std::process::Command::new("launchctl")
+        .args(["print", target])
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+#[cfg(target_os = "macos")]
+fn current_uid_string() -> Option<String> {
+    if let Ok(uid) = std::env::var("UID") {
+        let t = uid.trim().to_string();
+        if !t.is_empty() {
+            return Some(t);
+        }
+    }
+    std::process::Command::new("id")
+        .args(["-u"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                let uid = String::from_utf8_lossy(&o.stdout).trim().to_string();
+                if uid.is_empty() { None } else { Some(uid) }
+            } else {
+                None
+            }
+        })
+}
+
+#[cfg(not(target_os = "windows"))]
+fn spawn_non_windows_restart(current_exe: &Path, payload: &serde_json::Value) -> Result<String, String> {
+    let candidates = unix_service_name_candidates(payload, current_exe);
+
+    for service_name in &candidates {
+        if systemd_unit_exists(service_name) {
+            let spawn_res = std::process::Command::new("systemctl")
+                .args(["restart", service_name])
+                .spawn();
+            if spawn_res.is_ok() {
+                return Ok(format!("systemd:{}", service_name));
+            }
+        }
+    }
+
+    for service_name in &candidates {
+        let init_script = PathBuf::from("/etc/init.d").join(service_name);
+        if init_script.exists() {
+            let spawn_res = std::process::Command::new("service")
+                .args([service_name, "restart"])
+                .spawn();
+            if spawn_res.is_ok() {
+                return Ok(format!("service:{}", service_name));
+            }
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(label) = payload_or_env_nonempty_string(payload, "launchd_label", "REAP3R_LAUNCHD_LABEL") {
+            let system_target = format!("system/{}", label);
+            if launchctl_target_exists(&system_target) {
+                let spawn_res = std::process::Command::new("launchctl")
+                    .args(["kickstart", "-k", &system_target])
+                    .spawn();
+                if spawn_res.is_ok() {
+                    return Ok(format!("launchctl:{}", system_target));
+                }
+            }
+            if let Some(uid) = current_uid_string() {
+                let gui_target = format!("gui/{}/{}", uid, label);
+                if launchctl_target_exists(&gui_target) {
+                    let spawn_res = std::process::Command::new("launchctl")
+                        .args(["kickstart", "-k", &gui_target])
+                        .spawn();
+                    if spawn_res.is_ok() {
+                        return Ok(format!("launchctl:{}", gui_target));
+                    }
+                }
+            }
+        }
+    }
+
+    let restart_delay = payload_or_env_u64(
+        payload,
+        "self_restart_delay_seconds",
+        "REAP3R_UPDATE_SELF_RESTART_DELAY_SECONDS",
+        6,
+        120,
+    );
+    let delay = restart_delay.to_string();
+    let pid = std::process::id().to_string();
+    let exe = current_exe.display().to_string();
+
+    std::process::Command::new("sh")
+        .args([
+            "-c",
+            "sleep \"$1\"; kill -TERM \"$2\" >/dev/null 2>&1 || true; sleep 1; nohup \"$3\" --run >/dev/null 2>&1 &",
+            "sh",
+            &delay,
+            &pid,
+            &exe,
+        ])
+        .spawn()
+        .map_err(|e| format!("Failed to spawn fallback self-restart helper: {}", e))?;
+
+    Ok(format!("self-relaunch:{}s", restart_delay))
+}
+
 async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
-    let download_url = payload["download_url"].as_str()
+    let primary_download_url = payload["download_url"]
+        .as_str()
         .ok_or_else(|| "Missing download_url".to_string())?;
-    let expected_sha256 = payload["sha256"].as_str()
+    let download_urls = parse_update_urls(payload, primary_download_url);
+    let expected_sha256_raw = payload["sha256"]
+        .as_str()
         .ok_or_else(|| "Missing sha256".to_string())?;
+    let expected_sha256 = expected_sha256_raw.trim().to_ascii_lowercase();
+    if expected_sha256.len() != 64 || !expected_sha256.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Invalid sha256 format in update payload".to_string());
+    }
+
     let signature = payload["sig_ed25519"].as_str();
     let version = payload["version"].as_str().unwrap_or("unknown");
+    let force = payload["force"].as_bool().unwrap_or(false);
+    let retry_count = payload_or_env_u64(
+        payload,
+        "retry_count",
+        "REAP3R_UPDATE_RETRY_COUNT",
+        2,
+        10,
+    ) as u32;
+    let retry_backoff_ms = payload_or_env_u64(
+        payload,
+        "retry_backoff_ms",
+        "REAP3R_UPDATE_RETRY_BACKOFF_MS",
+        1500,
+        60_000,
+    );
+    let defer_seconds = payload_or_env_u64(
+        payload,
+        "defer_seconds",
+        "REAP3R_UPDATE_DEFER_SECONDS",
+        0,
+        86_400,
+    );
+    let jitter_max_seconds = payload_or_env_u64(
+        payload,
+        "jitter_max_seconds",
+        "REAP3R_UPDATE_JITTER_MAX_SECONDS",
+        0,
+        86_400,
+    );
+
     #[cfg(windows)]
     let require_authenticode = bool_from_env_or_payload(
         payload,
@@ -2587,14 +2927,55 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
         payload,
         "signer_thumbprint",
         "REAP3R_UPDATE_SIGNER_THUMBPRINT",
-    ).map(|s| s.to_ascii_uppercase());
+    )
+    .map(|s| s.to_ascii_uppercase());
 
-    finfo!("Self-update requested: version={} url={}", version, download_url);
-    if !download_url.starts_with("https://") {
-        return Err("Self-update requires HTTPS download_url".to_string());
+    if download_urls.is_empty() {
+        return Err("Self-update requires at least one download URL".to_string());
+    }
+    for url in &download_urls {
+        if !url.to_ascii_lowercase().starts_with("https://") {
+            return Err(format!("Self-update requires HTTPS URLs only: {}", url));
+        }
     }
 
-    // 1. Determine current binary path
+    let current_version = env!("CARGO_PKG_VERSION");
+    if !force && version == current_version {
+        return Ok(serde_json::json!({
+            "exit_code": 0,
+            "stdout": format!("Agent already on target version {} (force=false). Update skipped.", version),
+            "stderr": "",
+            "skipped": true
+        }));
+    }
+
+    finfo!(
+        "Self-update requested: version={} force={} urls={} retry_count={} backoff_ms={}",
+        version,
+        force,
+        download_urls.len(),
+        retry_count,
+        retry_backoff_ms
+    );
+
+    if defer_seconds > 0 || jitter_max_seconds > 0 {
+        let jitter = if jitter_max_seconds > 0 {
+            rand::thread_rng().gen_range(0..=jitter_max_seconds)
+        } else {
+            0
+        };
+        let total_wait = defer_seconds.saturating_add(jitter);
+        if total_wait > 0 {
+            finfo!(
+                "Deferring update by {}s (defer={}s jitter={}s)",
+                total_wait,
+                defer_seconds,
+                jitter
+            );
+            tokio::time::sleep(Duration::from_secs(total_wait)).await;
+        }
+    }
+
     let current_exe = std::env::current_exe()
         .map_err(|e| format!("Cannot determine current exe path: {}", e))?;
     let current_dir = current_exe.parent()
@@ -2604,31 +2985,26 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
     let new_binary_path = current_dir.join(format!("xefi-agent-2-new{}", ext));
     let backup_path = current_dir.join(format!("xefi-agent-2-old{}", ext));
 
-    // 2. Download the new binary
-    finfo!("Downloading new agent binary from {}", download_url);
     let client = reqwest::Client::builder()
         .https_only(true)
         .timeout(Duration::from_secs(120))
         .build()
         .map_err(|e| format!("HTTP client error: {}", e))?;
 
-    let response = client.get(download_url)
-        .send()
-        .await
-        .map_err(|e| format!("Download failed: {}", e))?;
+    let (bytes, used_download_url) = download_update_bytes_with_fallback(
+        &client,
+        &download_urls,
+        retry_count,
+        retry_backoff_ms,
+    ).await?;
 
-    if !response.status().is_success() {
-        return Err(format!("Download HTTP error: {}", response.status()));
-    }
+    finfo!(
+        "Downloaded {} bytes from {}",
+        bytes.len(),
+        used_download_url
+    );
 
-    let bytes = response.bytes()
-        .await
-        .map_err(|e| format!("Failed to read download body: {}", e))?;
-
-    finfo!("Downloaded {} bytes", bytes.len());
-
-    // 3. Verify SHA256
-    use sha2::{Sha256, Digest};
+    use sha2::{Digest, Sha256};
     let mut hasher = Sha256::new();
     hasher.update(&bytes);
     let actual_sha256 = format!("{:x}", hasher.finalize());
@@ -2645,10 +3021,9 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
         verify_update_signature(&bytes, sig)?;
         finfo!("Ed25519 signature verified OK");
     } else {
-        fwarn!("No sig_ed25519 in update payload — skipping signature verification (SHA256 still verified)");
+        fwarn!("No sig_ed25519 in update payload; skipping signature verification (SHA256 still verified)");
     }
 
-    // 4. Write new binary to temp file
     std::fs::write(&new_binary_path, &bytes)
         .map_err(|e| format!("Write new binary: {}", e))?;
 
@@ -2659,28 +3034,17 @@ async fn execute_self_update(payload: &serde_json::Value) -> Result<serde_json::
         }
     }
 
-    // On Linux, make executable
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         let _ = std::fs::set_permissions(&new_binary_path, std::fs::Permissions::from_mode(0o755));
     }
 
-    // 5. Swap binaries: current → backup, new → current
-    // On Windows, we can't replace a running exe directly, so we use a
-    // PowerShell script that waits for the process to exit, then replaces
     #[cfg(target_os = "windows")]
     {
         let service_name = detect_installed_service_name().unwrap_or_else(|| SERVICE_NAME.to_string());
-        // Remove old backup if exists
         let _ = std::fs::remove_file(&backup_path);
 
-        // Write an updater script that will:
-        // 1. Stop the service
-        // 2. Wait for process to exit
-        // 3. Move current → backup
-        // 4. Move new → current
-        // 5. Start the service
         let updater_script = format!(
             r#"
 Start-Sleep -Seconds 2
@@ -2694,7 +3058,6 @@ function Log ($msg) {{ "[$([DateTime]::Now.ToString('yyyy-MM-dd HH:mm:ss'))] $ms
 
 Log "Starting agent update to version {version}"
 
-# Stop the service
 try {{
     Stop-Service -Name $svcName -Force -ErrorAction Stop
     Log "Service stopped"
@@ -2702,7 +3065,6 @@ try {{
     Log "WARNING: Stop-Service failed: $_"
 }}
 
-# Wait for process to exit
 $maxWait = 30
 $waited = 0
 while ($waited -lt $maxWait) {{
@@ -2718,7 +3080,6 @@ if ($waited -ge $maxWait) {{
     Start-Sleep -Seconds 2
 }}
 
-# Swap binaries
 try {{
     if (Test-Path $backupExe) {{ Remove-Item $backupExe -Force }}
     Move-Item $currentExe $backupExe -Force
@@ -2727,7 +3088,6 @@ try {{
     Log "Moved new to current"
 }} catch {{
     Log "ERROR swapping binaries: $_"
-    # Try to restore from backup
     if ((Test-Path $backupExe) -and -not (Test-Path $currentExe)) {{
         Move-Item $backupExe $currentExe -Force
         Log "Restored from backup"
@@ -2736,13 +3096,11 @@ try {{
     exit 1
 }}
 
-# Start the service
 try {{
     Start-Service -Name $svcName -ErrorAction Stop
     Log "Service started with new version"
 }} catch {{
     Log "ERROR starting service: $_"
-    # Rollback
     if (Test-Path $backupExe) {{
         Remove-Item $currentExe -Force -ErrorAction SilentlyContinue
         Move-Item $backupExe $currentExe -Force
@@ -2766,8 +3124,6 @@ Log "Update complete"
             .map_err(|e| format!("Write updater script: {}", e))?;
 
         finfo!("Launching updater script: {}", updater_path.display());
-
-        // Launch the updater script detached (it will stop us, swap, restart)
         let _ = std::process::Command::new("powershell.exe")
             .args([
                 "-WindowStyle", "Hidden",
@@ -2780,31 +3136,41 @@ Log "Update complete"
 
         Ok(serde_json::json!({
             "exit_code": 0,
-            "stdout": format!("Agent update initiated: v{} -> v{}. Service will restart shortly.", env!("CARGO_PKG_VERSION"), version),
-            "stderr": ""
+            "stdout": format!(
+                "Agent update initiated: v{} -> v{}. Service '{}' will restart shortly.",
+                current_version,
+                version,
+                service_name
+            ),
+            "stderr": "",
+            "download_url_used": used_download_url
         }))
     }
 
     #[cfg(not(target_os = "windows"))]
     {
-        // Linux/macOS: replace binary directly, then restart service via systemd
         let _ = std::fs::remove_file(&backup_path);
         std::fs::rename(&current_exe, &backup_path)
             .map_err(|e| format!("Backup current binary: {}", e))?;
-        std::fs::rename(&new_binary_path, &current_exe)
-            .map_err(|e| format!("Move new binary: {}", e))?;
+        if let Err(e) = std::fs::rename(&new_binary_path, &current_exe) {
+            let _ = std::fs::rename(&backup_path, &current_exe);
+            return Err(format!("Move new binary: {}", e));
+        }
 
-        finfo!("Binary replaced, restarting via systemd...");
-
-        // Restart the service (this will kill us, so fire and forget)
-        let _ = std::process::Command::new("systemctl")
-            .args(["restart", "xefi-agent-2"])
-            .spawn();
+        let restart_method = spawn_non_windows_restart(&current_exe, payload)?;
+        finfo!("Binary replaced, restart requested using {}", restart_method);
 
         Ok(serde_json::json!({
             "exit_code": 0,
-            "stdout": format!("Agent update initiated: v{} -> v{}. Service will restart shortly.", env!("CARGO_PKG_VERSION"), version),
-            "stderr": ""
+            "stdout": format!(
+                "Agent update initiated: v{} -> v{}. Restart strategy: {}.",
+                current_version,
+                version,
+                restart_method
+            ),
+            "stderr": "",
+            "download_url_used": used_download_url,
+            "restart_method": restart_method
         }))
     }
 }
@@ -2827,6 +3193,7 @@ async fn start_remote_desktop(
 
     // Stop any existing session
     RD_ACTIVE.store(false, Ordering::SeqCst);
+    rd_set_session_id(None);
     rd_signal_stop();
     tokio::time::sleep(Duration::from_millis(500)).await;
 
@@ -2839,9 +3206,10 @@ async fn start_remote_desktop(
     // Start new session
     RD_ACTIVE.store(true, Ordering::SeqCst);
     let session_id = job_id.clone();
+    rd_set_session_id(Some(session_id.clone()));
 
     // Write capture script to disk
-    // PS single-quoted strings treat \ as literal — no escaping needed
+    // PS single-quoted strings treat \ as literal Ã¢â‚¬â€ no escaping needed
     let dir_str = config_dir().display().to_string();
     let script_content = RD_CAPTURE_LOOP_PS
         .replace("__DIR__", &dir_str)
@@ -2894,7 +3262,7 @@ async fn start_remote_desktop(
     // Give the capture process time to start and produce the first frame
     tokio::time::sleep(Duration::from_millis(500)).await;
 
-    // ── Launch input handler (for interactive control) ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Launch input handler (for interactive control) Ã¢â€â‚¬Ã¢â€â‚¬
     // Always launch it so control mode can be toggled from the UI.
     let _ = std::fs::remove_file(rd_input_data_path());
     let input_script_content = RD_INPUT_LOOP_PS
@@ -2929,7 +3297,7 @@ async fn start_remote_desktop(
     // Spawn background frame-reader loop
     let frame_path = rd_frame_data_path();
     let err_log_path = config_dir().join("rd_capture_error.log");
-    let check_interval = Duration::from_millis((1000 / fps).max(100) / 2); // poll at 2× fps
+    let check_interval = Duration::from_millis((1000 / fps).max(100) / 2); // poll at 2Ãƒâ€” fps
 
     tokio::spawn(async move {
         let mut sequence: u64 = 0;
@@ -3013,6 +3381,7 @@ async fn start_remote_desktop(
         // Signal capture process to stop
         rd_signal_stop();
         RD_ACTIVE.store(false, Ordering::SeqCst);
+        rd_set_session_id(None);
         finfo!("Remote desktop session ended: session={}", session_id);
     });
 
@@ -3052,7 +3421,7 @@ async fn execute_system_command(action: &str, delay_secs: u64) -> Result<serde_j
     }
 }
 
-// ── Windows Service implementation ───────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Windows Service implementation Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Placed here so finfo!/fwarn!/ferror! macros and all agent functions are in scope.
 
 #[cfg(windows)]
@@ -3097,19 +3466,35 @@ define_windows_service!(ffi_service_main, windows_service_main);
 fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
     let (shutdown_tx, shutdown_rx) = std::sync::mpsc::channel::<()>();
 
-    let status_handle = match service_control_handler::register(SERVICE_NAME, move |ctrl| {
-        match ctrl {
-            ServiceControl::Stop | ServiceControl::Shutdown => {
-                let _ = shutdown_tx.send(());
-                ServiceControlHandlerResult::NoError
+    let mut status_handle: Option<windows_service::service_control_handler::ServiceStatusHandle> = None;
+    let mut active_service_name = SERVICE_NAME.to_string();
+    for candidate in service_name_candidates() {
+        let tx_for_handler = shutdown_tx.clone();
+        match service_control_handler::register(candidate, move |ctrl| {
+            match ctrl {
+                ServiceControl::Stop | ServiceControl::Shutdown => {
+                    let _ = tx_for_handler.send(());
+                    ServiceControlHandlerResult::NoError
+                }
+                ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
+                _ => ServiceControlHandlerResult::NotImplemented,
             }
-            ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
-            _ => ServiceControlHandlerResult::NotImplemented,
+        }) {
+            Ok(h) => {
+                active_service_name = candidate.to_string();
+                status_handle = Some(h);
+                break;
+            }
+            Err(e) => {
+                flog("WARN", &format!("SCM register failed for '{}': {}", candidate, e));
+            }
         }
-    }) {
-        Ok(h) => h,
-        Err(e) => {
-            flog("ERROR", &format!("SCM register failed: {}", e));
+    }
+
+    let status_handle = match status_handle {
+        Some(h) => h,
+        None => {
+            flog("ERROR", "SCM register failed for all known service names");
             return;
         }
     };
@@ -3123,10 +3508,10 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
         wait_hint: Duration::default(),
         process_id: None,
     });
-    flog("INFO", "Windows Service: Running");
+    flog("INFO", &format!("Windows Service [{}]: Running", active_service_name));
     eventlog::write("INFO", &format!(
-        "XEFI Agent 2 service started — v{} (PID {})",
-        env!("CARGO_PKG_VERSION"), std::process::id()
+        "XEFI Agent 2 service '{}' started - v{} (PID {})",
+        active_service_name, env!("CARGO_PKG_VERSION"), std::process::id()
     ));
 
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
@@ -3135,7 +3520,7 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
         let server = match args.server.clone().or_else(|| load_config().map(|c| c.server)) {
             Some(s) => s,
             None => {
-                flog("ERROR", "No server URL — cannot start");
+                flog("ERROR", "No server URL - cannot start");
                 return;
             }
         };
@@ -3168,25 +3553,24 @@ fn windows_service_main(_svc_args: Vec<std::ffi::OsString>) {
         wait_hint: Duration::default(),
         process_id: None,
     });
-    flog("INFO", "Windows Service: Stopped");
-    eventlog::write("INFO", "XEFI Agent 2 service stopped");
+    flog("INFO", &format!("Windows Service [{}]: Stopped", active_service_name));
+    eventlog::write("INFO", &format!("XEFI Agent 2 service '{}' stopped", active_service_name));
 }
-
 #[cfg(windows)]
 fn install_windows_service() {
     let exe = std::env::current_exe().expect("Cannot determine executable path");
     let exe_path = exe.display().to_string();
     let service_bin_path = format!("\"{}\" --run", exe_path);
     let service_name = detect_installed_service_name().unwrap_or_else(|| SERVICE_NAME.to_string());
-    println!("═══════════════════════════════════════════════════════════");
-    println!("  XEFI Agent 2 — Service Installer");
+    println!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
+    println!("  XEFI Agent 2 Ã¢â‚¬â€ Service Installer");
     println!("  Version: {}", env!("CARGO_PKG_VERSION"));
     println!("  Binary : {}", exe_path);
     println!("  Arch   : {}", if cfg!(target_arch = "x86_64") { "x64" } else { "x86" });
-    println!("═══════════════════════════════════════════════════════════");
+    println!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
     println!();
 
-    // ── 0. Parse --server and --token from CLI args (for silent installs) ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 0. Parse --server and --token from CLI args (for silent installs) Ã¢â€â‚¬Ã¢â€â‚¬
     // When called as: reap3r-agent.exe --install --server wss://... --token XYZ
     // We save the config BEFORE creating the service so it auto-enrolls on start.
     let args: Vec<String> = std::env::args().collect();
@@ -3244,7 +3628,7 @@ fn install_windows_service() {
         println!("[WARN] Legacy service detected: {} (keeping existing name for compatibility)", service_name);
     }
 
-    // ── 1. Register Windows Event Log source ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 1. Register Windows Event Log source Ã¢â€â‚¬Ã¢â€â‚¬
     println!("[*] Registering Event Log source...");
     let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
         .create_subkey("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\XEFI Agent 2")
@@ -3253,7 +3637,7 @@ fn install_windows_service() {
             let _ = key.set_value::<u32, _>("TypesSupported", &7u32);
         });
 
-    // ── 2. Create the Windows service via sc.exe ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 2. Create the Windows service via sc.exe Ã¢â€â‚¬Ã¢â€â‚¬
     println!("[*] Creating service: {}", service_name);
     let output = std::process::Command::new("sc.exe")
         .args([
@@ -3272,7 +3656,7 @@ fn install_windows_service() {
             } else {
                 // Check if already exists
                 if stderr.contains("1073") || stdout.contains("1073") {
-                    println!("[OK] Service already exists — updating...");
+                    println!("[OK] Service already exists Ã¢â‚¬â€ updating...");
                     // Update the binPath
                     let _ = std::process::Command::new("sc.exe")
                         .args(["config", &service_name, "binPath=", &service_bin_path])
@@ -3286,16 +3670,16 @@ fn install_windows_service() {
         Err(e) => { eprintln!("[ERROR] Failed to run sc.exe: {}", e); return; }
     }
 
-    // ── 3. Set description ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 3. Set description Ã¢â€â‚¬Ã¢â€â‚¬
     let desc = format!(
-        "XEFI Agent 2 v{} — Enterprise remote management. Runs as SYSTEM, auto-starts on boot, auto-recovers on failure.",
+        "XEFI Agent 2 v{} Ã¢â‚¬â€ Enterprise remote management. Runs as SYSTEM, auto-starts on boot, auto-recovers on failure.",
         env!("CARGO_PKG_VERSION")
     );
     let _ = std::process::Command::new("sc.exe")
         .args(["description", &service_name, &desc])
         .output();
 
-    // ── 4. Configure automatic recovery (restart on failure) ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 4. Configure automatic recovery (restart on failure) Ã¢â€â‚¬Ã¢â€â‚¬
     // Reset failure count after 24h, actions: restart after 5s, 10s, 30s
     println!("[*] Configuring automatic recovery...");
     let _ = std::process::Command::new("sc.exe")
@@ -3310,13 +3694,13 @@ fn install_windows_service() {
         .output();
     println!("[OK] Recovery policy: restart after 5s / 10s / 30s");
 
-    // ── 5. Set service to run as LocalSystem (default) with delayed auto-start ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 5. Set service to run as LocalSystem (default) with delayed auto-start Ã¢â€â‚¬Ã¢â€â‚¬
     let _ = std::process::Command::new("sc.exe")
         .args(["config", &service_name, "start=", "delayed-auto"])
         .output();
     println!("[OK] Start type: delayed-auto (starts after core services)");
 
-    // ── 6. Start the service ──
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 6. Start the service Ã¢â€â‚¬Ã¢â€â‚¬
     println!("[*] Starting service...");
     let start = std::process::Command::new("sc.exe")
         .args(["start", &service_name])
@@ -3336,15 +3720,15 @@ fn install_windows_service() {
     }
 
     println!();
-    println!("═══════════════════════════════════════════════════════════");
+    println!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
     println!("  Installation complete!");
     println!("  Service   : {}", service_name);
     println!("  Status    : sc query {}", service_name);
     println!("  Logs      : {}\\logs\\agent.log", config_dir().display());
-    println!("  Event Log : Event Viewer → Application → Reap3r Agent");
+    println!("  Event Log : Event Viewer Ã¢â€ â€™ Application Ã¢â€ â€™ Reap3r Agent");
     println!("  Diagnose  : reap3r-agent.exe --diagnose");
     println!("  Uninstall : reap3r-agent.exe --uninstall");
-    println!("═══════════════════════════════════════════════════════════");
+    println!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
 }
 
 #[cfg(windows)]
@@ -3380,7 +3764,7 @@ fn uninstall_windows_service() {
     }
     // Remove Event Log source
     let _ = winreg::RegKey::predef(winreg::enums::HKEY_LOCAL_MACHINE)
-        .delete_subkey_all("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\Reap3r Agent");
+        .delete_subkey_all("SYSTEM\\CurrentControlSet\\Services\\EventLog\\Application\\XEFI Agent 2");
     println!("[OK] Event Log source removed");
     println!("[OK] Config and logs remain at: {}", config_dir().display());
 }
@@ -3436,13 +3820,13 @@ fn build_args_from_config() -> Args {
 
 #[tokio::main]
 async fn main() {
-    // ── Windows: always try service dispatcher first ────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ Windows: always try service dispatcher first Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // When launched by Windows SCM, service_dispatcher::start() will block and
     // call windows_service_main(). If we're NOT running as a service (e.g. CLI),
     // it returns an error immediately and we fall through to normal CLI mode.
     #[cfg(windows)]
     {
-        // Install rustls CryptoProvider early (ring) — must happen before any TLS ops.
+        // Install rustls CryptoProvider early (ring) Ã¢â‚¬â€ must happen before any TLS ops.
         // When both 'ring' and 'aws-lc-rs' features are active (pulled by tokio-tungstenite),
         // rustls cannot auto-detect which provider to use and panics.
         let _ = rustls::crypto::ring::default_provider().install_default();
@@ -3453,7 +3837,7 @@ async fn main() {
             .unwrap_or_else(|_| default_log_path());
         let _ = FILE_LOGGER.set(FileLogger::open(&log_path));
 
-        // Always attempt service dispatcher — if launched by SCM it will block,
+        // Always attempt service dispatcher Ã¢â‚¬â€ if launched by SCM it will block,
         // otherwise it returns an error and we fall through to CLI mode.
         flog("INFO", "Trying Windows service dispatcher...");
         let mut dispatcher_started = false;
@@ -3471,16 +3855,16 @@ async fn main() {
         if dispatcher_started {
             return;
         }
-        flog("INFO", "Not running as service — entering CLI mode");
+        flog("INFO", "Not running as service Ã¢â‚¬â€ entering CLI mode");
     }
 
-    // ── 0. Install rustls CryptoProvider (ring) ───────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 0. Install rustls CryptoProvider (ring) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Must happen before any TLS operation. When both 'ring' and 'aws-lc-rs'
     // features are active, rustls cannot auto-detect and panics.
     #[cfg(not(windows))]
     { let _ = rustls::crypto::ring::default_provider().install_default(); }
 
-    // ── 1. Init tracing (stdout) ──────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 1. Init tracing (stdout) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     tracing_subscriber::fmt()
         .with_target(false)
         .with_ansi(cfg!(not(target_os = "windows")))
@@ -3489,16 +3873,16 @@ async fn main() {
 
     let args = Args::parse();
 
-    // ── 2. Init file logger ───────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 2. Init file logger Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     let log_path = args.log_file.clone().unwrap_or_else(default_log_path);
     let _ = FILE_LOGGER.set(FileLogger::open(&log_path));
 
-    finfo!("═════════════════════════════════════════════════");
+    finfo!("Ã¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢ÂÃ¢â€¢Â");
     finfo!("MASSVISION Reap3r Agent v{} starting", env!("CARGO_PKG_VERSION"));
     finfo!("Log file: {}", log_path.display());
     finfo!("PID: {}", std::process::id());
 
-    // ── 3. URL validation ─────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 3. URL validation Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     // Do this before anything else so errors are visible in the log.
     let server_url = args.server.clone().or_else(|| load_config().map(|c| c.server));
     let strict_url_validation = !(args.logs || args.status);
@@ -3518,7 +3902,7 @@ async fn main() {
         }
     }
 
-    // ── 4. Dev-only insecure TLS guard ───────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 4. Dev-only insecure TLS guard Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if false {
         let msg = "FATAL: --insecure-tls is disabled by policy in this build.\n\
                    Fix your TLS certificate instead.";
@@ -3527,10 +3911,10 @@ async fn main() {
         std::process::exit(1);
     }
     if args.insecure_tls {
-        fwarn!("WARNING: --insecure-tls active — TLS certificate validation is DISABLED");
+        fwarn!("WARNING: --insecure-tls active Ã¢â‚¬â€ TLS certificate validation is DISABLED");
     }
 
-    // ── 4b. --install / --uninstall Windows Service ────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 4b. --install / --uninstall Windows Service Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     #[cfg(windows)]
     {
         if args.install {
@@ -3550,13 +3934,13 @@ async fn main() {
         }
     }
 
-    // ── 5. --diagnose mode ────────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 5. --diagnose mode Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if args.diagnose {
         run_diagnostics(&args).await;
         std::process::exit(0);
     }
 
-    // ── 6. --print-config mode ────────────────────────────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 6. --print-config mode Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if args.print_config {
         match load_config() {
             Some(cfg) => {
@@ -3568,7 +3952,7 @@ async fn main() {
         std::process::exit(0);
     }
 
-    // ── 7. Require server (from args or saved config) ─────
+    // Ã¢â€â‚¬Ã¢â€â‚¬ 7. Require server (from args or saved config) Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
     if args.logs {
         match print_logs_tail(&log_path, args.log_lines) {
             Ok(()) => std::process::exit(0),
@@ -3680,7 +4064,7 @@ async fn main() {
     }
 }
 
-// ── Local HTTP health-check server ────────────────────────────────────────────
+// Ã¢â€â‚¬Ã¢â€â‚¬ Local HTTP health-check server Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬
 // Listens on 0.0.0.0:{port}, responds to any GET request with JSON.
 // Designed to be checked by Zabbix userparameter or Prometheus.
 //
@@ -3704,7 +4088,7 @@ fn spawn_health_server(port: u16) {
                 Err(e) => { fwarn!("Health server accept error: {}", e); continue; }
                 Ok((mut stream, peer)) => {
                     tokio::spawn(async move {
-                        // Drain the HTTP request (we don't need to parse it — respond to any GET).
+                        // Drain the HTTP request (we don't need to parse it Ã¢â‚¬â€ respond to any GET).
                         // Give the OS a moment to buffer the client's headers, then drain.
                         tokio::time::sleep(Duration::from_millis(5)).await;
                         {
@@ -3765,7 +4149,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
     // Determine if we need to enroll or reconnect.
     // Priority order:
     //  1. Explicit --agent-id + --hmac-key CLI flags
-    //  2. Saved agent.conf (already enrolled on a previous run) ← checked BEFORE token
+    //  2. Saved agent.conf (already enrolled on a previous run) Ã¢â€ Â checked BEFORE token
     //  3. --token provided for first enrollment
     // This ensures that even when --token is permanently baked into a Scheduled Task,
     // we do NOT re-enroll on every restart once agent.conf exists.
@@ -3918,7 +4302,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                 }
             }
 
-            // NOTE: metrics_push is no longer sent separately — metrics are embedded in
+            // NOTE: metrics_push is no longer sent separately Ã¢â‚¬â€ metrics are embedded in
             // the heartbeat payload above. This halves the number of messages at 20k scale.
 
             // Send inventory every 10 heartbeats (~5min at 30s interval)
@@ -3985,7 +4369,7 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                                 continue;
                             }
                             if state.has_job(job_id) {
-                                fwarn!("Duplicate job_id={} — rejecting (idempotence)", job_id);
+                                fwarn!("Duplicate job_id={} Ã¢â‚¬â€ rejecting (idempotence)", job_id);
                                 let rej = build_message(
                                     &agent_id_loop,
                                     "job_ack",
@@ -4009,13 +4393,16 @@ async fn run_agent(args: &Args, server: &str, state: &mut AgentRuntimeState) -> 
                             state.remember_job(job_id);
                             finfo!("Job completed: id={} type={}", job_id, job_type);
                         }
-                        // ── RD Input: low-latency mouse/keyboard relay (no job system) ──
+                        // Ã¢â€â‚¬Ã¢â€â‚¬ RD Input: low-latency mouse/keyboard relay (no job system) Ã¢â€â‚¬Ã¢â€â‚¬
                         else if msg_type == "rd_input" {
                             if !verify_sig(&data, &key_loop) {
                                 continue; // silently drop invalid input messages
                             }
                             if RD_ACTIVE.load(Ordering::SeqCst) {
                                 let payload = &data["payload"];
+                                if !rd_session_matches(payload["session_id"].as_str()) {
+                                    continue;
+                                }
                                 let input_type = payload["input_type"].as_str().unwrap_or("");
                                 let x = payload["x"].as_f64().unwrap_or(0.0);
                                 let y = payload["y"].as_f64().unwrap_or(0.0);

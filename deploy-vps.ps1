@@ -21,6 +21,27 @@ $colors = @{
     Info    = "Cyan"
 }
 
+function New-RandomSecret {
+    param([int]$Length = 32)
+
+    $alphabet = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    $bytes = New-Object byte[] $Length
+    $rng = [System.Security.Cryptography.RandomNumberGenerator]::Create()
+    try {
+        $rng.GetBytes($bytes)
+    } finally {
+        $rng.Dispose()
+    }
+
+    $chars = for ($i = 0; $i -lt $Length; $i++) {
+        $alphabet[$bytes[$i] % $alphabet.Length]
+    }
+    return (-join $chars)
+}
+
+$DbPassword = New-RandomSecret -Length 24
+$DeployCallbackKey = New-RandomSecret -Length 48
+
 function Write-Log {
     param(
         [string]$Message,
@@ -115,7 +136,7 @@ if ! command -v pm2 >/dev/null 2>&1; then
 fi
 
 apt-get update
-apt-get install -y postgresql postgresql-contrib nginx git
+apt-get install -y postgresql postgresql-contrib nginx git openssl
 echo "deps_ok"
 "@
 
@@ -131,9 +152,26 @@ function Setup-Database {
 #!/bin/bash
 set -euo pipefail
 
+DB_PASS="$DbPassword"
+ENV_FILE="$AppDir/backend/.env"
+
+if [ -f "`$ENV_FILE" ]; then
+  DB_URL_LINE="`$(grep -E '^DATABASE_URL=' "`$ENV_FILE" | head -n1 || true)"
+  if [ -n "`$DB_URL_LINE" ]; then
+    DB_URL="`$(printf '%s' "`$DB_URL_LINE" | cut -d= -f2-)"
+    PARSED_PASS="`$(printf '%s' "`$DB_URL" | sed -E 's#^[^:]+://[^:]+:([^@]+)@.*#\1#' || true)"
+    if [ -n "`$PARSED_PASS" ] && [ "`$PARSED_PASS" != "`$DB_URL" ]; then
+      DB_PASS="`$PARSED_PASS"
+    fi
+  fi
+fi
+
 sudo systemctl start postgresql
-sudo -u postgres psql -tc "SELECT 1 FROM pg_user WHERE usename = 'reap3r'" | grep -q 1 || \
-  sudo -u postgres psql -c "CREATE USER reap3r WITH PASSWORD 'reap3r_secret';"
+if ! sudo -u postgres psql -tAc "SELECT 1 FROM pg_roles WHERE rolname = 'reap3r'" | grep -q 1; then
+  sudo -u postgres psql -c "CREATE USER reap3r WITH PASSWORD '`$DB_PASS';"
+else
+  sudo -u postgres psql -c "ALTER USER reap3r WITH PASSWORD '`$DB_PASS';"
+fi
 sudo -u postgres psql -tc "SELECT 1 FROM pg_database WHERE datname = 'reap3r'" | grep -q 1 || \
   sudo -u postgres psql -c "CREATE DATABASE reap3r OWNER reap3r;"
 echo "db_ok"
@@ -226,6 +264,38 @@ echo "nginx_ok"
     Write-Log "Nginx configured" "Success"
 }
 
+function Deploy-AgentBinaries {
+    Write-Log "Preparing agent binaries..." "Info"
+
+    $distDir = Join-Path $PSScriptRoot "agent\dist"
+    $x64 = Join-Path $distDir "agent-x64.exe"
+    $x86 = Join-Path $distDir "agent-x86.exe"
+
+    if (-not (Test-Path $x64) -or -not (Test-Path $x86)) {
+        Write-Log "agent/dist binaries missing; building locally..." "Warning"
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "agent\build.ps1")
+        if ($LASTEXITCODE -ne 0) {
+            throw "Local agent build failed"
+        }
+    }
+
+    $mkdir = Invoke-SSHCommand @"
+#!/bin/bash
+set -euo pipefail
+mkdir -p "$AppDir/agent/dist"
+echo "agent_dist_ready"
+"@
+    if ($null -eq $mkdir) { throw "Failed to prepare remote agent/dist directory" }
+
+    $scpCmd = "scp -o StrictHostKeyChecking=accept-new -P $VpsPort `"$x64`" `"$x86`" ${VpsUser}@${VpsIP}:`"$AppDir/agent/dist/`""
+    & cmd.exe /d /s /c $scpCmd 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Failed to upload agent binaries with scp"
+    }
+
+    Write-Log "Agent binaries uploaded to $AppDir/agent/dist" "Success"
+}
+
 function Deploy-Backend {
     Write-Log "Deploying backend..." "Info"
 
@@ -245,17 +315,47 @@ NODE_ENV=production
 PORT=4000
 WS_PORT=4000
 API_BASE_URL=http://$VpsIP
-DATABASE_URL=postgresql://reap3r:reap3r_secret@localhost:5432/reap3r
+DATABASE_URL=postgresql://reap3r:$DbPassword@localhost:5432/reap3r
 JWT_SECRET=`$JWT_SECRET
 HMAC_SECRET=`$HMAC_SECRET
 VAULT_MASTER_KEY=`$VAULT_MASTER_KEY
+DEPLOY_CALLBACK_KEY=$DeployCallbackKey
 LOG_LEVEL=info
+AGENT_UPDATE_RETRY_COUNT=2
+AGENT_UPDATE_RETRY_BACKOFF_MS=1500
+AGENT_UPDATE_DEFER_SECONDS=0
+AGENT_UPDATE_JITTER_MAX_SECONDS=60
+AGENT_UPDATE_SELF_RESTART_DELAY_SECONDS=6
 EOF
   chmod 600 "`$ENV_FILE"
 fi
 
 if ! grep -q '^VAULT_MASTER_KEY=' "`$ENV_FILE"; then
   echo "VAULT_MASTER_KEY=`$(openssl rand -base64 32)" >> "`$ENV_FILE"
+fi
+
+if ! grep -q '^DEPLOY_CALLBACK_KEY=' "`$ENV_FILE"; then
+  echo "DEPLOY_CALLBACK_KEY=$DeployCallbackKey" >> "`$ENV_FILE"
+fi
+
+if ! grep -q '^AGENT_UPDATE_RETRY_COUNT=' "`$ENV_FILE"; then
+  echo "AGENT_UPDATE_RETRY_COUNT=2" >> "`$ENV_FILE"
+fi
+
+if ! grep -q '^AGENT_UPDATE_RETRY_BACKOFF_MS=' "`$ENV_FILE"; then
+  echo "AGENT_UPDATE_RETRY_BACKOFF_MS=1500" >> "`$ENV_FILE"
+fi
+
+if ! grep -q '^AGENT_UPDATE_DEFER_SECONDS=' "`$ENV_FILE"; then
+  echo "AGENT_UPDATE_DEFER_SECONDS=0" >> "`$ENV_FILE"
+fi
+
+if ! grep -q '^AGENT_UPDATE_JITTER_MAX_SECONDS=' "`$ENV_FILE"; then
+  echo "AGENT_UPDATE_JITTER_MAX_SECONDS=60" >> "`$ENV_FILE"
+fi
+
+if ! grep -q '^AGENT_UPDATE_SELF_RESTART_DELAY_SECONDS=' "`$ENV_FILE"; then
+  echo "AGENT_UPDATE_SELF_RESTART_DELAY_SECONDS=6" >> "`$ENV_FILE"
 fi
 
 set -a
@@ -313,6 +413,7 @@ try {
     Setup-Dependencies
     Setup-Database
     Setup-Nginx
+    Deploy-AgentBinaries
     Deploy-Backend
     Deploy-Frontend
 

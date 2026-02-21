@@ -555,11 +555,17 @@ export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, ser
     // Auto-heal common Zabbix interface misconfiguration (10051 instead of 10050).
     await zbxClient.normalizeAgentInterfacePort(item.zabbix_hostid!);
 
+    const manualInputEnabled = /^(1|true|yes|on)$/i.test(String(process.env.ZABBIX_ENABLE_MANUALINPUT ?? ''));
     const runScriptExecute = async (): Promise<{ value?: string; response?: string }> => {
       try {
-        // Preferred path on Zabbix with manual input support.
-        return await zbxClient.scriptExecute(item.zabbix_scriptid!, item.zabbix_hostid!, manualInputPayload);
+        // Keep manualinput disabled by default for Zabbix compatibility.
+        return await zbxClient.scriptExecute(
+          item.zabbix_scriptid!,
+          item.zabbix_hostid!,
+          manualInputEnabled ? manualInputPayload : undefined,
+        );
       } catch (err: any) {
+        if (!manualInputEnabled) throw err;
         const msg = String(err?.message || '').toLowerCase();
         const manualInputUnsupported =
           msg.includes('manualinput') ||
@@ -579,18 +585,30 @@ export async function executeItem(item: DeployItem, zbxClient: ZabbixClient, ser
       result = await runScriptExecute();
     } catch (err: any) {
       const msg = String(err?.message || '').toLowerCase();
-      const badAgentPort =
-        msg.includes('get value from agent failed') &&
-        msg.includes(':10051');
-      if (!badAgentPort) throw err;
-
-      const fixed = await zbxClient.normalizeAgentInterfacePort(item.zabbix_hostid!, true);
-      if (fixed <= 0) throw err;
-
-      console.warn(
-        `[deploy] Fixed ${fixed} agent interface(s) from 10051->10050 for ${item.zabbix_host}, retrying script.execute`,
-      );
-      result = await runScriptExecute();
+      const agentConnectivityError =
+        msg.includes('get value from agent failed') ||
+        msg.includes('cannot connect to [[');
+      const badAgentPort = agentConnectivityError && msg.includes(':10051');
+      if (badAgentPort) {
+        const fixed = await zbxClient.normalizeAgentInterfacePort(item.zabbix_hostid!, true);
+        if (fixed > 0) {
+          console.warn(
+            `[deploy] Fixed ${fixed} agent interface(s) from 10051->10050 for ${item.zabbix_host}, retrying script.execute`,
+          );
+          result = await runScriptExecute();
+        } else {
+          throw err;
+        }
+      } else if (agentConnectivityError) {
+        // One immediate retry helps with transient "Interrupted system call" cases.
+        console.warn(
+          `[deploy] Agent connectivity issue on ${item.zabbix_host}; retrying script.execute once`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, 1500));
+        result = await runScriptExecute();
+      } else {
+        throw err;
+      }
     }
 
     const execId = String(result?.value ?? result?.response ?? `exec-${Date.now()}`);

@@ -57,14 +57,16 @@ Copy-Item $installScriptSrc (Join-Path $bundleDir "install.ps1") -Force
 $uninstallScriptPath = Join-Path $bundleDir "uninstall.ps1"
 @'
 param(
-    [string]$ServiceName = "Reap3rAgent",
+    [string]$ServiceName = "XEFI-Agent-2",
     [string]$InstallDir = "C:\Program Files\Reap3r Agent"
 )
 $ErrorActionPreference = "SilentlyContinue"
 Stop-Service -Name $ServiceName -Force
 sc.exe delete $ServiceName | Out-Null
 sc.exe delete "MASSVISION-Reap3r-Agent" | Out-Null
+sc.exe delete "Reap3rAgent" | Out-Null
 sc.exe delete "ReaP3rAgent" | Out-Null
+sc.exe delete "xefi-agent-2" | Out-Null
 Remove-Item "$InstallDir\reap3r-agent.exe" -Force
 Write-Host "Reap3r Agent uninstalled."
 '@ | Set-Content -Path $uninstallScriptPath -Encoding UTF8
@@ -72,9 +74,10 @@ Write-Host "Reap3r Agent uninstalled."
 $configPath = Join-Path $bundleDir "config.json"
 $config = @{
     version = $Version
-    service_name = "Reap3rAgent"
+    service_name = "XEFI-Agent-2"
     install_dir = "C:\Program Files\Reap3r Agent"
-    data_dir = "C:\ProgramData\Reap3r"
+    data_dir = "C:\ProgramData\XefiAgent2"
+    legacy_data_dir = "C:\ProgramData\Reap3r"
     default_server = "wss://your-server.example.com/ws/agent"
     enrollment_token = ""
     notes = "Set enrollment_token only for bootstrap automation. Do not store long-term secrets here."

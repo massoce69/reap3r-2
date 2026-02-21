@@ -10,6 +10,11 @@ interface ZabbixConfig {
   timeout?: number;   // ms, default 15000
 }
 
+function boolEnv(v: string | undefined): boolean {
+  const raw = String(v ?? '').trim().toLowerCase();
+  return raw === '1' || raw === 'true' || raw === 'yes' || raw === 'on';
+}
+
 function parseEndpoint(inputUrl: string): { host: string; port: string; protocol: string } {
   try {
     const u = new URL(inputUrl);
@@ -197,7 +202,7 @@ export class ZabbixClient {
 
       const json = await res.json() as { result?: T; error?: { code: number; message: string; data: string } };
       if (json.error) {
-        const retryable = isRetryableZabbixError(json.error.code);
+        const retryable = isRetryableZabbixError(json.error.code, json.error.message, json.error.data);
         throw new ZabbixApiError(
           `${json.error.message}: ${json.error.data}`,
           method,
@@ -507,8 +512,9 @@ export class ZabbixClient {
       scriptid: scriptId,
       hostid: hostId,
     };
-    if (macros) {
-      // Zabbix 7.x supports manualinput; for macros, pass as user macros
+    // Compatibility default: do NOT send manualinput unless explicitly enabled.
+    // Many Zabbix 6.x/7.x setups reject this field if script/manual input is not configured.
+    if (macros && Object.keys(macros).length > 0 && boolEnv(process.env.ZABBIX_ENABLE_MANUALINPUT)) {
       params.manualinput = Object.entries(macros).map(([macro, value]) => `${macro}=${value}`).join('\n');
     }
     return this.rpc<ZabbixScriptExecResult>('script.execute', params);
@@ -537,7 +543,19 @@ export class ZabbixCircuitOpenError extends Error {
   }
 }
 
-function isRetryableZabbixError(code: number): boolean {
+function isRetryableZabbixError(code: number, message = '', data = ''): boolean {
+  const text = `${message} ${data}`.toLowerCase();
+  if (
+    text.includes('get value from agent failed') ||
+    text.includes('interrupted system call') ||
+    text.includes('temporarily unavailable') ||
+    text.includes('timeout') ||
+    text.includes('connection reset') ||
+    text.includes('cannot connect to [[')
+  ) {
+    return true;
+  }
+
   // Zabbix error codes that warrant retry:
   // -32600 (invalid request), -32602 (invalid params) → non-retryable
   // -32603 (internal error) → retryable

@@ -1207,38 +1207,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "reap3r-agent"
-version = "1.2.0"
-dependencies = [
- "base64",
- "chrono",
- "clap",
- "dirs",
- "ed25519-dalek",
- "futures-util",
- "hex",
- "hmac",
- "hostname",
- "rand 0.8.5",
- "reqwest",
- "rustls",
- "serde",
- "serde_json",
- "sha2",
- "sysinfo",
- "tokio",
- "tokio-tungstenite",
- "tracing",
- "tracing-subscriber",
- "url",
- "uuid",
- "webpki-roots 0.26.11",
- "windows-service",
- "winreg",
- "winres",
-]
-
-[[package]]
 name = "redox_syscall"
 version = "0.5.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2595,6 +2563,38 @@ name = "writeable"
 version = "0.6.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9edde0db4769d2dc68579893f2306b26c6ecfbe0ef499b013d731b7b9247e0b9"
+
+[[package]]
+name = "xefi-agent-2"
+version = "1.2.0"
+dependencies = [
+ "base64",
+ "chrono",
+ "clap",
+ "dirs",
+ "ed25519-dalek",
+ "futures-util",
+ "hex",
+ "hmac",
+ "hostname",
+ "rand 0.8.5",
+ "reqwest",
+ "rustls",
+ "serde",
+ "serde_json",
+ "sha2",
+ "sysinfo",
+ "tokio",
+ "tokio-tungstenite",
+ "tracing",
+ "tracing-subscriber",
+ "url",
+ "uuid",
+ "webpki-roots 0.26.11",
+ "windows-service",
+ "winreg",
+ "winres",
+]
 
 [[package]]
 name = "yoke"

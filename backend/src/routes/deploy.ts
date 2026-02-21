@@ -8,6 +8,15 @@ import * as deploySvc from '../services/deploy.service.js';
 import { createAuditLog } from '../services/audit.service.js';
 import { parseUUID, parseBody } from '../lib/validate.js';
 
+function resolveExpectedCallbackKey(): string | null {
+  const configured = String(process.env.DEPLOY_CALLBACK_KEY || '').trim();
+  if (configured) return configured;
+  if (String(process.env.NODE_ENV || '').toLowerCase() !== 'production') {
+    return 'dev-callback-key';
+  }
+  return null;
+}
+
 export default async function deployRoutes(fastify: FastifyInstance) {
   const createAuth = [fastify.authenticate, fastify.requirePermission(Permission.DeploymentCreate)];
   const execAuth = [fastify.authenticate, fastify.requirePermission(Permission.DeploymentExecute)];
@@ -252,7 +261,15 @@ export default async function deployRoutes(fastify: FastifyInstance) {
   // POST /api/deploy/zabbix/callback
   fastify.post('/api/deploy/zabbix/callback', async (request, reply) => {
     const callbackKey = request.headers['x-deploy-callback-key'] as string;
-    const expectedKey = process.env.DEPLOY_CALLBACK_KEY ?? 'dev-callback-key';
+    const expectedKey = resolveExpectedCallbackKey();
+    if (!expectedKey) {
+      request.log.error('[deploy-callback] DEPLOY_CALLBACK_KEY is missing in production');
+      return reply.status(503).send({
+        statusCode: 503,
+        error: 'Service Unavailable',
+        message: 'Deploy callback key is not configured',
+      });
+    }
     if (!callbackKey || callbackKey !== expectedKey) {
       return reply.status(403).send({ statusCode: 403, error: 'Forbidden', message: 'Invalid callback key' });
     }

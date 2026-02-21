@@ -9,7 +9,43 @@ import { createAuditLog } from '../services/audit.service.js';
 import * as jobService from '../services/job.service.js';
 import { createHmac, randomUUID } from 'crypto';
 import { config } from '../config.js';
-import { AgentArch, AgentOs, loadAgentUpdateManifest, normalizeArch, resolveBinaryPath } from '../services/agent-update-manifest.service.js';
+import { AgentArch, AgentOs, loadAgentUpdateManifest, normalizeArch, publicBaseUrl, resolveBinaryPath } from '../services/agent-update-manifest.service.js';
+
+function toBoundedInt(value: unknown, fallback: number, min: number, max: number): number {
+  const n = typeof value === 'number' ? value : (typeof value === 'string' ? Number(value) : NaN);
+  if (!Number.isFinite(n)) return fallback;
+  const i = Math.trunc(n);
+  if (!Number.isFinite(i)) return fallback;
+  return Math.min(max, Math.max(min, i));
+}
+
+function toOptionalNonEmptyString(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const trimmed = value.trim();
+  return trimmed.length > 0 ? trimmed : undefined;
+}
+
+function normalizeHttpsUrls(values: unknown[]): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const raw of values) {
+    if (typeof raw !== 'string') continue;
+    const trimmed = raw.trim();
+    if (!trimmed) continue;
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.protocol !== 'https:') continue;
+      const href = parsed.toString();
+      if (!seen.has(href)) {
+        seen.add(href);
+        out.push(href);
+      }
+    } catch {
+      continue;
+    }
+  }
+  return out;
+}
 
 export default async function agentRoutes(fastify: FastifyInstance) {
   // ── List agents ──
@@ -174,6 +210,17 @@ export default async function agentRoutes(fastify: FastifyInstance) {
     const body = request.body as any;
     const agentIds: string[] = body.agent_ids;
     const force: boolean = body.force ?? false;
+    const requestDownloadUrls: unknown[] = Array.isArray(body.download_urls) ? body.download_urls : [];
+    const retryCount = toBoundedInt(body.retry_count ?? process.env.AGENT_UPDATE_RETRY_COUNT, 2, 0, 10);
+    const retryBackoffMs = toBoundedInt(body.retry_backoff_ms ?? process.env.AGENT_UPDATE_RETRY_BACKOFF_MS, 1500, 0, 60000);
+    const deferSeconds = toBoundedInt(body.defer_seconds ?? process.env.AGENT_UPDATE_DEFER_SECONDS, 0, 0, 86400);
+    const jitterMaxSeconds = toBoundedInt(body.jitter_max_seconds ?? process.env.AGENT_UPDATE_JITTER_MAX_SECONDS, 0, 0, 86400);
+    const serviceName = toOptionalNonEmptyString(body.service_name ?? process.env.AGENT_UPDATE_SERVICE_NAME);
+    const launchdLabel = toOptionalNonEmptyString(body.launchd_label ?? process.env.AGENT_UPDATE_LAUNCHD_LABEL);
+    const selfRestartDelayInput = body.self_restart_delay_seconds ?? process.env.AGENT_UPDATE_SELF_RESTART_DELAY_SECONDS;
+    const selfRestartDelaySeconds = (selfRestartDelayInput !== undefined && selfRestartDelayInput !== null && String(selfRestartDelayInput).trim() !== '')
+      ? toBoundedInt(selfRestartDelayInput, 6, 1, 120)
+      : undefined;
 
     if (!Array.isArray(agentIds) || agentIds.length === 0) {
       return reply.status(400).send({ statusCode: 400, error: 'Bad Request', message: 'agent_ids is required (non-empty array)' });
@@ -225,14 +272,31 @@ export default async function agentRoutes(fastify: FastifyInstance) {
         else if (osLower.includes('darwin') || osLower.includes('mac')) osFamily = 'darwin';
         const arch = normalizeArch(agent.arch || 'x86_64') as AgentArch;
         const manifest = await resolveManifest(osFamily, arch);
+        const localFallbackUrl = `${publicBaseUrl(request)}/api/agent-binary/download?os=${encodeURIComponent(osFamily)}&arch=${encodeURIComponent(arch)}`;
+        const downloadUrls = normalizeHttpsUrls([
+          manifest.download_url,
+          ...requestDownloadUrls,
+          localFallbackUrl,
+        ]);
+        if (downloadUrls.length === 0) {
+          throw new Error(`No valid HTTPS update URL for ${osFamily}/${arch}`);
+        }
 
         const payload = {
           version: manifest.version || version,
-          download_url: manifest.download_url,
+          download_url: downloadUrls[0],
+          download_urls: downloadUrls,
           sha256: manifest.sha256,
           ...(manifest.sig_ed25519 ? { sig_ed25519: manifest.sig_ed25519 } : {}),
           ...(manifest.signer_thumbprint ? { signer_thumbprint: manifest.signer_thumbprint } : {}),
           ...(manifest.require_authenticode ? { require_authenticode: true } : {}),
+          retry_count: retryCount,
+          retry_backoff_ms: retryBackoffMs,
+          defer_seconds: deferSeconds,
+          jitter_max_seconds: jitterMaxSeconds,
+          ...(serviceName ? { service_name: serviceName } : {}),
+          ...(launchdLabel ? { launchd_label: launchdLabel } : {}),
+          ...(selfRestartDelaySeconds !== undefined ? { self_restart_delay_seconds: selfRestartDelaySeconds } : {}),
           force,
         };
 
@@ -243,7 +307,7 @@ export default async function agentRoutes(fastify: FastifyInstance) {
           payload,
           created_by: request.currentUser.id,
           org_id: request.currentUser.org_id,
-          reason: `Remote update to v${version}`,
+          reason: `Remote update to v${payload.version}`,
         });
 
         // Proactive push if agent online
@@ -279,7 +343,15 @@ export default async function agentRoutes(fastify: FastifyInstance) {
         await createAuditLog(fastify, {
           user_id: request.currentUser.id, org_id: request.currentUser.org_id,
           action: 'agent.update', entity_type: 'agent', entity_id: agent.id,
-          details: { version, force }, ip_address: request.ip,
+          details: {
+            version,
+            force,
+            retry_count: retryCount,
+            retry_backoff_ms: retryBackoffMs,
+            defer_seconds: deferSeconds,
+            jitter_max_seconds: jitterMaxSeconds,
+          },
+          ip_address: request.ip,
         });
       } catch (err: any) {
         results.push({ agent_id: agent.id, hostname: agent.hostname, status: 'error', error: err.message });
