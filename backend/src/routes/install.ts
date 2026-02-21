@@ -308,7 +308,7 @@ systemctl --no-pager --full status reap3r-agent.service || true
       `$isCommandCli = $false`,
       `try { $helpText = (& $exePath --help 2>&1 | Out-String) } catch { $helpText = '' }`,
       `# Detect MassVision v2 CLI (subcommands)`,
-      `if ($helpText -match '\\[COMMAND\\]' -and $helpText -match '(?m)^\s*Commands:') { $isCommandCli = $true }`,
+      `if ($helpText -match '\\[COMMAND\\]' -and $helpText -match 'Commands:') { $isCommandCli = $true }`,
       ``,
       `if ($isCommandCli) {`,
       `  Write-Host "    Using MassVision v2 CLI (subcommands)" -ForegroundColor Yellow`,
