@@ -42,6 +42,7 @@ export interface EdrEvent {
   // Legacy fields (backward compat)
   process_name?: string;
   process_path?: string;
+  parent_pid?: number;
   dest_ip?: string;
   dest_port?: number;
   dest_domain?: string;
