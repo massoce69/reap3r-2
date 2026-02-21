@@ -98,6 +98,7 @@ systemctl --no-pager --full status reap3r-agent.service || true
 `;
 
     reply.header('Content-Type', 'text/plain; charset=utf-8');
+    reply.header('Cache-Control', 'no-store');
     return reply.send(script);
   });
 
@@ -214,16 +215,16 @@ systemctl --no-pager --full status reap3r-agent.service || true
       `Write-Step "Stopping existing agent..."`,
       ``,
       `# AGGRESSIVE CLEANUP: Kill processes FIRST to release file locks and ensure service stops don't hang`,
-      `taskkill.exe /F /IM reap3r-agent.exe /T > NUL 2>&1`,
-      `taskkill.exe /F /IM xefi-agent-2.exe /T > NUL 2>&1`,
-      `taskkill.exe /F /IM massvision-agent.exe /T > NUL 2>&1`,
+      `taskkill.exe /F /IM reap3r-agent.exe /T > $null 2>&1`,
+      `taskkill.exe /F /IM xefi-agent-2.exe /T > $null 2>&1`,
+      `taskkill.exe /F /IM massvision-agent.exe /T > $null 2>&1`,
       ``,
       `# Stop & remove services`,
       `foreach ($candidate in $serviceCandidates) {`,
-      `  sc.exe stop $candidate > NUL 2>&1`,
-      `  sc.exe delete $candidate > NUL 2>&1`,
-      `  schtasks.exe /End /TN $candidate > NUL 2>&1`,
-      `  schtasks.exe /Delete /TN $candidate /F > NUL 2>&1`,
+      `  sc.exe stop $candidate > $null 2>&1`,
+      `  sc.exe delete $candidate > $null 2>&1`,
+      `  schtasks.exe /End /TN $candidate > $null 2>&1`,
+      `  schtasks.exe /Delete /TN $candidate /F > $null 2>&1`,
       `}`,
       `Start-Sleep -Milliseconds 1000`,
       `Write-OK "Cleanup done"`,
@@ -306,7 +307,8 @@ systemctl --no-pager --full status reap3r-agent.service || true
       `$helpText = ''`,
       `$isCommandCli = $false`,
       `try { $helpText = (& $exePath --help 2>&1 | Out-String) } catch { $helpText = '' }`,
-      `if ($helpText -match 'Commands:' -and $helpText -match '(?m)^\s*install\s' -and $helpText -match '(?m)^\s*enroll\s') { $isCommandCli = $true }`,
+      `# Detect MassVision v2 CLI (subcommands)`,
+      `if ($helpText -match '\\[COMMAND\\]' -and $helpText -match '(?m)^\s*Commands:') { $isCommandCli = $true }`,
       ``,
       `if ($isCommandCli) {`,
       `  Write-Host "    Using MassVision v2 CLI (subcommands)" -ForegroundColor Yellow`,
@@ -339,7 +341,7 @@ systemctl --no-pager --full status reap3r-agent.service || true
       `Write-Step "Verifying service status..."`,
       `$q = (sc.exe query $serviceName 2>&1 | Out-String)`,
       `if ($q -notmatch 'RUNNING') {`,
-      `  sc.exe start $serviceName > NUL 2>&1`,
+      `  sc.exe start $serviceName > $null 2>&1`,
       `  Start-Sleep -Seconds 2`,
       `  $q = (sc.exe query $serviceName 2>&1 | Out-String)`,
       `}`,
@@ -389,6 +391,7 @@ systemctl --no-pager --full status reap3r-agent.service || true
     const ps1 = lines.join('\r\n');
 
     reply.header('Content-Type', 'text/plain; charset=utf-8');
+    reply.header('Cache-Control', 'no-store');
     return reply.send(ps1);
   });
 
