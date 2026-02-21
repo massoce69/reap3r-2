@@ -31,13 +31,18 @@ export enum JobType {
 }
 
 export enum JobStatus {
+  // Canonical values used by the backend
+  Pending = 'pending',
+  Dispatched = 'dispatched',
+  Running = 'running',
+  Completed = 'completed',
+  Failed = 'failed',
+  Cancelled = 'cancelled',
+  // Legacy / backward-compat aliases (older DB rows)
   Queued = 'queued',
   Assigned = 'assigned',
-  Running = 'running',
   Success = 'success',
-  Failed = 'failed',
   Timeout = 'timeout',
-  Cancelled = 'cancelled',
 }
 
 // ── Payload Schemas ──

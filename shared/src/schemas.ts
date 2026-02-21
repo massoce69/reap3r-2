@@ -177,6 +177,7 @@ export const JobSchema = z.object({
   reason: z.string().nullable(),
   assigned_at: z.string().nullable(),
   completed_at: z.string().nullable(),
+  dispatch_count: z.number().int().default(0),
   timeout_sec: z.number(),
   created_at: z.string(),
 });
@@ -312,9 +313,18 @@ export const DetectionSchema = z.object({
   rule_name: z.string(),
   severity: z.string(),
   score: z.number(),
-  status: z.enum(['open', 'acknowledged', 'resolved', 'false_positive']),
+  status: z.enum(['open', 'acknowledged', 'resolved', 'false_positive', 'monitoring']),
   details: z.any(),
   created_at: z.string(),
+  // Enriched fields from join
+  agent_hostname: z.string().optional(),
+  event_cmdline: z.string().nullable().optional(),
+  event_process_name: z.string().nullable().optional(),
+  event_process_path: z.string().nullable().optional(),
+  event_pid: z.number().nullable().optional(),
+  event_parent_pid: z.number().nullable().optional(),
+  event_username: z.string().nullable().optional(),
+  event_sha256: z.string().nullable().optional(),
 });
 
 export const IncidentSchema = z.object({
@@ -324,10 +334,17 @@ export const IncidentSchema = z.object({
   severity: z.string(),
   status: z.enum(['open', 'investigating', 'contained', 'resolved', 'closed']),
   assigned_to: z.string().uuid().nullable(),
-  detection_ids: z.array(z.string().uuid()),
+  detection_count: z.number().optional(),
+  risk_score: z.number().optional(),
+  agent_id: z.string().uuid().nullable().optional(),
+  agent_hostname: z.string().nullable().optional(),
+  auto_created: z.boolean().optional(),
+  mitre_tactics: z.array(z.string()).nullable().optional(),
+  mitre_techniques: z.array(z.string()).nullable().optional(),
   notes: z.string().nullable(),
   created_at: z.string(),
   updated_at: z.string(),
+  closed_at: z.string().nullable().optional(),
 });
 
 export const CreateIncidentSchema = z.object({
@@ -343,6 +360,76 @@ export const EdrRespondSchema = z.object({
   action: z.enum(['edr_kill_process', 'edr_quarantine_file', 'edr_isolate_machine', 'edr_collect_bundle']),
   payload: z.any(),
   reason: z.string().min(1).max(500),
+});
+
+export const EdrRuleSchema = z.object({
+  id: z.string().uuid(),
+  rule_id: z.string(),
+  name: z.string(),
+  description: z.string().nullable(),
+  severity: z.string(),
+  logic: z.any(),
+  is_active: z.boolean(),
+  is_builtin: z.boolean(),
+  org_id: z.string().uuid().nullable(),
+  mitre_tactic: z.string().nullable().optional(),
+  mitre_technique: z.string().nullable().optional(),
+  event_types: z.array(z.string()).optional(),
+  tags: z.array(z.string()).optional(),
+  dedup_window_sec: z.number().optional(),
+  threshold_count: z.number().optional(),
+  threshold_window_sec: z.number().optional(),
+  monitor_only: z.boolean().optional(),
+  created_at: z.string(),
+});
+
+export const EdrRuleExceptionSchema = z.object({
+  id: z.string().uuid(),
+  org_id: z.string().uuid(),
+  rule_id: z.string(),
+  scope: z.enum(['org', 'site', 'device']),
+  scope_id: z.string().uuid().nullable(),
+  field: z.string(),
+  pattern: z.string(),
+  is_regex: z.boolean(),
+  reason: z.string().nullable(),
+  created_at: z.string(),
+  expires_at: z.string().nullable(),
+});
+
+export const IncidentTimelineEntrySchema = z.object({
+  id: z.string().uuid(),
+  incident_id: z.string().uuid(),
+  entry_type: z.string(),
+  ref_id: z.string().uuid().nullable(),
+  summary: z.string(),
+  actor: z.string().uuid().nullable(),
+  actor_name: z.string().nullable().optional(),
+  metadata: z.any(),
+  ts: z.string(),
+});
+
+export const DeviceIsolationSchema = z.object({
+  agent_id: z.string().uuid(),
+  org_id: z.string().uuid(),
+  is_isolated: z.boolean(),
+  isolated_at: z.string().nullable(),
+  isolated_by: z.string().uuid().nullable(),
+  reason: z.string().nullable(),
+  released_at: z.string().nullable(),
+});
+
+export const QuarantineEntrySchema = z.object({
+  id: z.string().uuid(),
+  org_id: z.string().uuid(),
+  agent_id: z.string().uuid(),
+  original_path: z.string(),
+  sha256: z.string(),
+  file_size: z.number().nullable(),
+  reason: z.string().nullable(),
+  status: z.string(),
+  quarantined_at: z.string(),
+  agent_hostname: z.string().nullable().optional(),
 });
 
 // ── Policy ──

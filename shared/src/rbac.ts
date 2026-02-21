@@ -96,6 +96,7 @@ export enum Permission {
   EdrRespond = 'edr:respond',
   EdrPolicyManage = 'edr:policy_manage',
   EdrIncidentManage = 'edr:incident_manage',
+  EdrHunt = 'edr:hunt',
 
   // Artifacts
   ArtifactUpload = 'artifact:upload',

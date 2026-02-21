@@ -34,7 +34,7 @@ import {
 import * as agentService from '../services/agent.service.js';
 import * as jobService from '../services/job.service.js';
 import { hydrateJobPayloadForDispatch } from '../services/job-dispatch.service.js';
-import { ingestSecurityEvent } from '../services/edr.service.js';
+import { ingestSecurityEvent, ingestEventBatch } from '../services/edr.service.js';
 import * as chatService from '../services/chat.service.js';
 import { authenticateAccessToken, hasPermission, isSessionActive } from '../services/auth-session.service.js';
 
@@ -430,7 +430,11 @@ export function setupAgentGateway(fastify: FastifyInstance) {
               };
               const env = nowEnvelopeBase(aid, MessageType.JobAssign, payload);
               sendSigned(ws, config.hmac.secret, env);
+              const isRedispatch = job.status === 'dispatched';
               await jobService.updateJobStatus(fastify, job.id, 'dispatched');
+              if (isRedispatch) {
+                fastify.log.info({ job_id: job.id, agent_id: aid, dispatch_count: (job.dispatch_count ?? 0) + 1 }, 'Re-dispatching stale update_agent job');
+              }
             }
             break;
           }
@@ -523,6 +527,18 @@ export function setupAgentGateway(fastify: FastifyInstance) {
               await ingestSecurityEvent(agent.org_id, aid, msg.payload);
             }
             fastify.broadcastToUI('edr:event', { agent_id: aid, event: msg.payload });
+            break;
+          }
+
+          case MessageType.SecurityEventBatchPush: {
+            const aid = String(msg.agentId);
+            agentId = aid;
+            agentSockets.set(aid, ws);
+            const agent = await agentService.getAgentById(fastify, aid);
+            if (agent && Array.isArray(msg.payload?.events)) {
+              await ingestEventBatch(agent.org_id, aid, msg.payload.events);
+              fastify.broadcastToUI('edr:event', { agent_id: aid, batch: true, count: msg.payload.events.length });
+            }
             break;
           }
 

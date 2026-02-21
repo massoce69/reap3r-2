@@ -1254,6 +1254,8 @@ async fn handle_job(
             "service_action" => execute_service_action(payload).await,
             "edr_kill_process" => execute_edr_kill_process(payload).await,
             "edr_isolate_machine" => execute_edr_isolate(payload).await,
+            "edr_quarantine_file" => execute_edr_quarantine_file(payload).await,
+            "edr_collect_bundle" => execute_edr_collect_bundle(payload).await,
             "remote_desktop_start" => {
                 start_remote_desktop(
                     payload,
@@ -1572,6 +1574,163 @@ async fn execute_edr_isolate(payload: &serde_json::Value) -> Result<serde_json::
         })),
         Err(e) => Err(format!("Failed to isolate: {}", e)),
     }
+}
+
+// ── EDR Quarantine File ──────────────────────────────────────────
+
+async fn execute_edr_quarantine_file(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let file_path = payload["file_path"]
+        .as_str()
+        .or_else(|| payload["path"].as_str())
+        .ok_or("Missing file_path")?;
+    let reason = payload["reason"].as_str().unwrap_or("EDR quarantine");
+
+    info!(file_path, reason, "EDR: Quarantining file");
+
+    let src = std::path::Path::new(file_path);
+    if !src.exists() {
+        return Err(format!("File not found: {}", file_path));
+    }
+
+    // Compute SHA-256 before moving
+    let file_bytes = tokio::fs::read(src).await.map_err(|e| format!("Read error: {}", e))?;
+    let sha256 = {
+        use sha2::{Sha256, Digest};
+        let mut hasher = Sha256::new();
+        hasher.update(&file_bytes);
+        format!("{:x}", hasher.finalize())
+    };
+    let file_size = file_bytes.len() as u64;
+
+    // Quarantine directory
+    let quarantine_dir = if cfg!(target_os = "windows") {
+        std::path::PathBuf::from(r"C:\ProgramData\Reap3r\quarantine")
+    } else {
+        std::path::PathBuf::from("/var/lib/reap3r/quarantine")
+    };
+    tokio::fs::create_dir_all(&quarantine_dir).await.map_err(|e| format!("Mkdir error: {}", e))?;
+
+    // Move file to quarantine with SHA256 name to avoid conflicts
+    let quarantine_name = format!("{}_{}", sha256, src.file_name().unwrap_or_default().to_string_lossy());
+    let dest = quarantine_dir.join(&quarantine_name);
+    tokio::fs::rename(src, &dest).await.or_else(|_| {
+        // rename fails across filesystems, fall back to copy + delete
+        let src2 = src.to_path_buf();
+        let dest2 = dest.clone();
+        let bytes = file_bytes.clone();
+        tokio::task::block_in_place(|| {
+            std::fs::write(&dest2, &bytes).map_err(|e| format!("Write error: {}", e))?;
+            std::fs::remove_file(&src2).map_err(|e| format!("Delete error: {}", e))
+        })
+    }).map_err(|e| format!("Quarantine move failed: {}", e))?;
+
+    // Write metadata sidecar
+    let meta = serde_json::json!({
+        "original_path": file_path,
+        "sha256": sha256,
+        "file_size": file_size,
+        "reason": reason,
+        "quarantined_at": chrono::Utc::now().to_rfc3339(),
+    });
+    let meta_path = quarantine_dir.join(format!("{}.meta.json", quarantine_name));
+    let _ = tokio::fs::write(&meta_path, serde_json::to_string_pretty(&meta).unwrap_or_default()).await;
+
+    Ok(serde_json::json!({
+        "quarantined": true,
+        "original_path": file_path,
+        "quarantine_path": dest.to_string_lossy(),
+        "sha256": sha256,
+        "file_size": file_size,
+        "reason": reason,
+    }))
+}
+
+// ── EDR Collect Triage Bundle ────────────────────────────────────
+
+async fn execute_edr_collect_bundle(payload: &serde_json::Value) -> Result<serde_json::Value, String> {
+    let reason = payload["reason"].as_str().unwrap_or("EDR triage");
+    info!(reason, "EDR: Collecting triage bundle");
+
+    let mut bundle = serde_json::Map::new();
+    let sys = System::new_all();
+
+    // 1. Running processes snapshot
+    let mut procs = Vec::new();
+    for (pid, process) in sys.processes() {
+        let exe = process.exe().map(|e| e.to_string_lossy().to_string()).unwrap_or_default();
+        let cmdline = process.cmd().iter().map(|s| s.to_string_lossy().to_string()).collect::<Vec<_>>().join(" ");
+        procs.push(serde_json::json!({
+            "pid": pid.as_u32(),
+            "name": process.name().to_string_lossy(),
+            "exe": exe,
+            "cmdline": cmdline,
+            "user": process.user_id().map(|u| u.to_string()).unwrap_or_default(),
+            "memory_bytes": process.memory(),
+            "cpu_usage": process.cpu_usage(),
+            "start_time": process.start_time(),
+        }));
+    }
+    bundle.insert("processes".into(), serde_json::json!(procs));
+
+    // 2. Network connections (platform-specific)
+    let net_output = if cfg!(target_os = "windows") {
+        tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command", "Get-NetTCPConnection | Select-Object LocalAddress,LocalPort,RemoteAddress,RemotePort,State,OwningProcess | ConvertTo-Json -Depth 2"])
+            .output().await
+    } else {
+        tokio::process::Command::new("ss")
+            .args(["-tnp"])
+            .output().await
+    };
+    if let Ok(out) = net_output {
+        let stdout = String::from_utf8_lossy(&out.stdout).to_string();
+        bundle.insert("network_connections".into(), serde_json::json!(stdout));
+    }
+
+    // 3. Autoruns / persistence (Windows)
+    if cfg!(target_os = "windows") {
+        let reg_output = tokio::process::Command::new("powershell")
+            .args(["-NoProfile", "-Command",
+                "Get-ItemProperty 'HKLM:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue | ConvertTo-Json -Depth 2; \
+                 Get-ItemProperty 'HKCU:\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run' -ErrorAction SilentlyContinue | ConvertTo-Json -Depth 2"])
+            .output().await;
+        if let Ok(out) = reg_output {
+            bundle.insert("autoruns".into(), serde_json::json!(String::from_utf8_lossy(&out.stdout).to_string()));
+        }
+
+        let task_output = tokio::process::Command::new("schtasks")
+            .args(["/Query", "/FO", "CSV", "/V"])
+            .output().await;
+        if let Ok(out) = task_output {
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            // Take only first 50KB to avoid huge payloads
+            let truncated: String = stdout.chars().take(50_000).collect();
+            bundle.insert("scheduled_tasks".into(), serde_json::json!(truncated));
+        }
+    } else {
+        // Linux: crontabs + systemd services
+        let cron_output = tokio::process::Command::new("bash")
+            .args(["-c", "cat /etc/crontab 2>/dev/null; for u in $(cut -d: -f1 /etc/passwd); do echo \"==$u==\"; crontab -u $u -l 2>/dev/null; done"])
+            .output().await;
+        if let Ok(out) = cron_output {
+            bundle.insert("crontabs".into(), serde_json::json!(String::from_utf8_lossy(&out.stdout).to_string()));
+        }
+        let svc_output = tokio::process::Command::new("systemctl")
+            .args(["list-units", "--type=service", "--no-pager", "--plain"])
+            .output().await;
+        if let Ok(out) = svc_output {
+            bundle.insert("services".into(), serde_json::json!(String::from_utf8_lossy(&out.stdout).to_string()));
+        }
+    }
+
+    // 4. System info
+    bundle.insert("hostname".into(), serde_json::json!(System::host_name().unwrap_or_default()));
+    bundle.insert("os".into(), serde_json::json!(System::long_os_version().unwrap_or_default()));
+    bundle.insert("kernel".into(), serde_json::json!(System::kernel_version().unwrap_or_default()));
+    bundle.insert("uptime_sec".into(), serde_json::json!(System::uptime()));
+    bundle.insert("collected_at".into(), serde_json::json!(chrono::Utc::now().to_rfc3339()));
+
+    Ok(serde_json::Value::Object(bundle))
 }
 
 // Ã¢â€â‚¬Ã¢â€â‚¬ Security Monitoring Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬Ã¢â€â‚¬

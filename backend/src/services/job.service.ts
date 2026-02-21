@@ -93,10 +93,31 @@ export async function getJobById(fastify: FastifyInstance, id: string) {
 
 /* ── Pending jobs for agent ── */
 export async function getPendingJobs(fastify: FastifyInstance, agentId: string) {
+  const redispatchAfterSeconds = Math.min(
+    Math.max(Number(process.env.AGENT_UPDATE_REDISPATCH_SECONDS ?? 45), 5),
+    1800,
+  );
+  const maxRedispatch = Math.min(
+    Math.max(Number(process.env.AGENT_UPDATE_MAX_REDISPATCH ?? 5), 1),
+    50,
+  );
   const { rows } = await fastify.pg.query(
     // Backward compatible: older DBs used 'queued' default.
-    `SELECT * FROM jobs WHERE agent_id = $1 AND status IN ('pending', 'queued') ORDER BY priority DESC, created_at ASC`,
-    [agentId],
+    // Also re-dispatch stale update jobs that were sent but never ACKed,
+    // up to a maximum of $3 re-dispatch attempts.
+    `SELECT * FROM jobs
+     WHERE agent_id = $1
+       AND (
+         status IN ('pending', 'queued')
+         OR (
+           status = 'dispatched'
+           AND type = 'update_agent'
+           AND COALESCE(assigned_at, created_at) < now() - interval '1 second' * $2
+           AND COALESCE(dispatch_count, 0) < $3
+         )
+       )
+     ORDER BY priority DESC, created_at ASC`,
+    [agentId, redispatchAfterSeconds, maxRedispatch],
   );
   return rows;
 }
@@ -114,6 +135,7 @@ export async function updateJobStatus(
 
   if (status === 'dispatched') {
     fields.push('assigned_at = now()');
+    fields.push('dispatch_count = COALESCE(dispatch_count, 0) + 1');
   } else if (status === 'running') {
     fields.push('started_at = now()');
   } else if (status === 'completed' || status === 'failed' || status === 'cancelled') {

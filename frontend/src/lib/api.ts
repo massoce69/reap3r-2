@@ -367,26 +367,89 @@ export const api = {
   },
 
   edr: {
+    // ── Overview ──
+    overview: () => request<any>('/api/edr/overview'),
+
+    // ── Events ──
     events: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<{ data: any[]; total: number }>(`/api/edr/events${qs}`);
     },
+
+    // ── Detections ──
     detections: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<{ data: any[]; total: number }>(`/api/edr/detections${qs}`);
     },
+    detectionDetail: (id: string) => request<any>(`/api/edr/detections/${id}`),
     updateDetection: (id: string, data: any) =>
       request<any>(`/api/edr/detections/${id}/status`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    // ── Incidents ──
     incidents: (params?: Record<string, string>) => {
       const qs = params ? '?' + new URLSearchParams(params).toString() : '';
       return request<{ data: any[]; total: number }>(`/api/edr/incidents${qs}`);
     },
+    incidentDetail: (id: string) => request<any>(`/api/edr/incidents/${id}`),
+    incidentTimeline: (id: string) => request<any[]>(`/api/edr/incidents/${id}/timeline`),
+    addTimelineEntry: (id: string, data: { entry_type: string; summary: string; metadata?: any }) =>
+      request<any>(`/api/edr/incidents/${id}/timeline`, { method: 'POST', body: JSON.stringify(data) }),
     createIncident: (data: any) =>
       request<any>('/api/edr/incidents', { method: 'POST', body: JSON.stringify(data) }),
     updateIncident: (id: string, data: any) =>
       request<any>(`/api/edr/incidents/${id}/status`, { method: 'PATCH', body: JSON.stringify(data) }),
+
+    // ── Rules ──
+    rules: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<any[]>(`/api/edr/rules${qs}`);
+    },
+    ruleDetail: (id: string) => request<any>(`/api/edr/rules/${id}`),
+    createRule: (data: any) =>
+      request<any>('/api/edr/rules', { method: 'POST', body: JSON.stringify(data) }),
+    updateRule: (id: string, data: any) =>
+      request<any>(`/api/edr/rules/${id}`, { method: 'PATCH', body: JSON.stringify(data) }),
+    deleteRule: (id: string) =>
+      request<any>(`/api/edr/rules/${id}`, { method: 'DELETE' }),
+
+    // ── Rule Exceptions ──
+    exceptions: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<any[]>(`/api/edr/exceptions${qs}`);
+    },
+    createException: (data: any) =>
+      request<any>('/api/edr/exceptions', { method: 'POST', body: JSON.stringify(data) }),
+    deleteException: (id: string) =>
+      request<any>(`/api/edr/exceptions/${id}`, { method: 'DELETE' }),
+
+    // ── Threat Hunting ──
+    hunt: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/edr/hunt${qs}`);
+    },
+    savedQueries: () => request<any[]>('/api/edr/hunt/saved'),
+    saveHuntQuery: (data: { name: string; query_text: string; filters?: any }) =>
+      request<any>('/api/edr/hunt/saved', { method: 'POST', body: JSON.stringify(data) }),
+    deleteHuntQuery: (id: string) =>
+      request<any>(`/api/edr/hunt/saved/${id}`, { method: 'DELETE' }),
+
+    // ── Isolation ──
+    isolatedDevices: () => request<any[]>('/api/edr/isolation'),
+    isolationState: (agentId: string) => request<any>(`/api/edr/isolation/${agentId}`),
+
+    // ── Quarantine ──
+    quarantine: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<any[]>(`/api/edr/quarantine${qs}`);
+    },
+
+    // ── Response Actions ──
     respond: (data: any) =>
       request<any>('/api/edr/respond', { method: 'POST', body: JSON.stringify(data) }),
+    actions: (params?: Record<string, string>) => {
+      const qs = params ? '?' + new URLSearchParams(params).toString() : '';
+      return request<{ data: any[]; total: number }>(`/api/edr/actions${qs}`);
+    },
   },
 
   admin: {
