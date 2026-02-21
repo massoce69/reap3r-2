@@ -189,7 +189,7 @@ export const CreateEnrollmentTokenSchema = z.object({
   company_id: z.string().uuid().optional(),
   folder_id: z.string().uuid().optional(),
   expires_at: z.string().optional(),
-  max_uses: z.number().int().min(1).max(10000).optional(),
+  max_uses: z.number().int().min(0).max(10000).optional(),
 });
 
 export const EnrollmentTokenSchema = z.object({
