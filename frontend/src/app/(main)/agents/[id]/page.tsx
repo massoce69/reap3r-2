@@ -770,7 +770,7 @@ export default function AgentDetailPage() {
   };
 
   // ── File Explorer: helpers ──
-  const isWindows = agent?.os === 'windows';
+  const isWindows = (agent?.os ?? '').toLowerCase().includes('windows');
 
   const feListDir = async (dirPath: string) => {
     if (!agent) return;
@@ -954,7 +954,7 @@ export default function AgentDetailPage() {
   // Load file explorer when switching to tab
   useEffect(() => {
     if (tab === 'file-explorer' && feFiles.length === 0 && !feLoading && agent) {
-      const home = agent.os === 'windows' ? 'C:\\' : '/';
+      const home = (agent.os ?? '').toLowerCase().includes('windows') ? 'C:\\' : '/';
       setFePath(home);
       setFePathInput(home);
       feListDir(home);
@@ -1458,7 +1458,7 @@ export default function AgentDetailPage() {
                   <MousePointer className="w-3 h-3" /> Interactive Control Active
                 </span>
               )}
-              <span className="ml-auto">Agent: {agent.os === 'windows' ? 'Windows' : agent.os}</span>
+              <span className="ml-auto">Agent: {(agent.os ?? '').toLowerCase().includes('windows') ? 'Windows' : agent.os}</span>
             </div>
           </div>
         )}
