@@ -34,6 +34,7 @@ import {
 import * as agentService from '../services/agent.service.js';
 import * as jobService from '../services/job.service.js';
 import { hydrateJobPayloadForDispatch } from '../services/job-dispatch.service.js';
+import { toV2RunScriptPayload } from '../lib/v2-run-script.js';
 import { ingestSecurityEvent, ingestEventBatch } from '../services/edr.service.js';
 import * as chatService from '../services/chat.service.js';
 import { authenticateAccessToken, hasPermission, isSessionActive } from '../services/auth-session.service.js';
@@ -242,6 +243,49 @@ export function setupAgentGateway(fastify: FastifyInstance) {
   // ── v2 agent WS: accept auth envelope, then keep socket open ─────────────
   const v2Authed = new Map<WS, { agentId: string }>();
 
+  const dispatchV2Backlog = async (agentId: string, ws: WS) => {
+    try {
+      if (ws.readyState !== WS.OPEN) return;
+      const { rows } = await fastify.pg.query(
+        `SELECT id, payload, timeout_sec, priority, created_at
+         FROM jobs
+         WHERE agent_id = $1
+           AND status IN ('pending', 'queued')
+           AND type = 'run_script'
+         ORDER BY created_at ASC
+         LIMIT 25`,
+        [agentId],
+      );
+
+      if (!rows?.length) return;
+
+      let dispatched = 0;
+      for (const r of rows) {
+        if (ws.readyState !== WS.OPEN) break;
+        const payloadInput = r.payload ?? {};
+        const v2Payload = toV2RunScriptPayload(payloadInput);
+        const msg = {
+          type: 'job',
+          job_id: String(r.id),
+          job_type: 'run_script',
+          payload: v2Payload,
+          timeout_secs: Number(r.timeout_sec ?? 300) || 300,
+          priority: Number(r.priority ?? 0) || 0,
+          created_at: new Date(r.created_at).toISOString(),
+        };
+        ws.send(JSON.stringify(msg));
+        await jobService.updateJobStatus(fastify, String(r.id), 'dispatched');
+        dispatched++;
+      }
+
+      if (dispatched > 0) {
+        fastify.log.info({ agentId, dispatched }, '[agents-v2] dispatched backlog run_script jobs');
+      }
+    } catch (err) {
+      fastify.log.warn({ err, agentId }, '[agents-v2] backlog dispatch failed');
+    }
+  };
+
   wssV2.on('connection', async (ws, request) => {
     const url = new URL(request.url ?? '/', `http://${request.headers.host || 'localhost'}`);
     const agentId = url.searchParams.get('agent_id') || '';
@@ -267,7 +311,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     }
 
     // First message must be auth envelope
-    const onMessage = (data: RawData) => {
+    const onMessage = async (data: RawData) => {
       try {
         const text = data.toString('utf8');
         const env = safeParseJson(text);
@@ -291,6 +335,9 @@ export function setupAgentGateway(fastify: FastifyInstance) {
         agentSocketsV2.set(agentId, ws);
         ws.off('message', onMessage);
         fastify.log.info({ agentId, machineId, ip }, '[agents-v2] WS authenticated');
+
+        // Ensure jobs created before WS connect don't stay pending forever.
+        await dispatchV2Backlog(agentId, ws);
       } catch {
         try { ws.close(1008, 'error'); } catch {}
       }

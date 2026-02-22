@@ -10,47 +10,10 @@ import { parseUUID, parseBody, clampLimit } from '../lib/validate.js';
 import { createHmac, randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { hydrateJobPayloadForDispatch } from '../services/job-dispatch.service.js';
+import { toV2RunScriptPayload } from '../lib/v2-run-script.js';
 
 function toV2JobType(type: string): string {
   return String(type || '').toLowerCase();
-}
-
-function toV2RunScriptPayload(payloadInput: any) {
-  const interpreter = String(payloadInput?.interpreter || '').toLowerCase();
-  const script = String(payloadInput?.script || '');
-  const timeoutSec = Number(payloadInput?.timeout_sec ?? payloadInput?.timeout_secs ?? 300) || 300;
-  const streamOutput = Boolean(payloadInput?.stream_output);
-  const args = Array.isArray(payloadInput?.args) ? payloadInput.args.map((v: any) => String(v)) : [];
-
-  const env: Record<string, string> = {};
-  if (payloadInput?.env && typeof payloadInput.env === 'object') {
-    for (const [k, v] of Object.entries(payloadInput.env)) {
-      if (typeof k !== 'string') continue;
-      if (typeof v === 'string') env[k] = v;
-      else if (typeof v === 'number' || typeof v === 'boolean') env[k] = String(v);
-    }
-  }
-  const runAs = typeof payloadInput?.run_as === 'string' ? payloadInput.run_as : undefined;
-
-  // Rust enum ScriptType is `snake_case`: power_shell | bash | python
-  let scriptType: 'power_shell' | 'bash' | 'python' = 'power_shell';
-  if (interpreter === 'bash' || interpreter === 'sh') scriptType = 'bash';
-  if (interpreter === 'python') scriptType = 'python';
-  if (interpreter === 'cmd') {
-    // Best-effort: wrap in PowerShell
-    scriptType = 'power_shell';
-  }
-
-  return {
-    script_type: scriptType,
-    content: interpreter === 'cmd' ? `cmd /c ${script}` : script,
-    args,
-    timeout_secs: Math.max(5, Math.min(3600, Math.trunc(timeoutSec))),
-    run_as: runAs,
-    env,
-    stream_output: streamOutput,
-    signature: null,
-  };
 }
 
 export default async function jobRoutes(fastify: FastifyInstance) {
