@@ -226,9 +226,12 @@ fn gdi_stream_loop_blocking(
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
         ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, RGBQUAD, ROP_CODE, SRCCOPY,
     };
-    use windows::Win32::Graphics::Gdi::GetWindowDC;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetDesktopWindow, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+    use windows::Win32::System::StationsAndDesktops::{
+        OpenInputDesktop, OpenWindowStationW, SetProcessWindowStation, SetThreadDesktop,
+        DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
     };
 
     #[derive(Clone, Copy)]
@@ -264,17 +267,43 @@ fn gdi_stream_loop_blocking(
 
     unsafe {
         let null_hwnd = HWND(std::ptr::null_mut());
-        let desktop = GetDesktopWindow();
 
-        // Prefer desktop window DC
-        let mut screen_dc: HDC = GetWindowDC(desktop);
-        let mut release_hwnd = desktop;
-        if screen_dc.0.is_null() {
-            screen_dc = GetDC(null_hwnd);
-            release_hwnd = null_hwnd;
+        // ── Attach this thread to the interactive desktop ──────────────────────────
+        // When the agent runs as a service or scheduled task it may not be attached
+        // to "WinSta0\Default". Without this, GetDC succeeds but BitBlt returns 0x80070005.
+        if let Ok(hws) = OpenWindowStationW(
+            windows::core::w!("WinSta0"),
+            false,
+            0x10000000u32, // GENERIC_ALL
+        ) {
+            let _ = SetProcessWindowStation(hws);
         }
+        // OpenInputDesktop gets the currently active/visible input desktop (handles
+        // cases where the session was locked then unlocked, UAC dialog open, etc.)
+        if let Ok(hd) = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0u32), // dwflags = 0
+            false,
+            DESKTOP_ACCESS_FLAGS(0x10000000u32), // GENERIC_ALL
+        ) {
+            let _ = SetThreadDesktop(hd);
+        } else {
+            // Fallback: open "Default" desktop by name
+            if let Ok(hd) = windows::Win32::System::StationsAndDesktops::OpenDesktopW(
+                windows::core::w!("Default"),
+                DESKTOP_CONTROL_FLAGS(0u32), // dwflags
+                false,
+                0x10000000u32, // dwdesiredaccess = GENERIC_ALL (u32)
+            ) {
+                let _ = SetThreadDesktop(hd);
+            }
+        }
+        // ─────────────────────────────────────────────────────────────────────────
+
+        // Screen DC – GetDC(NULL) captures the entire virtual screen after the desktop bind
+        let screen_dc: HDC = GetDC(null_hwnd);
+        let release_hwnd = null_hwnd;
         if screen_dc.0.is_null() {
-            anyhow::bail!("GetDC failed");
+            anyhow::bail!("GetDC failed (even after desktop bind)");
         }
 
         let mem_dc: HDC = CreateCompatibleDC(screen_dc);
