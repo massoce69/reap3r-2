@@ -132,18 +132,17 @@ export default async function jobRoutes(fastify: FastifyInstance) {
         fastify.log.info({ job_id: job.id, job_type }, 'Job pushed immediately to agent');
       }
 
-      // v2 agents (Rust): only run_script is supported for now.
-      // This unblocks File Explorer (download/upload) and screenshot fallback.
+      // v2 agents (Rust): run_script + remote desktop jobs.
       if ((!agentWs || agentWs.readyState !== 1) && fastify.agentSocketsV2) {
         const ws2 = fastify.agentSocketsV2.get(agent_id);
         if (ws2 && ws2.readyState === 1) {
           const jt = toV2JobType(job_type);
-          if (jt === 'run_script') {
-            const v2Payload = toV2RunScriptPayload(payloadInput);
+          if (jt === 'run_script' || jt === 'list_monitors' || jt === 'remote_desktop_start' || jt === 'remote_desktop_stop') {
+            const v2Payload = jt === 'run_script' ? toV2RunScriptPayload(payloadInput) : payloadInput;
             const msg = {
               type: 'job',
               job_id: job.id,
-              job_type: 'run_script',
+              job_type: jt,
               payload: v2Payload,
               timeout_secs: (timeout_sec ?? 300),
               priority: Number(priority ?? 0) || 0,

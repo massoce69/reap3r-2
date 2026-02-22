@@ -213,6 +213,10 @@ impl AgentCore {
         let (ws_incoming_tx, mut ws_incoming_rx) = mpsc::channel::<ServerMessage>(256);
         let (ws_outgoing_tx, ws_outgoing_rx) = mpsc::channel::<AgentMessage>(256);
 
+        let rd_mgr = modules::remote_desktop::RemoteDesktopManager::new();
+        let rd_mgr_job = rd_mgr.clone();
+        let rd_mgr_ws = rd_mgr.clone();
+
         let ws = WsClient::new(
             self.config.clone(),
             self.token_mgr.clone(),
@@ -263,8 +267,9 @@ impl AgentCore {
         let job_policy = self.policy.clone();
         let job_config = self.config.clone();
         let mut job_shutdown = self.shutdown_tx.subscribe();
+        let job_ws_tx = ws_outgoing_tx.clone();
         tokio::spawn(async move {
-            Self::job_processor(job_db, job_api, job_token, job_policy, job_config, &mut job_shutdown).await;
+            Self::job_processor(job_db, job_api, job_token, job_policy, job_config, rd_mgr_job, job_ws_tx, &mut job_shutdown).await;
         });
 
         // ── Spawn periodic cleanup ───────────────────────────
@@ -290,7 +295,7 @@ impl AgentCore {
         loop {
             tokio::select! {
                 Some(msg) = ws_incoming_rx.recv() => {
-                    self.handle_server_message(msg, &ws_outgoing_tx).await;
+                    self.handle_server_message(msg, &ws_outgoing_tx, &rd_mgr_ws).await;
                 }
                 _ = tokio::signal::ctrl_c() => {
                     info!("Ctrl+C received, shutting down gracefully");
@@ -313,6 +318,7 @@ impl AgentCore {
         &self,
         msg: ServerMessage,
         ws_tx: &mpsc::Sender<AgentMessage>,
+        rd_mgr: &modules::remote_desktop::RemoteDesktopManager,
     ) {
         match msg {
             ServerMessage::Job(job) => {
@@ -394,6 +400,10 @@ impl AgentCore {
             ServerMessage::SessionEnd { session_id } => {
                 modules::remote_shell::end_session(&session_id).await;
             }
+
+            ServerMessage::RdInput(input) => {
+                rd_mgr.handle_input(input);
+            }
         }
     }
 
@@ -404,6 +414,8 @@ impl AgentCore {
         token_mgr: TokenManager,
         policy: Arc<RwLock<PolicyEngine>>,
         config: AgentConfig,
+        rd_mgr: modules::remote_desktop::RemoteDesktopManager,
+        ws_tx: mpsc::Sender<AgentMessage>,
         shutdown: &mut broadcast::Receiver<()>,
     ) {
         info!("Job processor started");
@@ -429,6 +441,81 @@ impl AgentCore {
             let started_at = chrono::Utc::now();
 
             let result = match job.job_type {
+                JobType::ListMonitors => {
+                    let monitors = match rd_mgr.list_monitors() {
+                        Ok(m) => m,
+                        Err(e) => {
+                            warn!(error = %e, "List monitors failed");
+                            vec![]
+                        }
+                    };
+                    JobResult {
+                        job_id: job.job_id.clone(),
+                        agent_id: token_mgr.agent_id().to_string(),
+                        status: JobStatus::Success,
+                        exit_code: Some(0),
+                        stdout: Some(serde_json::to_string(&monitors).unwrap_or_default()),
+                        stderr: None,
+                        artifacts: Vec::new(),
+                        started_at,
+                        completed_at: chrono::Utc::now(),
+                        duration_ms: (chrono::Utc::now() - started_at).num_milliseconds() as u64,
+                    }
+                }
+                JobType::RemoteDesktopStart => {
+                    let payload: crate::protocol::RemoteDesktopStartPayload = serde_json::from_value(job.payload.clone())
+                        .unwrap_or(crate::protocol::RemoteDesktopStartPayload {
+                            mode: "view".into(),
+                            fps: 5,
+                            quality: 60,
+                            codec: "jpeg".into(),
+                            scale: 0.5,
+                            monitor: -1,
+                        });
+                    if let Err(e) = rd_mgr.start_stream(token_mgr.agent_id(), &job.job_id, payload, ws_tx.clone()) {
+                        warn!(error = %e, "Remote desktop start failed");
+                        JobResult {
+                            job_id: job.job_id.clone(),
+                            agent_id: token_mgr.agent_id().to_string(),
+                            status: JobStatus::Failed,
+                            exit_code: Some(1),
+                            stdout: None,
+                            stderr: Some(format!("remote desktop start failed: {e}")),
+                            artifacts: Vec::new(),
+                            started_at,
+                            completed_at: chrono::Utc::now(),
+                            duration_ms: 0,
+                        }
+                    } else {
+                        JobResult {
+                            job_id: job.job_id.clone(),
+                            agent_id: token_mgr.agent_id().to_string(),
+                            status: JobStatus::Success,
+                            exit_code: Some(0),
+                            stdout: Some("stream_started".into()),
+                            stderr: None,
+                            artifacts: Vec::new(),
+                            started_at,
+                            completed_at: chrono::Utc::now(),
+                            duration_ms: (chrono::Utc::now() - started_at).num_milliseconds() as u64,
+                        }
+                    }
+                }
+                JobType::RemoteDesktopStop => {
+                    rd_mgr.stop_stream();
+                    JobResult {
+                        job_id: job.job_id.clone(),
+                        agent_id: token_mgr.agent_id().to_string(),
+                        status: JobStatus::Success,
+                        exit_code: Some(0),
+                        stdout: Some("stream_stopped".into()),
+                        stderr: None,
+                        artifacts: Vec::new(),
+                        started_at,
+                        completed_at: chrono::Utc::now(),
+                        duration_ms: (chrono::Utc::now() - started_at).num_milliseconds() as u64,
+                    }
+                }
                 JobType::RunScript => {
                     let pol = policy.read().await;
                     if !pol.current().script_runner_enabled {

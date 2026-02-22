@@ -100,8 +100,6 @@ export default function AgentDetailPage() {
   const canReboot = userPerms.includes(Permission.JobReboot);
   const canDelete = userPerms.includes(Permission.AgentDelete);
 
-  const isAgentV2 = Array.isArray(agent?.tags) && agent.tags.includes('agent:v2');
-
   const refresh = useCallback(() => {
     if (!id) return;
     Promise.all([
@@ -331,10 +329,6 @@ export default function AgentDetailPage() {
   // ── Remote Desktop: fetch available monitors ──
   const fetchMonitors = async () => {
     if (!agent || rdMonitorsLoading) return;
-    if (isAgentV2) {
-      setRdError("Remote Desktop n'est pas encore supporté par l'agent v2.");
-      return;
-    }
     console.log('[RD] Fetching monitors for agent:', agent.id);
     setRdMonitorsLoading(true);
     try {
@@ -399,10 +393,6 @@ export default function AgentDetailPage() {
   // ── Remote Desktop: WebSocket video streaming ──
   const startRdStream = async () => {
     if (!agent || rdLoading) return;
-    if (isAgentV2) {
-      setRdError("Remote Desktop (prise en main) n'est pas encore supporté par l'agent v2.");
-      return;
-    }
     console.log('[RD] Starting stream, agent:', agent.id, 'monitor:', rdSelectedMonitor, 'ws connected:', realtime.connected);
     setRdLoading(true);
     setRdError(null);
@@ -1347,7 +1337,7 @@ export default function AgentDetailPage() {
                 {/* Stream / Stop / Screenshot buttons */}
                 {!rdStreaming ? (
                   <>
-                    <Button size="sm" onClick={startRdStream} disabled={!isOnline || rdLoading || isAgentV2}>
+                    <Button size="sm" onClick={startRdStream} disabled={!isOnline || rdLoading}>
                       <Play className="w-4 h-4" /> Stream
                     </Button>
                     <Button size="sm" variant="ghost" onClick={captureScreenshot} disabled={!isOnline || rdLoading}>
@@ -1362,7 +1352,6 @@ export default function AgentDetailPage() {
                     {/* Interactive control toggle */}
                     <button
                       onClick={() => setRdInteractive(p => !p)}
-                      disabled={isAgentV2}
                       className={`flex items-center gap-1 px-2 py-1 rounded text-[10px] font-medium transition-all ${
                         rdInteractive
                           ? 'bg-blue-500/20 text-blue-400 border border-blue-500/40'
@@ -1396,12 +1385,6 @@ export default function AgentDetailPage() {
               </div>
             )}
 
-            {isAgentV2 && (
-              <div className={`bg-reap3r-warning/5 border border-reap3r-warning/20 rounded-lg px-3 py-2 text-xs text-reap3r-warning flex items-center gap-2 ${rdFullscreen ? 'mx-4' : 'mb-3'}`}>
-                <AlertCircle className="w-4 h-4" />
-                Cet agent est en v2 : la prise en main Remote Desktop n'est pas encore implémentée. L'explorateur de fichiers et "Screenshot" fonctionnent.
-              </div>
-            )}
 
             {/* Video/Screenshot Display */}
             {/* eslint-disable-next-line jsx-a11y/no-static-element-interactions */}
@@ -1423,7 +1406,7 @@ export default function AgentDetailPage() {
                   <p className="text-xs text-gray-600 mb-4">Click &quot;Stream&quot; for live video or &quot;Screenshot&quot; for a single capture</p>
                   {isOnline && (
                     <div className="flex gap-2 justify-center">
-                      <Button onClick={startRdStream} size="sm" disabled={isAgentV2}>
+                      <Button onClick={startRdStream} size="sm">
                         <Play className="w-4 h-4" /> Start Stream
                       </Button>
                       <Button onClick={captureScreenshot} size="sm" variant="ghost">

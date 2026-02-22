@@ -243,15 +243,61 @@ export function setupAgentGateway(fastify: FastifyInstance) {
   // ── v2 agent WS: accept auth envelope, then keep socket open ─────────────
   const v2Authed = new Map<WS, { agentId: string }>();
 
+  const handleV2AgentMessage = (agentId: string, raw: RawData) => {
+    try {
+      const text = raw.toString('utf8');
+      const msg = safeParseJson(text);
+      if (!msg || typeof msg !== 'object') return;
+
+      // Agent v2 sends: { type: 'stream_output', session_id, stream_type, data, sequence }
+      if ((msg as any).type === 'stream_output') {
+        const payload = {
+          session_id: String((msg as any).session_id ?? ''),
+          stream_type: (msg as any).stream_type,
+          data: (msg as any).data,
+          sequence: Number((msg as any).sequence ?? 0),
+        };
+        const soParsed = StreamOutputPayload.safeParse(payload);
+        if (!soParsed.success) return;
+        const so = soParsed.data;
+
+        if (so.stream_type === 'frame') {
+          fastify.broadcastToUI('rd:frame', {
+            agent_id: agentId,
+            session_id: so.session_id,
+            data: so.data,
+            sequence: so.sequence,
+          });
+        } else if (so.stream_type === 'error') {
+          fastify.broadcastToUI('rd:error', {
+            agent_id: agentId,
+            session_id: so.session_id,
+            error: so.data,
+          });
+        } else {
+          fastify.broadcastToUI('stream:output', {
+            agent_id: agentId,
+            session_id: so.session_id,
+            stream_type: so.stream_type,
+            data: so.data,
+            sequence: so.sequence,
+          });
+        }
+      }
+    } catch {
+      // ignore
+    }
+  };
+
   const dispatchV2Backlog = async (agentId: string, ws: WS) => {
     try {
       if (ws.readyState !== WS.OPEN) return;
       const { rows } = await fastify.pg.query(
-        `SELECT id, payload, timeout_secs, priority, created_at
+        `SELECT id, type, payload, timeout_secs, priority, created_at
          FROM jobs
          WHERE agent_id = $1
            AND status IN ('pending', 'queued')
-           AND type = 'run_script'
+           AND type IN ('run_script', 'list_monitors', 'remote_desktop_start', 'remote_desktop_stop')
          ORDER BY created_at ASC
          LIMIT 25`,
         [agentId],
@@ -262,12 +308,13 @@ export function setupAgentGateway(fastify: FastifyInstance) {
       let dispatched = 0;
       for (const r of rows) {
         if (ws.readyState !== WS.OPEN) break;
-        const payloadInput = r.payload ?? {};
-        const v2Payload = toV2RunScriptPayload(payloadInput);
+        const jt = String((r as any).type ?? '').toLowerCase();
+        const payloadInput = (r as any).payload ?? {};
+        const v2Payload = jt === 'run_script' ? toV2RunScriptPayload(payloadInput) : payloadInput;
         const msg = {
           type: 'job',
           job_id: String(r.id),
-          job_type: 'run_script',
+          job_type: jt,
           payload: v2Payload,
           timeout_secs: Number((r as any).timeout_secs ?? 300) || 300,
           priority: Number(r.priority ?? 0) || 0,
@@ -335,6 +382,8 @@ export function setupAgentGateway(fastify: FastifyInstance) {
         agentSocketsV2.set(agentId, ws);
         ws.off('message', onMessage);
         fastify.log.info({ agentId, machineId, ip }, '[agents-v2] WS authenticated');
+
+        ws.on('message', (raw2: RawData) => handleV2AgentMessage(agentId, raw2));
 
         // Ensure jobs created before WS connect don't stay pending forever.
         await dispatchV2Backlog(agentId, ws);
@@ -831,11 +880,30 @@ export function setupAgentGateway(fastify: FastifyInstance) {
           const p = msg.payload;
           if (!p?.agent_id) return;
           const agentWs = agentSockets.get(String(p.agent_id));
-          if (!agentWs || agentWs.readyState !== WS.OPEN) return;
+          if (agentWs && agentWs.readyState === WS.OPEN) {
+            const env = nowEnvelopeBase(String(p.agent_id), MessageType.RdInput, {
+              input_type: p.input_type,
+              session_id: p.session_id,
+              x: p.x,
+              y: p.y,
+              button: p.button,
+              delta: p.delta,
+              key: p.key,
+              vk: p.vk,
+              monitor: p.monitor ?? -1,
+            });
+            sendSigned(agentWs, config.hmac.secret, env);
+            return;
+          }
 
-          const env = nowEnvelopeBase(String(p.agent_id), MessageType.RdInput, {
+          // Fallback to v2 agents WS
+          const ws2 = agentSocketsV2.get(String(p.agent_id));
+          if (!ws2 || ws2.readyState !== WS.OPEN) return;
+          ws2.send(JSON.stringify({
+            type: 'rd_input',
+            agent_id: String(p.agent_id),
+            session_id: p.session_id ?? null,
             input_type: p.input_type,
-            session_id: p.session_id,
             x: p.x,
             y: p.y,
             button: p.button,
@@ -843,8 +911,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
             key: p.key,
             vk: p.vk,
             monitor: p.monitor ?? -1,
-          });
-          sendSigned(agentWs, config.hmac.secret, env);
+          }));
         }
       } catch {
         // Ignore malformed UI messages

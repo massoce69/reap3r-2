@@ -26,6 +26,10 @@ pub enum ServerMessage {
     SessionInput { session_id: String, data: String },
     #[serde(rename = "session_end")]
     SessionEnd { session_id: String },
+
+    // Remote Desktop input (low-latency mouse/keyboard injection)
+    #[serde(rename = "rd_input")]
+    RdInput(RdInputPayload),
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -54,6 +58,10 @@ pub enum AgentMessage {
     EnrollmentRequest(EnrollmentPayload),
     #[serde(rename = "audit")]
     Audit(AuditEvent),
+
+    // Stream output (stdout/stderr/frame/error) over WS
+    #[serde(rename = "stream_output")]
+    StreamOutput(StreamOutputPayload),
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -114,6 +122,58 @@ pub enum JobType {
     PatchApply,
     WebcamCapture,
     ListCameras,
+
+    // Remote Desktop
+    ListMonitors,
+    RemoteDesktopStart,
+    RemoteDesktopStop,
+}
+
+// ═══════════════════════════════════════════════════════════════
+//  Remote Desktop
+// ═══════════════════════════════════════════════════════════════
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RemoteDesktopStartPayload {
+    pub mode: String,
+    pub fps: u32,
+    pub quality: u8,
+    pub codec: String,
+    pub scale: f32,
+    pub monitor: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MonitorInfo {
+    pub index: i32,
+    pub name: String,
+    pub primary: bool,
+    pub x: i32,
+    pub y: i32,
+    pub width: i32,
+    pub height: i32,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RdInputPayload {
+    pub agent_id: String,
+    pub session_id: Option<String>,
+    pub input_type: String,
+    pub x: Option<f32>,
+    pub y: Option<f32>,
+    pub button: Option<String>,
+    pub delta: Option<i32>,
+    pub key: Option<String>,
+    pub vk: Option<u16>,
+    pub monitor: Option<i32>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct StreamOutputPayload {
+    pub session_id: String,
+    pub stream_type: String,
+    pub data: String,
+    pub sequence: u64,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

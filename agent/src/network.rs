@@ -5,9 +5,8 @@
 use anyhow::{Result, Context};
 use chrono::Utc;
 use futures_util::{SinkExt, StreamExt};
-use std::sync::Arc;
 use std::time::Duration;
-use tokio::sync::{broadcast, mpsc, RwLock};
+use tokio::sync::{broadcast, mpsc};
 use tracing::{debug, error, info, warn};
 
 use crate::agent::AgentConfig;
@@ -269,8 +268,7 @@ pub struct WsClient {
     config: AgentConfig,
     token_mgr: TokenManager,
     incoming_tx: mpsc::Sender<ServerMessage>,
-    #[allow(dead_code)]
-    outgoing_rx: Arc<RwLock<mpsc::Receiver<AgentMessage>>>,
+    outgoing_rx: mpsc::Receiver<AgentMessage>,
     shutdown: broadcast::Receiver<()>,
 }
 
@@ -286,7 +284,7 @@ impl WsClient {
             config,
             token_mgr,
             incoming_tx,
-            outgoing_rx: Arc::new(RwLock::new(outgoing_rx)),
+            outgoing_rx,
             shutdown,
         }
     }
@@ -325,7 +323,7 @@ impl WsClient {
         }
     }
 
-    async fn connect_and_run(&self) -> Result<()> {
+    async fn connect_and_run(&mut self) -> Result<()> {
         let ws_url = format!(
             "{}?agent_id={}&machine_id={}",
             self.config.server.ws_url,
@@ -382,7 +380,21 @@ impl WsClient {
                         _ => {}
                     }
                 }
-                // Outgoing messages handled by agent core via separate channel
+                out = self.outgoing_rx.recv() => {
+                    match out {
+                        Some(agent_msg) => {
+                            if let Ok(json) = serde_json::to_string(&agent_msg) {
+                                if ws_write.send(tokio_tungstenite::tungstenite::Message::Text(json)).await.is_err() {
+                                    return Ok(());
+                                }
+                            }
+                        }
+                        None => {
+                            // Sender dropped, keep WS alive for incoming
+                            tokio::time::sleep(Duration::from_millis(50)).await;
+                        }
+                    }
+                }
             }
         }
     }
