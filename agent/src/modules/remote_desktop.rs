@@ -140,30 +140,44 @@ fn stream_loop_blocking(
         use scrap::{Capturer, Display};
         use std::io::ErrorKind;
 
-        // Bind this blocking thread to the interactive desktop BEFORE enumerating DXGI displays.
-        // Without this, scrap::Display::all() returns 0 when the agent runs as a service/task
-        // that hasn't been associated with the logged-on user's window station yet.
+        // ── Diagnostic: report PID ────────────────────────────────────────────
+        let own_pid = unsafe { windows::Win32::System::Threading::GetCurrentProcessId() };
+        info!(pid = own_pid, "RD stream starting; binding to interactive desktop");
+        let _ = ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
+            session_id: session_id.to_string(),
+            stream_type: "debug".into(),
+            data: format!("capture start: pid={own_pid} monitor={monitor}"),
+            sequence: 0,
+        }));
+
+        // ── Bind to interactive desktop FIRST ─────────────────────────────────
         bind_to_interactive_desktop();
 
-        // Try DXGI-based capture first (fast), then fall back to GDI (BitBlt) if DXGI can't see any displays
-        // (common in some RDP/VM/driver/session situations).
-
-        let mut displays = Display::all().context("Display::all")?;
+        // ── Strategy 1: scrap (DXGI via OS-managed duplication) ───────────────
+        let mut displays = Display::all().unwrap_or_default();
 
         if !displays.is_empty() {
+            info!(display_count = displays.len(), pid = own_pid, "DXGI (scrap) found displays");
             let idx = if monitor >= 0 && (monitor as usize) < displays.len() { monitor as usize } else { 0 };
             let display = displays.remove(idx);
 
-            let mut capturer = Capturer::new(display).context("Capturer::new")?;
+            let mut capturer = match Capturer::new(display) {
+                Ok(c) => c,
+                Err(e) => {
+                    warn!(error = %e, "scrap Capturer::new failed; will try direct DXGI");
+                    return dxgi_direct_stream_loop_blocking(session_id, monitor, fps, quality, scale, &ws_tx, &stop_flag);
+                }
+            };
             let w = capturer.width();
             let h = capturer.height();
 
-            info!(backend = "dxgi", width = w, height = h, fps = fps, quality = quality, scale = scale, "RD stream started");
+            info!(backend = "scrap", width = w, height = h, fps, quality, scale, "RD stream started");
 
             let frame_delay = Duration::from_millis((1000 / fps.max(1)) as u64);
-            let mut seq: u64 = 0;
+            let mut seq: u64 = 1;
 
-            while !stop_flag.load(Ordering::Relaxed) {
+            loop {
+                if stop_flag.load(Ordering::Relaxed) { break; }
                 let frame = match capturer.frame() {
                     Ok(f) => f,
                     Err(e) if e.kind() == ErrorKind::WouldBlock => {
@@ -171,17 +185,17 @@ fn stream_loop_blocking(
                         continue;
                     }
                     Err(e) => {
-                        let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+                        let _ = ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
                             session_id: session_id.to_string(),
                             stream_type: "error".into(),
-                            data: format!("capture error: {e}"),
+                            data: format!("scrap capture error: {e}"),
                             sequence: seq,
-                        });
-                        let _ = ws_tx.blocking_send(msg);
+                        }));
                         break;
                     }
                 };
 
+                // BGRA → RGB
                 let mut rgb = Vec::with_capacity(w * h * 3);
                 for px in frame.chunks_exact(4) {
                     rgb.push(px[2]);
@@ -191,29 +205,206 @@ fn stream_loop_blocking(
 
                 let jpeg_bytes = encode_jpeg_rgb(&rgb, w as u32, h as u32, quality, scale)
                     .context("encode_jpeg_rgb")?;
-
                 let b64 = B64.encode(jpeg_bytes);
-                let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+                if ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
                     session_id: session_id.to_string(),
                     stream_type: "frame".into(),
                     data: b64,
                     sequence: seq,
-                });
-                if ws_tx.blocking_send(msg).is_err() {
-                    break;
-                }
+                })).is_err() { break; }
                 seq = seq.wrapping_add(1);
                 std::thread::sleep(frame_delay);
             }
 
-            info!(backend = "dxgi", "RD stream stopped");
+            info!(backend = "scrap", "RD stream stopped");
             return Ok(());
         }
 
-        // DXGI couldn't see displays, fall back to GDI.
-        info!(backend = "gdi", "DXGI returned 0 displays; falling back to GDI capture");
+        // ── Strategy 2: direct IDXGIOutputDuplication (works in any session) ──
+        info!("scrap found 0 displays; trying direct DXGI OutputDuplication");
+        let _ = ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
+            session_id: session_id.to_string(),
+            stream_type: "debug".into(),
+            data: format!("scrap=0 displays, pid={own_pid}: trying direct DXGI"),
+            sequence: 0,
+        }));
+        match dxgi_direct_stream_loop_blocking(session_id, monitor, fps, quality, scale, &ws_tx, &stop_flag) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                warn!(error = %e, "Direct DXGI failed; falling back to GDI");
+                let _ = ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
+                    session_id: session_id.to_string(),
+                    stream_type: "debug".into(),
+                    data: format!("direct DXGI failed: {e}; trying GDI (may be black on Win10/11 DWM)"),
+                    sequence: 0,
+                }));
+            }
+        }
+
+        // ── Strategy 3: GDI BitBlt (last resort, may be black on Win10/11) ───
         gdi_stream_loop_blocking(session_id, monitor, fps, quality, scale, ws_tx, stop_flag)
     }
+}
+
+/// Direct IDXGIOutputDuplication screen capture.
+/// This is the correct API for Windows 10/11 where DWM composites in GPU memory.
+/// Works from any session once the process token has access to the adapter.
+#[cfg(windows)]
+fn dxgi_direct_stream_loop_blocking(
+    session_id: &str,
+    monitor: i32,
+    fps: u32,
+    quality: u8,
+    scale: f32,
+    ws_tx: &mpsc::Sender<AgentMessage>,
+    stop_flag: &Arc<AtomicBool>,
+) -> Result<()> {
+    use windows::Win32::Graphics::Direct3D::D3D_DRIVER_TYPE_HARDWARE;
+    use windows::core::Interface;
+    use windows::Win32::Graphics::Direct3D11::{
+        D3D11CreateDevice, D3D11_CREATE_DEVICE_FLAG, D3D11_MAPPED_SUBRESOURCE, D3D11_MAP_READ,
+        D3D11_SDK_VERSION, D3D11_SUBRESOURCE_DATA, D3D11_TEXTURE2D_DESC, D3D11_USAGE_STAGING,
+        ID3D11Device, ID3D11DeviceContext, ID3D11Resource, ID3D11Texture2D,
+    };
+    use windows::Win32::Graphics::Dxgi::{
+        IDXGIAdapter, IDXGIDevice, IDXGIOutput, IDXGIOutput1, IDXGIResource,
+        DXGI_OUTDUPL_FRAME_INFO,
+    };
+    use windows::Win32::Graphics::Dxgi::Common::{DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_SAMPLE_DESC};
+
+    // DXGI error codes
+    const DXGI_ERROR_WAIT_TIMEOUT: i32 = 0x887A0027u32 as i32; // no new frame yet
+    const DXGI_ERROR_ACCESS_LOST:  i32 = 0x887A0026u32 as i32; // display mode changed
+    const DXGI_ERROR_DEVICE_RESET: i32 = 0x887A0007u32 as i32;
+
+    unsafe {
+        // ── 1. Create D3D11 hardware device ───────────────────────────────────
+        let mut device: Option<ID3D11Device> = None;
+        let mut ctx_opt: Option<ID3D11DeviceContext> = None;
+        D3D11CreateDevice(
+            None::<&IDXGIAdapter>,
+            D3D_DRIVER_TYPE_HARDWARE,
+            None,
+            D3D11_CREATE_DEVICE_FLAG(0),
+            None,
+            D3D11_SDK_VERSION,
+            Some(&mut device),
+            None,
+            Some(&mut ctx_opt),
+        ).context("D3D11CreateDevice")?;
+        let device = device.ok_or_else(|| anyhow::anyhow!("D3D11CreateDevice: no device"))?;
+        let ctx    = ctx_opt.ok_or_else(|| anyhow::anyhow!("D3D11CreateDevice: no context"))?;
+
+        // ── 2. DXGI device → adapter → select output (monitor) ───────────────
+        let dxgi_dev: IDXGIDevice = device.cast().context("cast IDXGIDevice")?;
+        let adapter: IDXGIAdapter = dxgi_dev.GetParent().context("GetParent IDXGIAdapter")?;
+
+        let monitor_idx = if monitor < 0 { 0u32 } else { monitor as u32 };
+        let output: IDXGIOutput = adapter.EnumOutputs(monitor_idx)
+            .with_context(|| format!("EnumOutputs({}): no output — device may not be in interactive session", monitor_idx))?;
+        let desc = output.GetDesc().context("IDXGIOutput::GetDesc")?;
+        let r = desc.DesktopCoordinates;
+        let w = (r.right - r.left).unsigned_abs();
+        let h = (r.bottom - r.top).unsigned_abs();
+        if w == 0 || h == 0 { anyhow::bail!("Output {} has zero size {}x{}", monitor_idx, w, h); }
+
+        // ── 3. Duplicate output ───────────────────────────────────────────────
+        let output1: IDXGIOutput1 = output.cast().context("cast IDXGIOutput1")?;
+        let dupl = output1.DuplicateOutput(&device).context("DuplicateOutput")?;
+
+        // ── 4. Create CPU-readable staging texture ────────────────────────────
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Width:     w,
+            Height:    h,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format:    DXGI_FORMAT_B8G8R8A8_UNORM,
+            SampleDesc: DXGI_SAMPLE_DESC { Count: 1, Quality: 0 },
+            Usage:     D3D11_USAGE_STAGING,
+            BindFlags: 0u32,            // no bind flags
+            CPUAccessFlags: 0x20000u32, // D3D11_CPU_ACCESS_READ
+            MiscFlags: 0u32,
+        };
+        let mut staging_out: Option<ID3D11Texture2D> = None;
+        device.CreateTexture2D(&staging_desc, None::<*const D3D11_SUBRESOURCE_DATA>, Some(&mut staging_out))
+            .context("CreateTexture2D staging")?;
+        let staging = staging_out.ok_or_else(|| anyhow::anyhow!("CreateTexture2D returned None"))?;
+        let staging_res: ID3D11Resource = staging.cast().context("staging → ID3D11Resource")?;
+
+        info!(backend = "dxgi-direct", monitor = monitor_idx, width = w, height = h, fps, quality, scale, "RD stream started");
+
+        let frame_timeout_ms = (1000 / fps.max(1)) * 2;
+        let frame_delay = Duration::from_millis((1000u64 / fps.max(1) as u64).saturating_sub(5));
+        let mut seq: u64 = 1;
+
+        loop {
+            if stop_flag.load(Ordering::Relaxed) { break; }
+
+            // ── 5. Acquire next frame ─────────────────────────────────────────
+            let mut frame_info = DXGI_OUTDUPL_FRAME_INFO::default();
+            let mut resource: Option<IDXGIResource> = None;
+
+            match dupl.AcquireNextFrame(frame_timeout_ms, &mut frame_info, &mut resource) {
+                Err(ref e) if e.code().0 == DXGI_ERROR_WAIT_TIMEOUT => continue,
+                Err(ref e) if e.code().0 == DXGI_ERROR_ACCESS_LOST
+                           || e.code().0 == DXGI_ERROR_DEVICE_RESET => {
+                    anyhow::bail!("DXGI output lost (display reconfigured): {e}");
+                }
+                Err(e) => anyhow::bail!("AcquireNextFrame: {e}"),
+                Ok(()) => {}
+            }
+
+            let resource = match resource {
+                Some(r) => r,
+                None => { let _ = dupl.ReleaseFrame(); continue; }
+            };
+
+            // ── 6. Copy GPU texture → CPU staging ─────────────────────────────
+            let tex: ID3D11Texture2D = resource.cast().context("cast IDXGIResource → ID3D11Texture2D")?;
+            let tex_res: ID3D11Resource = tex.cast().context("cast ID3D11Texture2D → ID3D11Resource")?;
+            ctx.CopyResource(&staging_res, &tex_res);
+            let _ = dupl.ReleaseFrame();
+
+            // ── 7. Map staging texture and read pixels ────────────────────────
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            ctx.Map(&staging_res, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .context("Map staging texture")?;
+
+            let row_pitch = mapped.RowPitch as usize;
+            let data = std::slice::from_raw_parts(
+                mapped.pData as *const u8,
+                row_pitch * h as usize,
+            );
+
+            // BGRA → RGB
+            let mut rgb = Vec::with_capacity(w as usize * h as usize * 3);
+            for y in 0..h as usize {
+                let row_start = y * row_pitch;
+                let row = &data[row_start..row_start + w as usize * 4];
+                for px in row.chunks_exact(4) {
+                    rgb.push(px[2]); // R
+                    rgb.push(px[1]); // G
+                    rgb.push(px[0]); // B
+                }
+            }
+            ctx.Unmap(&staging_res, 0);
+
+            // ── 8. Encode JPEG and send ───────────────────────────────────────
+            let jpeg = encode_jpeg_rgb(&rgb, w, h, quality, scale).context("encode_jpeg_rgb")?;
+            let b64  = B64.encode(jpeg);
+            if ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
+                session_id: session_id.to_string(),
+                stream_type: "frame".into(),
+                data: b64,
+                sequence: seq,
+            })).is_err() { break; }
+            seq = seq.wrapping_add(1);
+            std::thread::sleep(frame_delay);
+        }
+    }
+
+    info!(backend = "dxgi-direct", "RD stream stopped");
+    Ok(())
 }
 
 /// Bind the current thread to the interactive desktop (WinSta0\Default).
