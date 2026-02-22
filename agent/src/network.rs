@@ -340,10 +340,12 @@ impl WsClient {
         info!("WebSocket connected");
 
         // Send auth message
+        let run_mode = std::env::var("MASSVISION_RUN_MODE").unwrap_or_else(|_| "unknown".to_string());
         let auth_json = serde_json::to_string(&serde_json::json!({
             "type": "auth",
             "agent_id": self.token_mgr.agent_id(),
             "nonce": uuid::Uuid::new_v4().to_string(),
+            "run_mode": run_mode,
         }))?;
         let envelope = self.token_mgr.sign(&auth_json)?;
         ws_write.send(tokio_tungstenite::tungstenite::Message::Text(

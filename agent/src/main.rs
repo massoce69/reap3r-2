@@ -77,6 +77,9 @@ fn main() -> Result<()> {
 
 // ── helpers ──────────────────────────────────────────────────
 fn run_foreground() -> Result<()> {
+    // Used by the server to route UI features (e.g. Remote Desktop) to an interactive session.
+    // A foreground process started from a Scheduled Task is typically interactive.
+    std::env::set_var("MASSVISION_RUN_MODE", "interactive");
     let _guard = init_logging();
     info!("MassVision Agent v{} – foreground mode", env!("CARGO_PKG_VERSION"));
     let rt = tokio::runtime::Runtime::new()?;
@@ -88,6 +91,7 @@ fn run_foreground() -> Result<()> {
 
 /// Called from Windows service dispatcher (platform module).
 pub fn run_agent_service() -> Result<()> {
+    std::env::set_var("MASSVISION_RUN_MODE", "service");
     let _guard = init_logging();
     info!("MassVision Agent v{} – service mode", env!("CARGO_PKG_VERSION"));
     let rt = tokio::runtime::Runtime::new()?;

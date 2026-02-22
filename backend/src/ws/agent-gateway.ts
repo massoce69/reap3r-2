@@ -166,6 +166,7 @@ function uiEventPermission(event: string): Permission | null {
 export function setupAgentGateway(fastify: FastifyInstance) {
   const agentSockets = new Map<string, WS>();
   const agentSocketsV2 = new Map<string, WS>();
+  const agentSocketsV2Mode = new Map<string, 'interactive' | 'service' | 'unknown'>();
   const uiSockets = new Set<WS>();
   const messagingSockets = new Set<WS>();
   const uiSocketOrg = new Map<WS, string>();
@@ -241,7 +242,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
   fastify.server.on('upgrade', upgradeHandler);
 
   // ── v2 agent WS: accept auth envelope, then keep socket open ─────────────
-  const v2Authed = new Map<WS, { agentId: string }>();
+  const v2Authed = new Map<WS, { agentId: string; runMode: 'interactive' | 'service' | 'unknown' }>();
 
   const handleV2AgentMessage = (agentId: string, raw: RawData) => {
     try {
@@ -378,10 +379,27 @@ export function setupAgentGateway(fastify: FastifyInstance) {
         const p = safeParseJson(payload);
         if (!p || p.type !== 'auth' || String(p.agent_id || '') !== agentId) return ws.close(1008, 'bad auth');
 
-        v2Authed.set(ws, { agentId });
-        agentSocketsV2.set(agentId, ws);
+        const runModeRaw = String((p as any).run_mode || '').toLowerCase();
+        const runMode: 'interactive' | 'service' | 'unknown' = runModeRaw === 'interactive'
+          ? 'interactive'
+          : (runModeRaw === 'service' ? 'service' : 'unknown');
+
+        v2Authed.set(ws, { agentId, runMode });
+
+        // Prefer the interactive connection for this agent (needed for Remote Desktop capture).
+        const current = agentSocketsV2.get(agentId);
+        const currentMode = agentSocketsV2Mode.get(agentId) || 'unknown';
+        const canOverwrite = !current
+          || current.readyState !== WS.OPEN
+          || (runMode === 'interactive')
+          || (currentMode !== 'interactive' && runMode !== 'unknown');
+
+        if (canOverwrite) {
+          agentSocketsV2.set(agentId, ws);
+          agentSocketsV2Mode.set(agentId, runMode);
+        }
         ws.off('message', onMessage);
-        fastify.log.info({ agentId, machineId, ip }, '[agents-v2] WS authenticated');
+        fastify.log.info({ agentId, machineId, ip, runMode, preferred: agentSocketsV2.get(agentId) === ws }, '[agents-v2] WS authenticated');
 
         ws.on('message', (raw2: RawData) => handleV2AgentMessage(agentId, raw2));
 
@@ -394,10 +412,19 @@ export function setupAgentGateway(fastify: FastifyInstance) {
 
     ws.on('message', onMessage);
     ws.on('close', () => {
+      const authed = v2Authed.get(ws);
       v2Authed.delete(ws);
       // Remove socket mapping if it still points to this ws
       for (const [aid, s] of agentSocketsV2) {
-        if (s === ws) agentSocketsV2.delete(aid);
+        if (s === ws) {
+          agentSocketsV2.delete(aid);
+          agentSocketsV2Mode.delete(aid);
+        }
+      }
+
+      // If this was an interactive WS but it wasn't preferred (shouldn't happen often), still cleanup mode map.
+      if (authed?.agentId && agentSocketsV2.get(authed.agentId) !== ws) {
+        // no-op; preferred mapping is different
       }
     });
   });
