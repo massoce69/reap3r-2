@@ -246,42 +246,128 @@ pub fn run_windows_service() -> Result<()> {
 #[cfg(windows)]
 fn windows_install_service() -> Result<()> {
     use std::process::Command;
+    use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+    fn is_sharing_violation(err: &std::io::Error) -> bool {
+        matches!(err.raw_os_error(), Some(32))
+    }
+
+    fn stop_delete_service_best_effort() {
+        let _ = Command::new("sc.exe").args(["stop", "MassVisionAgent"]).output();
+        std::thread::sleep(Duration::from_millis(800));
+        let _ = Command::new("sc.exe").args(["delete", "MassVisionAgent"]).output();
+        std::thread::sleep(Duration::from_millis(800));
+    }
+
+    fn sc_create_start(bin_path: &str) -> Result<()> {
+        let output = Command::new("sc.exe")
+            .args([
+                "create", "MassVisionAgent",
+                "binPath=", bin_path,
+                "start=", "auto",
+                "DisplayName=", "MassVision Agent",
+            ])
+            .output()?;
+        if !output.status.success() {
+            anyhow::bail!("sc create failed: {}", String::from_utf8_lossy(&output.stderr));
+        }
+
+        // Configure recovery (auto restart on failure)
+        let _ = Command::new("sc.exe")
+            .args([
+                "failure", "MassVisionAgent",
+                "reset=", "86400",
+                "actions=", "restart/5000/restart/10000/restart/30000",
+            ])
+            .output();
+
+        // Start the service
+        let _ = Command::new("sc.exe").args(["start", "MassVisionAgent"]).output();
+        Ok(())
+    }
+
     let exe = std::env::current_exe()?;
     // Copy binary to Program Files
     let install_dir = PathBuf::from(r"C:\Program Files\MassVision");
     std::fs::create_dir_all(&install_dir)?;
+
+    // Try to stop/delete existing service first to release the binary lock.
+    stop_delete_service_best_effort();
+
     let target = install_dir.join("massvision-agent.exe");
-    std::fs::copy(&exe, &target)?;
+
+    // Best-effort cleanup of existing target binary.
+    if target.exists() {
+        let _ = std::fs::remove_file(&target);
+        std::thread::sleep(Duration::from_millis(500));
+    }
+
+    // Copy with retries. Some systems/AV will hold a short lock on Program Files.
+    let mut copied_to = target.clone();
+    let mut last_err: Option<std::io::Error> = None;
+    for attempt in 1..=5 {
+        match std::fs::copy(&exe, &target) {
+            Ok(_) => {
+                last_err = None;
+                copied_to = target.clone();
+                break;
+            }
+            Err(e) => {
+                last_err = Some(e);
+                std::thread::sleep(Duration::from_millis(700 * attempt));
+            }
+        }
+    }
+
+    // If the stable filename is still locked (sharing violation), fall back to a unique filename
+    // and point the service to it. This unblocks installation on systems where the old binary
+    // remains locked by another process.
+    if let Some(e) = last_err {
+        if is_sharing_violation(&e) {
+            let ts = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_secs();
+            let alt = install_dir.join(format!("massvision-agent-{}.exe", ts));
+            std::fs::copy(&exe, &alt)
+                .with_context(|| format!("copying agent to {}", alt.display()))?;
+            copied_to = alt;
+        } else {
+            return Err(e).context("copying agent to Program Files")?;
+        }
+    }
     // Copy config
     let cfg_src = exe.parent().unwrap().join("config.toml");
     if cfg_src.exists() {
         std::fs::copy(&cfg_src, get_config_path())?;
     }
-    // Create service via sc.exe
-    let output = Command::new("sc.exe")
-        .args([
-            "create", "MassVisionAgent",
-            "binPath=", &format!("\"{}\"", target.display()),
-            "start=", "auto",
-            "DisplayName=", "MassVision Agent",
-        ])
-        .output()?;
-    if !output.status.success() {
-        anyhow::bail!("sc create failed: {}", String::from_utf8_lossy(&output.stderr));
+
+    // Create service via sc.exe (retry because delete can be asynchronous)
+    let bin_path = format!("\"{}\"", copied_to.display());
+    let mut ok = false;
+    let mut last_sc_err: Option<anyhow::Error> = None;
+    for _ in 0..5 {
+        stop_delete_service_best_effort();
+        match sc_create_start(&bin_path) {
+            Ok(_) => {
+                ok = true;
+                break;
+            }
+            Err(e) => {
+                last_sc_err = Some(e);
+                std::thread::sleep(Duration::from_millis(900));
+            }
+        }
     }
-    // Configure recovery (auto restart on failure)
-    Command::new("sc.exe")
-        .args([
-            "failure", "MassVisionAgent",
-            "reset=", "86400",
-            "actions=", "restart/5000/restart/10000/restart/30000",
-        ])
-        .output()?;
-    // Start the service
-    Command::new("sc.exe")
-        .args(["start", "MassVisionAgent"])
-        .output()?;
-    println!("✓ Service MassVisionAgent installed and started");
+    if (!ok) {
+        if let Some(e) = last_sc_err {
+            return Err(e).context("creating/starting Windows service")?;
+        }
+        anyhow::bail!("creating/starting Windows service failed");
+    }
+
+    if copied_to != target {
+        println!("✓ Service MassVisionAgent installed and started (binary: {})", copied_to.display());
+    } else {
+        println!("✓ Service MassVisionAgent installed and started");
+    }
     Ok(())
 }
 
