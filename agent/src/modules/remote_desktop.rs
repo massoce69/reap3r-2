@@ -140,50 +140,201 @@ fn stream_loop_blocking(
         use scrap::{Capturer, Display};
         use std::io::ErrorKind;
 
+        // Try DXGI-based capture first (fast), then fall back to GDI (BitBlt) if DXGI can't see any displays
+        // (common in some RDP/VM/driver/session situations).
+
         let mut displays = Display::all().context("Display::all")?;
-        if displays.is_empty() {
-            let msg = AgentMessage::StreamOutput(StreamOutputPayload {
-                session_id: session_id.to_string(),
-                stream_type: "error".into(),
-                data: "no displays found".into(),
-                sequence: 0,
-            });
-            let _ = ws_tx.blocking_send(msg);
+
+        if !displays.is_empty() {
+            let idx = if monitor >= 0 && (monitor as usize) < displays.len() { monitor as usize } else { 0 };
+            let display = displays.remove(idx);
+
+            let mut capturer = Capturer::new(display).context("Capturer::new")?;
+            let w = capturer.width();
+            let h = capturer.height();
+
+            info!(backend = "dxgi", width = w, height = h, fps = fps, quality = quality, scale = scale, "RD stream started");
+
+            let frame_delay = Duration::from_millis((1000 / fps.max(1)) as u64);
+            let mut seq: u64 = 0;
+
+            while !stop_flag.load(Ordering::Relaxed) {
+                let frame = match capturer.frame() {
+                    Ok(f) => f,
+                    Err(e) if e.kind() == ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(5));
+                        continue;
+                    }
+                    Err(e) => {
+                        let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+                            session_id: session_id.to_string(),
+                            stream_type: "error".into(),
+                            data: format!("capture error: {e}"),
+                            sequence: seq,
+                        });
+                        let _ = ws_tx.blocking_send(msg);
+                        break;
+                    }
+                };
+
+                let mut rgb = Vec::with_capacity(w * h * 3);
+                for px in frame.chunks_exact(4) {
+                    rgb.push(px[2]);
+                    rgb.push(px[1]);
+                    rgb.push(px[0]);
+                }
+
+                let jpeg_bytes = encode_jpeg_rgb(&rgb, w as u32, h as u32, quality, scale)
+                    .context("encode_jpeg_rgb")?;
+
+                let b64 = B64.encode(jpeg_bytes);
+                let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+                    session_id: session_id.to_string(),
+                    stream_type: "frame".into(),
+                    data: b64,
+                    sequence: seq,
+                });
+                if ws_tx.blocking_send(msg).is_err() {
+                    break;
+                }
+                seq = seq.wrapping_add(1);
+                std::thread::sleep(frame_delay);
+            }
+
+            info!(backend = "dxgi", "RD stream stopped");
             return Ok(());
         }
-        let idx = if monitor >= 0 && (monitor as usize) < displays.len() { monitor as usize } else { 0 };
-        let display = displays.remove(idx);
 
-        let mut capturer = Capturer::new(display).context("Capturer::new")?;
-        let w = capturer.width();
-        let h = capturer.height();
+        // DXGI couldn't see displays, fall back to GDI.
+        info!(backend = "gdi", "DXGI returned 0 displays; falling back to GDI capture");
+        gdi_stream_loop_blocking(session_id, monitor, fps, quality, scale, ws_tx, stop_flag)
+    }
+}
 
-        info!(width = w, height = h, fps = fps, quality = quality, scale = scale, "RD stream started");
+#[cfg(windows)]
+fn gdi_stream_loop_blocking(
+    session_id: &str,
+    monitor: i32,
+    fps: u32,
+    quality: u8,
+    scale: f32,
+    ws_tx: mpsc::Sender<AgentMessage>,
+    stop_flag: Arc<AtomicBool>,
+) -> Result<()> {
+    use windows::Win32::Foundation::HWND;
+    use windows::Win32::Graphics::Gdi::{
+        BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, RGBQUAD, SRCCOPY,
+    };
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    };
+
+    #[derive(Clone, Copy)]
+    struct Rect { x: i32, y: i32, w: i32, h: i32 }
+
+    fn pick_rect(monitor: i32) -> Rect {
+        // Prefer EnumDisplayMonitors data if available.
+        if let Ok(monitors) = list_monitors_windows() {
+            if !monitors.is_empty() {
+                let idx = if monitor >= 0 && (monitor as usize) < monitors.len() { monitor as usize } else {
+                    monitors.iter().position(|m| m.primary).unwrap_or(0)
+                };
+                let m = &monitors[idx];
+                return Rect { x: m.x, y: m.y, w: m.width, h: m.height };
+            }
+        }
+
+        unsafe {
+            let vx = GetSystemMetrics(SM_XVIRTUALSCREEN);
+            let vy = GetSystemMetrics(SM_YVIRTUALSCREEN);
+            let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN).max(1);
+            let vh = GetSystemMetrics(SM_CYVIRTUALSCREEN).max(1);
+            Rect { x: vx, y: vy, w: vw, h: vh }
+        }
+    }
+
+    let rect = pick_rect(monitor);
+    let w = rect.w.max(1) as i32;
+    let h = rect.h.max(1) as i32;
+
+    info!(backend = "gdi", x = rect.x, y = rect.y, width = w, height = h, fps = fps, quality = quality, scale = scale, "RD stream started");
+
+    unsafe {
+        let null_hwnd = HWND(std::ptr::null_mut());
+        let screen_dc: HDC = GetDC(null_hwnd);
+        if screen_dc.0.is_null() {
+            anyhow::bail!("GetDC failed");
+        }
+        let mem_dc: HDC = CreateCompatibleDC(screen_dc);
+        if mem_dc.0.is_null() {
+            ReleaseDC(null_hwnd, screen_dc);
+            anyhow::bail!("CreateCompatibleDC failed");
+        }
+        let bmp: HBITMAP = CreateCompatibleBitmap(screen_dc, w, h);
+        if bmp.0.is_null() {
+            DeleteDC(mem_dc);
+            ReleaseDC(null_hwnd, screen_dc);
+            anyhow::bail!("CreateCompatibleBitmap failed");
+        }
+        let old = SelectObject(mem_dc, bmp);
 
         let frame_delay = Duration::from_millis((1000 / fps.max(1)) as u64);
         let mut seq: u64 = 0;
+        let mut bgra = vec![0u8; (w as usize) * (h as usize) * 4];
+
+        let mut bmi = BITMAPINFO {
+            bmiHeader: BITMAPINFOHEADER {
+                biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
+                biWidth: w,
+                biHeight: -h, // top-down
+                biPlanes: 1,
+                biBitCount: 32,
+                biCompression: BI_RGB.0 as u32,
+                biSizeImage: 0,
+                biXPelsPerMeter: 0,
+                biYPelsPerMeter: 0,
+                biClrUsed: 0,
+                biClrImportant: 0,
+            },
+            bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }; 1],
+        };
 
         while !stop_flag.load(Ordering::Relaxed) {
-            let frame = match capturer.frame() {
-                Ok(f) => f,
-                Err(e) if e.kind() == ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(5));
-                    continue;
-                }
-                Err(e) => {
-                    let msg = AgentMessage::StreamOutput(StreamOutputPayload {
-                        session_id: session_id.to_string(),
-                        stream_type: "error".into(),
-                        data: format!("capture error: {e}"),
-                        sequence: seq,
-                    });
-                    let _ = ws_tx.blocking_send(msg);
-                    break;
-                }
-            };
+            if BitBlt(mem_dc, 0, 0, w, h, screen_dc, rect.x, rect.y, SRCCOPY).is_err() {
+                let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+                    session_id: session_id.to_string(),
+                    stream_type: "error".into(),
+                    data: "gdi BitBlt failed".into(),
+                    sequence: seq,
+                });
+                let _ = ws_tx.blocking_send(msg);
+                break;
+            }
 
-            let mut rgb = Vec::with_capacity(w * h * 3);
-            for px in frame.chunks_exact(4) {
+            let lines = GetDIBits(
+                mem_dc,
+                bmp,
+                0,
+                h as u32,
+                Some(bgra.as_mut_ptr() as *mut _),
+                &mut bmi,
+                DIB_RGB_COLORS,
+            );
+            if lines == 0 {
+                let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+                    session_id: session_id.to_string(),
+                    stream_type: "error".into(),
+                    data: "gdi GetDIBits failed".into(),
+                    sequence: seq,
+                });
+                let _ = ws_tx.blocking_send(msg);
+                break;
+            }
+
+            let mut rgb = Vec::with_capacity((w as usize) * (h as usize) * 3);
+            for px in bgra.chunks_exact(4) {
+                // BGRA -> RGB
                 rgb.push(px[2]);
                 rgb.push(px[1]);
                 rgb.push(px[0]);
@@ -191,7 +342,6 @@ fn stream_loop_blocking(
 
             let jpeg_bytes = encode_jpeg_rgb(&rgb, w as u32, h as u32, quality, scale)
                 .context("encode_jpeg_rgb")?;
-
             let b64 = B64.encode(jpeg_bytes);
             let msg = AgentMessage::StreamOutput(StreamOutputPayload {
                 session_id: session_id.to_string(),
@@ -202,13 +352,20 @@ fn stream_loop_blocking(
             if ws_tx.blocking_send(msg).is_err() {
                 break;
             }
+
             seq = seq.wrapping_add(1);
             std::thread::sleep(frame_delay);
         }
 
-        info!("RD stream stopped");
-        Ok(())
+        // Cleanup
+        let _ = SelectObject(mem_dc, old);
+        DeleteObject(bmp);
+        DeleteDC(mem_dc);
+        ReleaseDC(null_hwnd, screen_dc);
     }
+
+    info!(backend = "gdi", "RD stream stopped");
+    Ok(())
 }
 
 #[cfg(windows)]
