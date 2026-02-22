@@ -224,20 +224,22 @@ fn gdi_stream_loop_blocking(
     use windows::Win32::Foundation::HWND;
     use windows::Win32::Graphics::Gdi::{
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
-        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, RGBQUAD, SRCCOPY,
+        ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, RGBQUAD, ROP_CODE, SRCCOPY,
     };
+    use windows::Win32::Graphics::Gdi::GetWindowDC;
     use windows::Win32::UI::WindowsAndMessaging::{
-        GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+        GetDesktopWindow, GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
 
     #[derive(Clone, Copy)]
     struct Rect { x: i32, y: i32, w: i32, h: i32 }
 
     fn pick_rect(monitor: i32) -> Rect {
-        // Prefer EnumDisplayMonitors data if available.
         if let Ok(monitors) = list_monitors_windows() {
             if !monitors.is_empty() {
-                let idx = if monitor >= 0 && (monitor as usize) < monitors.len() { monitor as usize } else {
+                let idx = if monitor >= 0 && (monitor as usize) < monitors.len() {
+                    monitor as usize
+                } else {
                     monitors.iter().position(|m| m.primary).unwrap_or(0)
                 };
                 let m = &monitors[idx];
@@ -255,28 +257,39 @@ fn gdi_stream_loop_blocking(
     }
 
     let rect = pick_rect(monitor);
-    let w = rect.w.max(1) as i32;
-    let h = rect.h.max(1) as i32;
+    let w = rect.w.max(1);
+    let h = rect.h.max(1);
 
     info!(backend = "gdi", x = rect.x, y = rect.y, width = w, height = h, fps = fps, quality = quality, scale = scale, "RD stream started");
 
     unsafe {
         let null_hwnd = HWND(std::ptr::null_mut());
-        let screen_dc: HDC = GetDC(null_hwnd);
+        let desktop = GetDesktopWindow();
+
+        // Prefer desktop window DC
+        let mut screen_dc: HDC = GetWindowDC(desktop);
+        let mut release_hwnd = desktop;
+        if screen_dc.0.is_null() {
+            screen_dc = GetDC(null_hwnd);
+            release_hwnd = null_hwnd;
+        }
         if screen_dc.0.is_null() {
             anyhow::bail!("GetDC failed");
         }
+
         let mem_dc: HDC = CreateCompatibleDC(screen_dc);
         if mem_dc.0.is_null() {
-            ReleaseDC(null_hwnd, screen_dc);
+            let _ = ReleaseDC(release_hwnd, screen_dc);
             anyhow::bail!("CreateCompatibleDC failed");
         }
+
         let bmp: HBITMAP = CreateCompatibleBitmap(screen_dc, w, h);
         if bmp.0.is_null() {
-            DeleteDC(mem_dc);
-            ReleaseDC(null_hwnd, screen_dc);
+            let _ = DeleteDC(mem_dc);
+            let _ = ReleaseDC(release_hwnd, screen_dc);
             anyhow::bail!("CreateCompatibleBitmap failed");
         }
+
         let old = SelectObject(mem_dc, bmp);
 
         let frame_delay = Duration::from_millis((1000 / fps.max(1)) as u64);
@@ -300,15 +313,16 @@ fn gdi_stream_loop_blocking(
             bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }; 1],
         };
 
+        let rop = ROP_CODE(SRCCOPY.0 | 0x40000000); // CAPTUREBLT
+
         while !stop_flag.load(Ordering::Relaxed) {
-            if BitBlt(mem_dc, 0, 0, w, h, screen_dc, rect.x, rect.y, SRCCOPY).is_err() {
-                let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+            if let Err(e) = BitBlt(mem_dc, 0, 0, w, h, screen_dc, rect.x, rect.y, rop) {
+                let _ = ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
                     session_id: session_id.to_string(),
                     stream_type: "error".into(),
-                    data: "gdi BitBlt failed".into(),
+                    data: format!("gdi BitBlt failed: {e}"),
                     sequence: seq,
-                });
-                let _ = ws_tx.blocking_send(msg);
+                }));
                 break;
             }
 
@@ -322,19 +336,17 @@ fn gdi_stream_loop_blocking(
                 DIB_RGB_COLORS,
             );
             if lines == 0 {
-                let msg = AgentMessage::StreamOutput(StreamOutputPayload {
+                let _ = ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
                     session_id: session_id.to_string(),
                     stream_type: "error".into(),
                     data: "gdi GetDIBits failed".into(),
                     sequence: seq,
-                });
-                let _ = ws_tx.blocking_send(msg);
+                }));
                 break;
             }
 
             let mut rgb = Vec::with_capacity((w as usize) * (h as usize) * 3);
             for px in bgra.chunks_exact(4) {
-                // BGRA -> RGB
                 rgb.push(px[2]);
                 rgb.push(px[1]);
                 rgb.push(px[0]);
@@ -343,6 +355,7 @@ fn gdi_stream_loop_blocking(
             let jpeg_bytes = encode_jpeg_rgb(&rgb, w as u32, h as u32, quality, scale)
                 .context("encode_jpeg_rgb")?;
             let b64 = B64.encode(jpeg_bytes);
+
             let msg = AgentMessage::StreamOutput(StreamOutputPayload {
                 session_id: session_id.to_string(),
                 stream_type: "frame".into(),
@@ -357,11 +370,10 @@ fn gdi_stream_loop_blocking(
             std::thread::sleep(frame_delay);
         }
 
-        // Cleanup
         let _ = SelectObject(mem_dc, old);
-        DeleteObject(bmp);
-        DeleteDC(mem_dc);
-        ReleaseDC(null_hwnd, screen_dc);
+        let _ = DeleteObject(bmp);
+        let _ = DeleteDC(mem_dc);
+        let _ = ReleaseDC(release_hwnd, screen_dc);
     }
 
     info!(backend = "gdi", "RD stream stopped");
@@ -381,7 +393,6 @@ fn encode_jpeg_rgb(rgb: &[u8], w: u32, h: u32, quality: u8, scale: f32) -> Resul
     } else {
         (w, h)
     };
-
     let resized = if out_w != w || out_h != h {
         image::imageops::resize(&img, out_w, out_h, FilterType::Triangle)
     } else {
@@ -440,8 +451,6 @@ fn list_monitors_windows() -> Result<Vec<MonitorInfo>> {
 
     Ok(out)
 }
-
-#[cfg(windows)]
 fn inject_input_windows(input: &RdInputPayload, _monitor: i32) -> Result<()> {
     use windows::Win32::Foundation::POINT;
     use windows::Win32::UI::Input::KeyboardAndMouse::*;
