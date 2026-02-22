@@ -18,24 +18,33 @@ function toV2JobType(type: string): string {
 function toV2RunScriptPayload(payloadInput: any) {
   const interpreter = String(payloadInput?.interpreter || '').toLowerCase();
   const script = String(payloadInput?.script || '');
-  const timeoutSec = Number(payloadInput?.timeout_sec ?? payloadInput?.timeout_sec ?? 300) || 300;
+  const timeoutSec = Number(payloadInput?.timeout_sec ?? payloadInput?.timeout_secs ?? 300) || 300;
   const streamOutput = Boolean(payloadInput?.stream_output);
-  const env = payloadInput?.env && typeof payloadInput.env === 'object' ? payloadInput.env : {};
+  const args = Array.isArray(payloadInput?.args) ? payloadInput.args.map((v: any) => String(v)) : [];
+
+  const env: Record<string, string> = {};
+  if (payloadInput?.env && typeof payloadInput.env === 'object') {
+    for (const [k, v] of Object.entries(payloadInput.env)) {
+      if (typeof k !== 'string') continue;
+      if (typeof v === 'string') env[k] = v;
+      else if (typeof v === 'number' || typeof v === 'boolean') env[k] = String(v);
+    }
+  }
   const runAs = typeof payloadInput?.run_as === 'string' ? payloadInput.run_as : undefined;
 
-  // Rust enum ScriptType: PowerShell | Bash | Python
-  let scriptType: string = 'PowerShell';
-  if (interpreter === 'bash' || interpreter === 'sh') scriptType = 'Bash';
-  if (interpreter === 'python') scriptType = 'Python';
+  // Rust enum ScriptType is `snake_case`: power_shell | bash | python
+  let scriptType: 'power_shell' | 'bash' | 'python' = 'power_shell';
+  if (interpreter === 'bash' || interpreter === 'sh') scriptType = 'bash';
+  if (interpreter === 'python') scriptType = 'python';
   if (interpreter === 'cmd') {
     // Best-effort: wrap in PowerShell
-    scriptType = 'PowerShell';
+    scriptType = 'power_shell';
   }
 
   return {
     script_type: scriptType,
     content: interpreter === 'cmd' ? `cmd /c ${script}` : script,
-    args: [],
+    args,
     timeout_secs: Math.max(5, Math.min(3600, Math.trunc(timeoutSec))),
     run_as: runAs,
     env,
