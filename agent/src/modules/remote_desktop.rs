@@ -140,6 +140,11 @@ fn stream_loop_blocking(
         use scrap::{Capturer, Display};
         use std::io::ErrorKind;
 
+        // Bind this blocking thread to the interactive desktop BEFORE enumerating DXGI displays.
+        // Without this, scrap::Display::all() returns 0 when the agent runs as a service/task
+        // that hasn't been associated with the logged-on user's window station yet.
+        bind_to_interactive_desktop();
+
         // Try DXGI-based capture first (fast), then fall back to GDI (BitBlt) if DXGI can't see any displays
         // (common in some RDP/VM/driver/session situations).
 
@@ -211,6 +216,36 @@ fn stream_loop_blocking(
     }
 }
 
+/// Bind the current thread to the interactive desktop (WinSta0\Default).
+/// This is required for GDI screen capture and DXGI enumeration when the process
+/// was launched without an interactive window station (service / scheduled task context).
+#[cfg(windows)]
+fn bind_to_interactive_desktop() {
+    use windows::Win32::System::StationsAndDesktops::{
+        OpenDesktopW, OpenInputDesktop, OpenWindowStationW, SetProcessWindowStation, SetThreadDesktop,
+        DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
+    };
+    unsafe {
+        if let Ok(hws) = OpenWindowStationW(windows::core::w!("WinSta0"), false, 0x10000000u32) {
+            let _ = SetProcessWindowStation(hws);
+        }
+        if let Ok(hd) = OpenInputDesktop(
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            DESKTOP_ACCESS_FLAGS(0x10000000u32),
+        ) {
+            let _ = SetThreadDesktop(hd);
+        } else if let Ok(hd) = OpenDesktopW(
+            windows::core::w!("Default"),
+            DESKTOP_CONTROL_FLAGS(0),
+            false,
+            0x10000000u32,
+        ) {
+            let _ = SetThreadDesktop(hd);
+        }
+    }
+}
+
 #[cfg(windows)]
 fn gdi_stream_loop_blocking(
     session_id: &str,
@@ -226,13 +261,11 @@ fn gdi_stream_loop_blocking(
         BitBlt, CreateCompatibleBitmap, CreateCompatibleDC, DeleteDC, DeleteObject, GetDC, GetDIBits,
         ReleaseDC, SelectObject, BITMAPINFO, BITMAPINFOHEADER, BI_RGB, DIB_RGB_COLORS, HBITMAP, HDC, RGBQUAD, ROP_CODE, SRCCOPY,
     };
+    use windows::Win32::Graphics::Dwm::DwmFlush;
     use windows::Win32::UI::WindowsAndMessaging::{
         GetSystemMetrics, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
     };
-    use windows::Win32::System::StationsAndDesktops::{
-        OpenInputDesktop, OpenWindowStationW, SetProcessWindowStation, SetThreadDesktop,
-        DESKTOP_ACCESS_FLAGS, DESKTOP_CONTROL_FLAGS,
-    };
+    // Note: desktop binding already done via bind_to_interactive_desktop() in stream_loop_blocking.
 
     #[derive(Clone, Copy)]
     struct Rect { x: i32, y: i32, w: i32, h: i32 }
@@ -268,42 +301,12 @@ fn gdi_stream_loop_blocking(
     unsafe {
         let null_hwnd = HWND(std::ptr::null_mut());
 
-        // ── Attach this thread to the interactive desktop ──────────────────────────
-        // When the agent runs as a service or scheduled task it may not be attached
-        // to "WinSta0\Default". Without this, GetDC succeeds but BitBlt returns 0x80070005.
-        if let Ok(hws) = OpenWindowStationW(
-            windows::core::w!("WinSta0"),
-            false,
-            0x10000000u32, // GENERIC_ALL
-        ) {
-            let _ = SetProcessWindowStation(hws);
-        }
-        // OpenInputDesktop gets the currently active/visible input desktop (handles
-        // cases where the session was locked then unlocked, UAC dialog open, etc.)
-        if let Ok(hd) = OpenInputDesktop(
-            DESKTOP_CONTROL_FLAGS(0u32), // dwflags = 0
-            false,
-            DESKTOP_ACCESS_FLAGS(0x10000000u32), // GENERIC_ALL
-        ) {
-            let _ = SetThreadDesktop(hd);
-        } else {
-            // Fallback: open "Default" desktop by name
-            if let Ok(hd) = windows::Win32::System::StationsAndDesktops::OpenDesktopW(
-                windows::core::w!("Default"),
-                DESKTOP_CONTROL_FLAGS(0u32), // dwflags
-                false,
-                0x10000000u32, // dwdesiredaccess = GENERIC_ALL (u32)
-            ) {
-                let _ = SetThreadDesktop(hd);
-            }
-        }
-        // ─────────────────────────────────────────────────────────────────────────
-
-        // Screen DC – GetDC(NULL) captures the entire virtual screen after the desktop bind
+        // Screen DC – bind_to_interactive_desktop() was already called by stream_loop_blocking.
+        // GetDC(NULL) now gives the desktop DC of the interactive session.
         let screen_dc: HDC = GetDC(null_hwnd);
         let release_hwnd = null_hwnd;
         if screen_dc.0.is_null() {
-            anyhow::bail!("GetDC failed (even after desktop bind)");
+            anyhow::bail!("GetDC failed: desktop not accessible");
         }
 
         let mem_dc: HDC = CreateCompatibleDC(screen_dc);
@@ -342,9 +345,13 @@ fn gdi_stream_loop_blocking(
             bmiColors: [RGBQUAD { rgbBlue: 0, rgbGreen: 0, rgbRed: 0, rgbReserved: 0 }; 1],
         };
 
-        let rop = ROP_CODE(SRCCOPY.0 | 0x40000000); // CAPTUREBLT
+        let rop = ROP_CODE(SRCCOPY.0 | 0x40000000); // CAPTUREBLT (captures layered/transparent windows)
 
         while !stop_flag.load(Ordering::Relaxed) {
+            // DwmFlush synchronises with the DWM compositor so BitBlt captures the
+            // fully-composited frame rather than a stale/black buffer.
+            let _ = DwmFlush();
+
             if let Err(e) = BitBlt(mem_dc, 0, 0, w, h, screen_dc, rect.x, rect.y, rop) {
                 let _ = ws_tx.blocking_send(AgentMessage::StreamOutput(StreamOutputPayload {
                     session_id: session_id.to_string(),
@@ -507,7 +514,9 @@ fn inject_input_windows(input: &RdInputPayload, _monitor: i32) -> Result<()> {
                     dx: ax,
                     dy: ay,
                     mouseData: 0,
-                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE,
+                    // MOUSEEVENTF_VIRTUALDESK maps (0,65535) to the full virtual screen
+                    // spanning all monitors — required for correct positioning on multi-monitor setups.
+                    dwFlags: MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK,
                     time: 0,
                     dwExtraInfo: 0,
                 };
