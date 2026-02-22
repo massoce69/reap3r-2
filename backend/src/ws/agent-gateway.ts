@@ -247,7 +247,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     try {
       if (ws.readyState !== WS.OPEN) return;
       const { rows } = await fastify.pg.query(
-        `SELECT id, payload, timeout_sec, priority, created_at
+        `SELECT id, payload, timeout_secs, priority, created_at
          FROM jobs
          WHERE agent_id = $1
            AND status IN ('pending', 'queued')
@@ -269,7 +269,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
           job_id: String(r.id),
           job_type: 'run_script',
           payload: v2Payload,
-          timeout_secs: Number(r.timeout_sec ?? 300) || 300,
+          timeout_secs: Number((r as any).timeout_secs ?? 300) || 300,
           priority: Number(r.priority ?? 0) || 0,
           created_at: new Date(r.created_at).toISOString(),
         };
