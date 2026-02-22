@@ -41,6 +41,7 @@ import { authenticateAccessToken, hasPermission, isSessionActive } from '../serv
 declare module 'fastify' {
   interface FastifyInstance {
     agentSockets: Map<string, WS>;
+    agentSocketsV2: Map<string, WS>;
     uiSockets: Set<WS>;
     messagingSockets: Set<WS>;
     broadcastToUI: (event: string, data: unknown) => void;
@@ -163,6 +164,7 @@ function uiEventPermission(event: string): Permission | null {
 
 export function setupAgentGateway(fastify: FastifyInstance) {
   const agentSockets = new Map<string, WS>();
+  const agentSocketsV2 = new Map<string, WS>();
   const uiSockets = new Set<WS>();
   const messagingSockets = new Set<WS>();
   const uiSocketOrg = new Map<WS, string>();
@@ -173,6 +175,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
   const messagingSocketPerms = new Map<WS, Set<Permission>>();
 
   fastify.decorate('agentSockets', agentSockets);
+  fastify.decorate('agentSocketsV2', agentSocketsV2);
   fastify.decorate('uiSockets', uiSockets);
   fastify.decorate('messagingSockets', messagingSockets);
   fastify.decorate('broadcastToUI', (event: string, data: unknown) => {
@@ -285,6 +288,7 @@ export function setupAgentGateway(fastify: FastifyInstance) {
         if (!p || p.type !== 'auth' || String(p.agent_id || '') !== agentId) return ws.close(1008, 'bad auth');
 
         v2Authed.set(ws, { agentId });
+        agentSocketsV2.set(agentId, ws);
         ws.off('message', onMessage);
         fastify.log.info({ agentId, machineId, ip }, '[agents-v2] WS authenticated');
       } catch {
@@ -295,12 +299,16 @@ export function setupAgentGateway(fastify: FastifyInstance) {
     ws.on('message', onMessage);
     ws.on('close', () => {
       v2Authed.delete(ws);
+      // Remove socket mapping if it still points to this ws
+      for (const [aid, s] of agentSocketsV2) {
+        if (s === ws) agentSocketsV2.delete(aid);
+      }
     });
   });
 
   // Ping/pong keepalive.
   const pingInterval = setInterval(() => {
-    for (const server of [wss, uiWss, messagingWss]) {
+    for (const server of [wss, wssV2, uiWss, messagingWss]) {
       for (const ws of server.clients) {
         const anyWs: any = ws as any;
         if (anyWs.isAlive === false) {

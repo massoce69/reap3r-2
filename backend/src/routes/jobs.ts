@@ -11,6 +11,39 @@ import { createHmac, randomUUID } from 'crypto';
 import { config } from '../config.js';
 import { hydrateJobPayloadForDispatch } from '../services/job-dispatch.service.js';
 
+function toV2JobType(type: string): string {
+  return String(type || '').toLowerCase();
+}
+
+function toV2RunScriptPayload(payloadInput: any) {
+  const interpreter = String(payloadInput?.interpreter || '').toLowerCase();
+  const script = String(payloadInput?.script || '');
+  const timeoutSec = Number(payloadInput?.timeout_sec ?? payloadInput?.timeout_sec ?? 300) || 300;
+  const streamOutput = Boolean(payloadInput?.stream_output);
+  const env = payloadInput?.env && typeof payloadInput.env === 'object' ? payloadInput.env : {};
+  const runAs = typeof payloadInput?.run_as === 'string' ? payloadInput.run_as : undefined;
+
+  // Rust enum ScriptType: PowerShell | Bash | Python
+  let scriptType: string = 'PowerShell';
+  if (interpreter === 'bash' || interpreter === 'sh') scriptType = 'Bash';
+  if (interpreter === 'python') scriptType = 'Python';
+  if (interpreter === 'cmd') {
+    // Best-effort: wrap in PowerShell
+    scriptType = 'PowerShell';
+  }
+
+  return {
+    script_type: scriptType,
+    content: interpreter === 'cmd' ? `cmd /c ${script}` : script,
+    args: [],
+    timeout_secs: Math.max(5, Math.min(3600, Math.trunc(timeoutSec))),
+    run_as: runAs,
+    env,
+    stream_output: streamOutput,
+    signature: null,
+  };
+}
+
 export default async function jobRoutes(fastify: FastifyInstance) {
   // ── List jobs ──
   fastify.get('/api/jobs', { preHandler: [fastify.authenticate, fastify.requirePermission(Permission.JobList)] }, async (request) => {
@@ -125,6 +158,32 @@ export default async function jobRoutes(fastify: FastifyInstance) {
         agentWs.send(JSON.stringify({ ...envelope, sig }));
         await jobService.updateJobStatus(fastify, job.id, 'dispatched');
         fastify.log.info({ job_id: job.id, job_type }, 'Job pushed immediately to agent');
+      }
+
+      // v2 agents (Rust): only run_script is supported for now.
+      // This unblocks File Explorer (download/upload) and screenshot fallback.
+      if ((!agentWs || agentWs.readyState !== 1) && fastify.agentSocketsV2) {
+        const ws2 = fastify.agentSocketsV2.get(agent_id);
+        if (ws2 && ws2.readyState === 1) {
+          const jt = toV2JobType(job_type);
+          if (jt === 'run_script') {
+            const v2Payload = toV2RunScriptPayload(payloadInput);
+            const msg = {
+              type: 'job',
+              job_id: job.id,
+              job_type: 'run_script',
+              payload: v2Payload,
+              timeout_secs: (timeout_sec ?? 300),
+              priority: Number(priority ?? 0) || 0,
+              created_at: new Date(job.created_at).toISOString(),
+            };
+            ws2.send(JSON.stringify(msg));
+            await jobService.updateJobStatus(fastify, job.id, 'dispatched');
+            fastify.log.info({ job_id: job.id, job_type }, 'Job pushed immediately to agent (v2)');
+          } else {
+            fastify.log.warn({ job_id: job.id, job_type }, 'Job type not supported on agent v2 WS (will remain pending)');
+          }
+        }
       }
     } catch (err) {
       fastify.log.warn({ err }, 'Proactive job push failed (will fall back to heartbeat)');
