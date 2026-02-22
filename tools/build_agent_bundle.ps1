@@ -33,11 +33,14 @@ function Resolve-AgentBinary {
 }
 
 $x64 = Resolve-AgentBinary @(
-    "agent\target\x86_64-pc-windows-msvc\release\reap3r-agent.exe",
+    "agent\target\x86_64-pc-windows-msvc\release\massvision-agent.exe",
+    "agent\target\release\massvision-agent.exe",
+    "agent\dist\agent-x64.exe",
     "agent\dist\reap3r-agent-x64.exe"
 )
 $x86 = Resolve-AgentBinary @(
-    "agent\target\i686-pc-windows-msvc\release\reap3r-agent.exe",
+    "agent\target\i686-pc-windows-msvc\release\massvision-agent.exe",
+    "agent\dist\agent-x86.exe",
     "agent\dist\reap3r-agent-x86.exe"
 )
 
@@ -68,6 +71,7 @@ sc.exe delete "Reap3rAgent" | Out-Null
 sc.exe delete "ReaP3rAgent" | Out-Null
 sc.exe delete "xefi-agent-2" | Out-Null
 Remove-Item "$InstallDir\reap3r-agent.exe" -Force
+Remove-Item "$InstallDir\massvision-agent.exe" -Force
 Write-Host "Reap3r Agent uninstalled."
 '@ | Set-Content -Path $uninstallScriptPath -Encoding UTF8
 

@@ -271,12 +271,15 @@ function Deploy-AgentBinaries {
     $x64 = Join-Path $distDir "agent-x64.exe"
     $x86 = Join-Path $distDir "agent-x86.exe"
 
-    if (-not (Test-Path $x64) -or -not (Test-Path $x86)) {
-        Write-Log "agent/dist binaries missing; building locally..." "Warning"
-        & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "agent\build.ps1")
+    if (-not (Test-Path $x64)) {
+        Write-Log "agent/dist x64 binary missing; building locally..." "Warning"
+        & powershell -ExecutionPolicy Bypass -File (Join-Path $PSScriptRoot "agent\build.ps1") -SkipX86
         if ($LASTEXITCODE -ne 0) {
-            throw "Local agent build failed"
+            throw "Local agent build (x64) failed"
         }
+    }
+    if (-not (Test-Path $x86)) {
+        Write-Log "agent/dist x86 binary missing; proceeding without x86 (32-bit Windows installs will 404)" "Warning"
     }
 
     $mkdir = Invoke-SSHCommand @"
@@ -287,7 +290,11 @@ echo "agent_dist_ready"
 "@
     if ($null -eq $mkdir) { throw "Failed to prepare remote agent/dist directory" }
 
-    $scpCmd = "scp -o StrictHostKeyChecking=accept-new -P $VpsPort `"$x64`" `"$x86`" ${VpsUser}@${VpsIP}:`"$AppDir/agent/dist/`""
+    $scpFiles = @()
+    if (Test-Path $x64) { $scpFiles += "`"$x64`"" }
+    if (Test-Path $x86) { $scpFiles += "`"$x86`"" }
+    if ($scpFiles.Count -eq 0) { throw "No agent binaries available to upload" }
+    $scpCmd = "scp -o StrictHostKeyChecking=accept-new -P $VpsPort $($scpFiles -join ' ') ${VpsUser}@${VpsIP}:`"$AppDir/agent/dist/`""
     & cmd.exe /d /s /c $scpCmd 2>&1 | Out-Null
     if ($LASTEXITCODE -ne 0) {
         throw "Failed to upload agent binaries with scp"

@@ -100,22 +100,23 @@ export function resolveBinaryPath(os: AgentOs, arch: AgentArch): { filePath: str
   }
 
   if (os === 'linux' && arch === 'x86_64') {
-    return pickBinary(resolveCandidatePaths('target/release', ['reap3r-agent', 'xefi-agent-2']));
+    return pickBinary(resolveCandidatePaths('target/release', ['massvision-agent', 'reap3r-agent', 'xefi-agent-2']));
   }
 
   if (os === 'linux' && arch === 'aarch64') {
-    return pickBinary(resolveCandidatePaths('target/aarch64-unknown-linux-gnu/release', ['reap3r-agent', 'xefi-agent-2']));
+    return pickBinary(resolveCandidatePaths('target/aarch64-unknown-linux-gnu/release', ['massvision-agent', 'reap3r-agent', 'xefi-agent-2']));
   }
 
   if (os === 'linux' && arch === 'x86') {
-    return pickBinary(resolveCandidatePaths('target/i686-unknown-linux-gnu/release', ['reap3r-agent', 'xefi-agent-2']));
+    return pickBinary(resolveCandidatePaths('target/i686-unknown-linux-gnu/release', ['massvision-agent', 'reap3r-agent', 'xefi-agent-2']));
   }
 
   if (os === 'windows' && arch === 'x86_64') {
     return pickBinary(
       [
         ...resolveCandidatePaths('dist', ['agent-x64.exe', 'reap3r-agent-x64.exe']),
-        ...resolveCandidatePaths('target/x86_64-pc-windows-msvc/release', ['reap3r-agent.exe', 'xefi-agent-2.exe']),
+        ...resolveCandidatePaths('target/x86_64-pc-windows-msvc/release', ['massvision-agent.exe', 'reap3r-agent.exe', 'xefi-agent-2.exe']),
+        ...resolveCandidatePaths('target/release', ['massvision-agent.exe']),
       ],
     );
   }
@@ -124,7 +125,7 @@ export function resolveBinaryPath(os: AgentOs, arch: AgentArch): { filePath: str
     return pickBinary(
       [
         ...resolveCandidatePaths('dist', ['agent-x86.exe', 'reap3r-agent-x86.exe']),
-        ...resolveCandidatePaths('target/i686-pc-windows-msvc/release', ['reap3r-agent.exe', 'xefi-agent-2.exe']),
+        ...resolveCandidatePaths('target/i686-pc-windows-msvc/release', ['massvision-agent.exe', 'reap3r-agent.exe', 'xefi-agent-2.exe']),
       ],
     );
   }
